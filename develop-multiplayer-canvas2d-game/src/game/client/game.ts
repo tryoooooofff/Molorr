@@ -24,16 +24,22 @@ import type { Cell } from "../shared/sim";
 import { createTransport, Transport } from "./transport";
 import {
   button,
+  craftBurst,
+  craftPad,
   drawCard,
   drawFlower,
   drawItemIcon,
   drawMob,
+  dropdownField,
+  dropdownList,
   ease,
   healthBar,
   hit,
   panel,
   Rect,
   roundRect,
+  scrollbar,
+  searchField,
   shade,
   text,
 } from "./ui";
@@ -172,6 +178,20 @@ export class GameClient {
   private craftSpin = 0;
   private craftMsg = "";
   private craftMsgLife = 0;
+  // crafting browser (mirrors the inventory: search bar, biome filter, scrollable 5-wide grid)
+  private craftSearchText = "";
+  private craftSearchActive = false;
+  private craftBiome = "All";
+  private craftBiomeOpen = false;
+  private craftScrollY = 0;
+  private craftDraggingThumb = false;
+  private craftThumbDragStartY = 0;
+  private craftScrollAtDragStart = 0;
+  // craft juice
+  private craftGlow = 0;
+  private craftBurstT = 0;
+  private craftBurstColor = "#ffe763";
+  private craftShake = 0;
 
   private drag: { from: number; cell: Cell } | null = null;
   private dragX = 0;
@@ -510,23 +530,27 @@ export class GameClient {
         this.craftMsg = value > 1
           ? `Crafted ${value}x ${RARITIES[rarity].name} ${ITEMS[item].name}!`
           : `Crafted ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
-        this.craftMsgLife = 2.6;
-        this.craftSpin = 0;
+        this.craftSucceeded(rarity);
         break;
       case EVT.CRAFT_FAIL:
         this.craftMsg = value > 0 ? `Craft failed... ${value} petal${value === 1 ? "" : "s"} lost.` : "Craft failed.";
-        this.craftMsgLife = 2.6;
-        this.craftSpin = 0;
+        this.craftFailed();
         break;
       case EVT.ORACLE_OK:
         this.craftMsg = `Oracle success! Created ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
-        this.craftMsgLife = 3;
-        this.craftSpin = 0;
+        this.craftSucceeded(rarity);
+        break;
+      case EVT.ORACLE_FAIL:
+        this.craftMsg = "Oracle refused — check the requirement and cooldown.";
+        this.craftFailed();
         break;
       case EVT.TRADE_OK:
         this.craftMsg = `Traded for ${value}x ${RARITIES[rarity].name} Coin!`;
-        this.craftMsgLife = 3;
-        this.craftSpin = 0;
+        this.craftSucceeded(rarity);
+        break;
+      case EVT.TRADE_FAIL:
+        this.craftMsg = "Trade refused — check the cooldown.";
+        this.craftFailed();
         break;
       case EVT.DEATH:
         this.alive = false;
@@ -534,6 +558,21 @@ export class GameClient {
         break;
     }
     this.saveDirty = true;
+  }
+
+  /** Shared feedback for every successful craft/oracle/trade: burst + green message. */
+  private craftSucceeded(rarity: number) {
+    this.craftMsgLife = 2.8;
+    this.craftSpin = 0;
+    this.craftBurstT = 1;
+    this.craftBurstColor = RARITIES[rarity]?.color ?? "#ffe763";
+  }
+
+  /** Shared feedback for a refused/failed craft: shake + red message. */
+  private craftFailed() {
+    this.craftMsgLife = 2.6;
+    this.craftSpin = 0;
+    this.craftShake = 0.5;
   }
 
   // ------------------------------------------------------------- main loop
@@ -563,6 +602,9 @@ export class GameClient {
     this.craftAnim += ((this.craftOpen ? 1 : 0) - this.craftAnim) * Math.min(1, dt * 10);
     if (this.craftSpin > 0) this.craftSpin = Math.max(0, this.craftSpin - dt);
     if (this.craftMsgLife > 0) this.craftMsgLife -= dt;
+    if (this.craftBurstT > 0) this.craftBurstT = Math.max(0, this.craftBurstT - dt * 1.6);
+    if (this.craftShake > 0) this.craftShake = Math.max(0, this.craftShake - dt * 2);
+    this.craftGlow += ((this.craftSel ? 1 : 0) - this.craftGlow) * Math.min(1, dt * 8);
 
     for (const e of this.ents.values()) {
       const k = Math.min(1, dt * 16);
@@ -755,47 +797,188 @@ export class GameClient {
   }
 
   private craftPanelRect(): Rect {
-    const w = Math.min(340, this.w * 0.42);
-    const h = 460;
+    const w = Math.min(400, this.w * 0.92);
+    const hotbarH = Math.min(66, this.w / 12);
+    const maxH = this.h - hotbarH - 130;
+    // tall enough for header + tabs + search + one grid row + the whole bottom block
+    const h = Math.min(Math.max(600, this.h - 32), Math.max(470, maxH));
     const t = ease.outCubic(this.craftAnim);
+    // slides in from the right edge, same easing curve the bag uses when it slides up
     const hidden = this.w + 20;
-    const shown = this.w - w - 18;
-    return { x: hidden + (shown - hidden) * t, y: Math.max(50, this.h / 2 - h / 2), w, h };
+    const shown = this.w - w - 16;
+    return { x: hidden + (shown - hidden) * t, y: Math.max(16, this.h - hotbarH - h - 26), w, h };
   }
 
-  private craftModeRects(): { mode: "normal" | "oracle" | "trade"; rect: Rect; label: string }[] {
+  /**
+   * Geometry for the crafting panel. It is laid out exactly like the inventory:
+   * header, search bar + biome dropdown, a scrollable 5-wide card grid, and then
+   * the five big craft slots + action button pinned to the bottom.
+   */
+  private craftLayout() {
     const p = this.craftPanelRect();
+    const cols = 5;
+    const gap = 10;
+    const pad = 15;
+    const slotSize = Math.floor((p.w - pad * 2 - gap * (cols - 1)) / cols);
+    const itemHeight = slotSize + gap;
+    const headerH = 44;
+    const tabsY = p.y + headerH;
+    const tabsH = 30;
+    const barY = tabsY + tabsH + 8;
+    const barH = 28;
+    const dropW = Math.min(120, p.w * 0.3);
+    const barGap = 6;
+    const barW = p.w - dropW - barGap - pad * 2;
+    const barX = p.x + pad;
+    const dropX = barX + barW + barGap;
+
+    // bottom block: 5 big slots -> info lines -> action button.
+    // The slots shrink first when the panel is short, so the grid always keeps a row.
+    const bigGap = 8;
+    const btnH = 48;
+    // room for: item name, count line, result line, cooldown line, result message
+    const infoH = 110;
+    const chromeH = headerH + tabsH + 8 + barH + 12 + itemHeight + 8 + 22 + infoH + btnH + 16;
+    const idealBig = Math.floor((p.w - pad * 2 - bigGap * (cols - 1)) / cols);
+    const bigSize = Math.max(40, Math.min(idealBig, idealBig + (p.h - chromeH - idealBig)));
+    const bottomH = 22 + bigSize + infoH + btnH + 16;
+    const bottomY = p.y + p.h - bottomH;
+    const bigY = bottomY + 22;
+    const bigSlots: Rect[] = new Array(cols)
+      .fill(0)
+      .map((_, i) => ({ x: p.x + pad + i * (bigSize + bigGap), y: bigY, w: bigSize, h: bigSize }));
+    const singleSlot: Rect = { x: p.x + p.w / 2 - bigSize / 2, y: bigY, w: bigSize, h: bigSize };
+
+    const gridTop = barY + barH + 12;
+    const gridH = Math.max(itemHeight, bottomY - 8 - gridTop);
+    const maxVisibleRows = Math.max(1, Math.floor(gridH / itemHeight));
+    const scrollTrack: Rect = { x: p.x + p.w - pad + 2, y: gridTop, w: 6, h: gridH };
+
+    return {
+      panel: p,
+      cols,
+      gap,
+      pad,
+      slotSize,
+      itemHeight,
+      tabsY,
+      tabsH,
+      barRect: { x: barX, y: barY, w: barW, h: barH } as Rect,
+      dropRect: { x: dropX, y: barY, w: dropW, h: barH } as Rect,
+      gridTop,
+      gridH,
+      maxVisibleRows,
+      bigSlots,
+      singleSlot,
+      bigSize,
+      infoY: bigY + bigSize + 16,
+      actionRect: { x: p.x + p.w / 2 - 100, y: p.y + p.h - btnH - 16, w: 200, h: btnH } as Rect,
+      closeRect: { x: p.x + p.w - 34, y: p.y + 10, w: 24, h: 24 } as Rect,
+      scrollTrack,
+    };
+  }
+
+  private craftModeRects(): { mode: "normal" | "oracle" | "trade"; rect: Rect; label: string; color: string }[] {
+    const layout = this.craftLayout();
+    const p = layout.panel;
     const gap = 6;
-    const w = (p.w - 24 - gap * 2) / 3;
-    const y = p.y + 40;
+    const w = (p.w - layout.pad * 2 - gap * 2) / 3;
+    const y = layout.tabsY;
+    const h = layout.tabsH;
     return [
-      { mode: "normal", rect: { x: p.x + 12, y, w, h: 30 }, label: "Craft" },
-      { mode: "oracle", rect: { x: p.x + 12 + w + gap, y, w, h: 30 }, label: "Oracle" },
-      { mode: "trade", rect: { x: p.x + 12 + (w + gap) * 2, y, w, h: 30 }, label: "Trade" },
+      { mode: "normal", rect: { x: p.x + layout.pad, y, w, h }, label: "Craft", color: "#c9762b" },
+      { mode: "oracle", rect: { x: p.x + layout.pad + w + gap, y, w, h }, label: "Oracle", color: "#6a3fb0" },
+      { mode: "trade", rect: { x: p.x + layout.pad + (w + gap) * 2, y, w, h }, label: "Trade", color: "#3f8f5a" },
     ];
   }
 
+  /** The five big slots the selected cards animate into (Craft mode). */
   private craftPadRects(): Rect[] {
-    const p = this.craftPanelRect();
-    const size = 54;
-    const cx = p.x + p.w / 2;
-    const cy = p.y + 195;
-    return new Array(5).fill(0).map((_, i) => {
-      const a = (i / 5) * Math.PI * 2 - Math.PI / 2;
-      return { x: cx + Math.cos(a) * 80 - size / 2, y: cy + Math.sin(a) * 72 - size / 2, w: size, h: size };
-    });
+    return this.craftLayout().bigSlots;
   }
 
   /** Single centered slot used by Oracle/Trade modes (they only ever hold one item type). */
   private craftSingleSlotRect(): Rect {
-    const p = this.craftPanelRect();
-    const size = 64;
-    return { x: p.x + p.w / 2 - size / 2, y: p.y + 165, w: size, h: size };
+    return this.craftLayout().singleSlot;
   }
 
   private craftActionButtonRect(): Rect {
-    const p = this.craftPanelRect();
-    return { x: p.x + p.w / 2 - 90, y: p.y + p.h - 66, w: 180, h: 48 };
+    return this.craftLayout().actionRect;
+  }
+
+  /** Bag stacks that can go into the crafting panel, filtered by search text + biome. */
+  private craftFilteredEntries(): { slot: number; cell: Cell }[] {
+    const query = this.craftSearchText.trim().toLowerCase();
+    const biome = this.craftBiome;
+    return this.bagEntries().filter(({ cell }) => {
+      const def = ITEMS[cell.item];
+      if (!def) return false;
+      if (this.craftMode !== "trade" && def.kind === "trinket") return false;
+      if (query && !def.name.toLowerCase().includes(query)) return false;
+      if (biome !== "All" && !this.itemBiomes(cell.item).has(biome)) return false;
+      return true;
+    });
+  }
+
+  private craftMaxScroll(): number {
+    const layout = this.craftLayout();
+    const totalRows = Math.ceil(this.craftFilteredEntries().length / layout.cols);
+    const totalHeight = totalRows * layout.itemHeight;
+    const visibleHeight = layout.maxVisibleRows * layout.itemHeight;
+    return Math.max(0, totalHeight - visibleHeight);
+  }
+
+  private clampCraftScroll() {
+    this.craftScrollY = Math.max(0, Math.min(this.craftMaxScroll(), this.craftScrollY));
+  }
+
+  private craftScrollThumbRect(layout: ReturnType<GameClient["craftLayout"]>): Rect {
+    const track = layout.scrollTrack;
+    const totalRows = Math.max(1, Math.ceil(this.craftFilteredEntries().length / layout.cols));
+    if (totalRows <= layout.maxVisibleRows) return { x: track.x, y: track.y, w: track.w, h: track.h };
+    const maxScroll = this.craftMaxScroll();
+    const thumbH = Math.max(20, (layout.maxVisibleRows / totalRows) * track.h);
+    const ratio = maxScroll > 0 ? this.craftScrollY / maxScroll : 0;
+    return { x: track.x, y: track.y + ratio * (track.h - thumbH), w: track.w, h: thumbH };
+  }
+
+  private dragCraftThumb(my: number) {
+    const layout = this.craftLayout();
+    const maxScroll = this.craftMaxScroll();
+    if (maxScroll <= 0) {
+      this.craftDraggingThumb = false;
+      return;
+    }
+    const track = layout.scrollTrack;
+    const totalRows = Math.max(1, Math.ceil(this.craftFilteredEntries().length / layout.cols));
+    const thumbH = Math.max(20, (layout.maxVisibleRows / totalRows) * track.h);
+    const maxDrag = track.h - thumbH;
+    if (maxDrag <= 0) return;
+    const ratio = (my - this.craftThumbDragStartY) / maxDrag;
+    this.craftScrollY = Math.max(0, Math.min(maxScroll, this.craftScrollAtDragStart + ratio * maxScroll));
+  }
+
+  /** Card the pointer is over inside the crafting browser grid, or null. */
+  private craftGridEntryAtPoint(x: number, y: number): { slot: number; cell: Cell } | null {
+    const layout = this.craftLayout();
+    const p = layout.panel;
+    if (x < p.x || x > p.x + p.w || y < layout.gridTop || y > layout.gridTop + layout.gridH) return null;
+    this.clampCraftScroll();
+    const filtered = this.craftFilteredEntries();
+    const startRow = Math.floor(this.craftScrollY / layout.itemHeight);
+    const yOffset = -(this.craftScrollY % layout.itemHeight);
+    const relX = x - (p.x + layout.pad);
+    const relY = y - layout.gridTop - yOffset;
+    if (relX < 0 || relY < 0) return null;
+    const col = Math.floor(relX / (layout.slotSize + layout.gap));
+    const row = Math.floor(relY / (layout.slotSize + layout.gap));
+    if (col < 0 || col >= layout.cols || row < 0) return null;
+    const entry = filtered[startRow * layout.cols + row * layout.cols + col];
+    if (!entry) return null;
+    const slotX = p.x + layout.pad + col * (layout.slotSize + layout.gap);
+    const slotY = layout.gridTop + row * layout.itemHeight + yOffset;
+    if (x < slotX || x > slotX + layout.slotSize || y < slotY || y > slotY + layout.slotSize) return null;
+    return entry;
   }
 
   private formatCooldown(msLeft: number): string {
@@ -846,11 +1029,16 @@ export class GameClient {
       this.typeIntoBagSearch(e.key);
       return;
     }
+    if (this.scene === "game" && this.craftOpen && this.craftSearchActive) {
+      e.preventDefault();
+      this.typeIntoCraftSearch(e.key);
+      return;
+    }
     this.keys.add(e.code);
     if (e.code === "Space") e.preventDefault();
     if (this.scene === "game") {
-      if (e.code === "KeyE" || e.code === "KeyI") this.bagOpen = !this.bagOpen;
-      if (e.code === "KeyC") this.craftOpen = !this.craftOpen;
+      if (e.code === "KeyE" || e.code === "KeyI") this.toggleBag();
+      if (e.code === "KeyC") this.toggleCraft();
       if (e.code === "Escape") this.gotoMenu();
     }
   };
@@ -865,6 +1053,14 @@ export class GameClient {
     else if (key.length === 1 && this.bagSearchText.length < 24) this.bagSearchText += key;
     this.bagScrollY = 0;
     this.clampBagScroll();
+  }
+
+  private typeIntoCraftSearch(key: string) {
+    if (key === "Backspace") this.craftSearchText = this.craftSearchText.slice(0, -1);
+    else if (key === "Escape" || key === "Enter") this.craftSearchActive = false;
+    else if (key.length === 1 && this.craftSearchText.length < 24) this.craftSearchText += key;
+    this.craftScrollY = 0;
+    this.clampCraftScroll();
   }
 
   private typeInto(key: string) {
@@ -896,6 +1092,7 @@ export class GameClient {
       this.dragY = p.y;
     }
     if (this.bagDraggingThumb) this.dragBagThumb(p.y);
+    if (this.craftDraggingThumb) this.dragCraftThumb(p.y);
   };
 
   private onPointerDown = (e: PointerEvent) => {
@@ -918,21 +1115,39 @@ export class GameClient {
     }
     this.mouseDown = false;
     this.bagDraggingThumb = false;
+    this.craftDraggingThumb = false;
     if (this.drag) this.dropDrag(this.mx, this.my);
   };
 
   private onWheel = (e: WheelEvent) => {
-    if (this.scene !== "game" || !this.bagOpen || this.bagAnim < 0.4) return;
-    const layout = this.bagLayout();
-    if (!hit(layout.panel, this.mx, this.my)) return;
-    e.preventDefault();
+    if (this.scene !== "game") return;
     // Pixel-accurate scrolling: translate the wheel delta directly into scrollY pixels
     // (with a little extra punch for coarse "line" deltas some browsers/mice report).
-    let amount = e.deltaY;
-    if (e.deltaMode === 1) amount *= 18; // DOM_DELTA_LINE
-    else if (e.deltaMode === 2) amount *= layout.gridH; // DOM_DELTA_PAGE
-    this.bagScrollY += amount;
-    this.clampBagScroll();
+    const scrollAmount = (gridH: number) => {
+      let amount = e.deltaY;
+      if (e.deltaMode === 1) amount *= 18; // DOM_DELTA_LINE
+      else if (e.deltaMode === 2) amount *= gridH; // DOM_DELTA_PAGE
+      return amount;
+    };
+
+    if (this.craftOpen && this.craftAnim >= 0.4) {
+      const layout = this.craftLayout();
+      if (hit(layout.panel, this.mx, this.my)) {
+        e.preventDefault();
+        this.craftScrollY += scrollAmount(layout.gridH);
+        this.clampCraftScroll();
+        return;
+      }
+    }
+
+    if (this.bagOpen && this.bagAnim >= 0.4) {
+      const layout = this.bagLayout();
+      if (hit(layout.panel, this.mx, this.my)) {
+        e.preventDefault();
+        this.bagScrollY += scrollAmount(layout.gridH);
+        this.clampBagScroll();
+      }
+    }
   };
 
   // ------------------------------------------------------------ menu logic
@@ -989,6 +1204,8 @@ export class GameClient {
       this.connected = false;
       this.bagOpen = false;
       this.craftOpen = false;
+      this.craftSearchActive = false;
+      this.craftBiomeOpen = false;
     };
   }
 
@@ -1008,8 +1225,8 @@ export class GameClient {
 
     for (const b of this.hudButtons()) {
       if (!hit(b.rect, mx, my)) continue;
-      if (b.id === "bag") this.bagOpen = !this.bagOpen;
-      if (b.id === "craft") this.craftOpen = !this.craftOpen;
+      if (b.id === "bag") this.toggleBag();
+      if (b.id === "craft") this.toggleCraft();
       if (b.id === "menu") this.gotoMenu();
       return;
     }
@@ -1042,9 +1259,27 @@ export class GameClient {
     }
   }
 
-  private craftCloseRect(): Rect {
-    const p = this.craftPanelRect();
-    return { x: p.x + p.w - 34, y: p.y + 8, w: 24, h: 24 };
+  /** The bag and the craft panel are the same size, so only one is ever open. */
+  private toggleBag() {
+    this.bagOpen = !this.bagOpen;
+    if (this.bagOpen) {
+      this.craftOpen = false;
+      this.craftSearchActive = false;
+      this.craftBiomeOpen = false;
+    }
+  }
+
+  private toggleCraft() {
+    this.craftOpen = !this.craftOpen;
+    if (this.craftOpen) {
+      this.bagOpen = false;
+      this.bagSearchActive = false;
+      this.bagBiomeOpen = false;
+      this.clampCraftScroll();
+    } else {
+      this.craftSearchActive = false;
+      this.craftBiomeOpen = false;
+    }
   }
 
   /** Cooldown remaining (ms) for the given craft mode; 0 if ready or not applicable. */
@@ -1053,85 +1288,159 @@ export class GameClient {
     return Math.max(0, until - Date.now());
   }
 
-  /** Handles clicks that land on the crafting panel's own chrome (tabs/slots/action button). */
+  /** Handles clicks that land on the crafting panel (tabs/search/grid/slots/action button). */
   private handleCraftClick(mx: number, my: number): boolean {
-    const p = this.craftPanelRect();
+    const layout = this.craftLayout();
+    const p = layout.panel;
     if (!hit(p, mx, my)) return false;
 
-    if (hit(this.craftCloseRect(), mx, my)) {
+    if (hit(layout.closeRect, mx, my)) {
       this.craftOpen = false;
       return true;
     }
 
     for (const { mode, rect } of this.craftModeRects()) {
-      if (hit(rect, mx, my)) {
-        if (this.craftMode !== mode) {
-          this.craftMode = mode;
-          this.craftSel = null;
-          this.craftMsg = "";
-        }
-        return true;
+      if (!hit(rect, mx, my)) continue;
+      if (this.craftMode !== mode) {
+        this.craftMode = mode;
+        this.craftSel = null;
+        this.craftMsg = "";
+        this.craftScrollY = 0;
+        this.clampCraftScroll();
       }
+      return true;
     }
 
-    if (this.craftMode === "normal") {
-      for (const r of this.craftPadRects()) {
-        if (hit(r, mx, my) && this.craftSel) {
-          this.craftSel = null;
+    if (hit(layout.barRect, mx, my)) {
+      this.craftSearchActive = true;
+      this.craftBiomeOpen = false;
+      return true;
+    }
+
+    if (hit(layout.dropRect, mx, my)) {
+      this.craftBiomeOpen = !this.craftBiomeOpen;
+      this.craftSearchActive = false;
+      return true;
+    }
+
+    if (this.craftBiomeOpen) {
+      const optH = layout.dropRect.h + 2;
+      const listY = layout.dropRect.y + layout.dropRect.h + 4;
+      for (let i = 0; i < BIOME_LIST.length; i++) {
+        const rect: Rect = { x: layout.dropRect.x + 3, y: listY + 3 + i * optH, w: layout.dropRect.w - 6, h: optH - 2 };
+        if (hit(rect, mx, my)) {
+          this.craftBiome = BIOME_LIST[i];
+          this.craftBiomeOpen = false;
+          this.craftScrollY = 0;
+          this.clampCraftScroll();
           return true;
         }
       }
-      const btn = this.craftActionButtonRect();
-      if (hit(btn, mx, my) && this.craftSel) {
-        const avail = this.countOf(this.craftSel.item, this.craftSel.rarity);
-        if (avail >= 5 && this.craftSel.rarity < MAX_CRAFT_RARITY) {
-          const w = new Writer(6);
-          w.u8(C2S.CRAFT).u8(this.craftSel.item).u8(this.craftSel.rarity).u16(0);
-          this.net?.send(w.bytes());
-          this.craftSpin = 0.8;
-        }
-      }
+      this.craftBiomeOpen = false;
       return true;
+    }
+
+    if (this.craftMaxScroll() > 0) {
+      const thumb = this.craftScrollThumbRect(layout);
+      if (hit(thumb, mx, my)) {
+        this.craftDraggingThumb = true;
+        this.craftThumbDragStartY = my;
+        this.craftScrollAtDragStart = this.craftScrollY;
+        return true;
+      }
+      if (hit(layout.scrollTrack, mx, my)) {
+        const maxScroll = this.craftMaxScroll();
+        const ratio = (my - layout.scrollTrack.y) / layout.scrollTrack.h;
+        this.craftScrollY = Math.max(0, Math.min(maxScroll, ratio * maxScroll));
+        return true;
+      }
+    }
+
+    this.craftSearchActive = false;
+
+    // click a card in the browser grid to load it into the craft slots (drag still works too)
+    const entry = this.craftGridEntryAtPoint(mx, my);
+    if (entry) {
+      this.selectCraftCell(entry.cell);
+      return true;
+    }
+
+    // clicking the big slots clears the selection
+    const slots = this.craftMode === "normal" ? this.craftPadRects() : [this.craftSingleSlotRect()];
+    for (const r of slots) {
+      if (hit(r, mx, my) && this.craftSel) {
+        this.craftSel = null;
+        this.craftMsg = "";
+        return true;
+      }
+    }
+
+    if (hit(layout.actionRect, mx, my)) this.submitCraft();
+    return true;
+  }
+
+  /** Puts a bag cell into the craft slots, with a little pop of feedback. */
+  private selectCraftCell(cell: Cell) {
+    if (this.craftMode !== "trade" && ITEMS[cell.item]?.kind === "trinket") {
+      this.craftMsg = "Coins can only be traded.";
+      this.craftMsgLife = 2;
+      return;
+    }
+    this.craftSel = { item: cell.item, rarity: cell.rarity };
+    this.craftMsg = "";
+    this.craftGlow = 1;
+  }
+
+  /** Fires the current mode's request if the selection satisfies its requirements. */
+  private submitCraft() {
+    const sel = this.craftSel;
+    if (!sel) {
+      this.craftMsg = "Pick a card first.";
+      this.craftMsgLife = 2;
+      this.craftShake = 0.35;
+      return;
+    }
+    const avail = this.countOf(sel.item, sel.rarity);
+
+    if (this.craftMode === "normal") {
+      if (avail < 5 || sel.rarity >= MAX_CRAFT_RARITY) {
+        this.craftMsg = avail < 5 ? "Need 5 identical cards." : "Already at max craftable rarity.";
+        this.craftMsgLife = 2;
+        this.craftShake = 0.35;
+        return;
+      }
+      const w = new Writer(6);
+      w.u8(C2S.CRAFT).u8(sel.item).u8(sel.rarity).u16(0);
+      this.net?.send(w.bytes());
+      this.craftSpin = 0.8;
+      return;
     }
 
     if (this.craftMode === "oracle") {
-      if (hit(this.craftSingleSlotRect(), mx, my) && this.craftSel) {
-        this.craftSel = null;
-        return true;
+      const required = oracleRequiredCount(sel.rarity);
+      if (required === undefined || avail < required || this.craftCooldownLeft("oracle") > 0) {
+        this.craftMsg = required === undefined ? "Cannot Oracle this rarity." : avail < required ? `Need ${required} cards.` : "Oracle is on cooldown.";
+        this.craftMsgLife = 2;
+        this.craftShake = 0.35;
+        return;
       }
-      const btn = this.craftActionButtonRect();
-      if (hit(btn, mx, my) && this.craftSel) {
-        const required = oracleRequiredCount(this.craftSel.rarity);
-        const avail = this.countOf(this.craftSel.item, this.craftSel.rarity);
-        if (required !== undefined && avail >= required && this.craftCooldownLeft("oracle") <= 0) {
-          const w = new Writer(4);
-          w.u8(C2S.ORACLE).u8(this.craftSel.item).u8(this.craftSel.rarity);
-          this.net?.send(w.bytes());
-          this.craftSpin = 0.8;
-        }
-      }
-      return true;
+      const w = new Writer(4);
+      w.u8(C2S.ORACLE).u8(sel.item).u8(sel.rarity);
+      this.net?.send(w.bytes());
+      this.craftSpin = 0.8;
+      return;
     }
 
-    if (this.craftMode === "trade") {
-      if (hit(this.craftSingleSlotRect(), mx, my) && this.craftSel) {
-        this.craftSel = null;
-        return true;
-      }
-      const btn = this.craftActionButtonRect();
-      if (hit(btn, mx, my) && this.craftSel) {
-        const avail = this.countOf(this.craftSel.item, this.craftSel.rarity);
-        if (avail >= 1 && this.craftCooldownLeft("trade") <= 0) {
-          const w = new Writer(6);
-          w.u8(C2S.TRADE).u8(this.craftSel.item).u8(this.craftSel.rarity).u16(0);
-          this.net?.send(w.bytes());
-          this.craftSpin = 0.8;
-        }
-      }
-      return true;
+    if (avail < 1 || this.craftCooldownLeft("trade") > 0) {
+      this.craftMsg = avail < 1 ? "Nothing to trade." : "Trade is on cooldown.";
+      this.craftMsgLife = 2;
+      this.craftShake = 0.35;
+      return;
     }
-
-    return true;
+    const w = new Writer(6);
+    w.u8(C2S.TRADE).u8(sel.item).u8(sel.rarity).u16(0);
+    this.net?.send(w.bytes());
+    this.craftSpin = 0.8;
   }
 
   /** Handles clicks that land on the bag's own chrome (close/search/biome/scrollbar). */
@@ -1237,10 +1546,7 @@ export class GameClient {
     this.drag = null;
     if (!drag) return;
     if (this.craftAnim > 0.4 && hit(this.craftPanelRect(), mx, my)) {
-      if (ITEMS[drag.cell.item].kind !== "trinket") {
-        this.craftSel = { item: drag.cell.item, rarity: drag.cell.rarity };
-        this.craftMsg = "";
-      }
+      this.selectCraftCell(drag.cell);
       return;
     }
     const target = this.cellIndexAtPoint(mx, my);
@@ -1615,8 +1921,10 @@ export class GameClient {
     button(ctx, layout.closeRect, "x", "#e53232", hit(layout.closeRect, this.mx, this.my), 15);
 
     // search bar + biome dropdown
-    this.drawBagSearchBar(ctx, layout.barX, layout.barY, layout.barW, layout.barH);
-    this.drawBagBiomeDropdown(ctx, layout.dropX, layout.barY, layout.dropW, layout.barH);
+    const barRect: Rect = { x: layout.barX, y: layout.barY, w: layout.barW, h: layout.barH };
+    const dropRect: Rect = { x: layout.dropX, y: layout.barY, w: layout.dropW, h: layout.barH };
+    searchField(ctx, barRect, this.bagSearchText, this.bagSearchActive);
+    dropdownField(ctx, dropRect, this.bagBiome, this.bagBiomeOpen);
 
     // clipped, pixel-scrolled item grid
     ctx.save();
@@ -1658,14 +1966,7 @@ export class GameClient {
     // scrollbar
     const totalRows = Math.max(1, Math.ceil(filtered.length / layout.cols));
     if (totalRows > layout.maxVisibleRows) {
-      const track = layout.scrollTrack;
-      roundRect(ctx, track.x, track.y, track.w, track.h, 3);
-      ctx.fillStyle = "rgba(20,30,45,0.25)";
-      ctx.fill();
-      const thumb = this.bagScrollThumbRect(layout);
-      roundRect(ctx, thumb.x, thumb.y, thumb.w, thumb.h, 3);
-      ctx.fillStyle = this.bagDraggingThumb ? "rgba(20,30,45,0.85)" : "rgba(20,30,45,0.6)";
-      ctx.fill();
+      scrollbar(ctx, layout.scrollTrack, this.bagScrollThumbRect(layout), this.bagDraggingThumb);
     }
 
     // rarity summary panel
@@ -1676,86 +1977,9 @@ export class GameClient {
       this.tooltip((hoveredEntry as { slot: number; cell: Cell }).cell, this.mx + 14, this.my - 10);
     }
 
-    if (this.bagBiomeOpen) {
-      this.drawBagBiomeDropdown(ctx, layout.dropX, layout.barY, layout.dropW, layout.barH);
-    }
+    if (this.bagBiomeOpen) dropdownList(ctx, dropRect, BIOME_LIST, this.bagBiome, this.mx, this.my);
 
     ctx.restore();
-  }
-
-  private drawBagSearchBar(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
-    ctx.save();
-    ctx.fillStyle = this.bagSearchActive ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.65)";
-    ctx.fillRect(x, y, w, h);
-    ctx.strokeStyle = "#000000";
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(x, y, w, h);
-
-    const display = this.bagSearchText || "";
-    const showPlaceholder = display === "" && !this.bagSearchActive;
-    ctx.font = `${Math.round(h * 0.46)}px "Trebuchet MS", sans-serif`;
-    ctx.textAlign = "left";
-    ctx.textBaseline = "middle";
-    ctx.fillStyle = showPlaceholder ? "#444444" : "#000000";
-    ctx.fillText(showPlaceholder ? "Search..." : display, x + 10, y + h / 2);
-
-    if (this.bagSearchActive && Math.floor(Date.now() / 530) % 2 === 0) {
-      const tw = ctx.measureText(display).width;
-      ctx.fillStyle = "#000000";
-      ctx.fillRect(x + 10 + tw + 1, y + 6, 2, h - 12);
-    }
-    ctx.restore();
-  }
-
-  private drawBagBiomeDropdown(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
-    ctx.save();
-    ctx.fillStyle = "rgba(255,255,255,0.65)";
-    ctx.fillRect(x, y, w, h);
-    ctx.strokeStyle = "#000000";
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(x, y, w, h);
-
-    ctx.font = `${Math.round(h * 0.42)}px "Trebuchet MS", sans-serif`;
-    ctx.textBaseline = "middle";
-    ctx.textAlign = "left";
-    ctx.fillStyle = "#444444";
-    const label = this.bagBiome.length > 10 ? this.bagBiome.slice(0, 9) + "…" : this.bagBiome;
-    ctx.fillText(label, x + 10, y + h / 2);
-    ctx.textAlign = "right";
-    ctx.fillStyle = "rgba(0,0,0,0.8)";
-    ctx.fillText(this.bagBiomeOpen ? "▲" : "▼", x + w - 10, y + h / 2);
-    ctx.restore();
-
-    if (!this.bagBiomeOpen) return;
-
-    const optH = h + 2;
-    const listY = y + h + 4;
-    const listH = optH * BIOME_LIST.length + 6;
-    ctx.save();
-    ctx.fillStyle = "rgba(16,22,30,0.94)";
-    ctx.fillRect(x, listY, w, listH);
-    ctx.strokeStyle = "rgba(255,255,255,0.1)";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(x, listY, w, listH);
-    ctx.restore();
-
-    BIOME_LIST.forEach((biome, i) => {
-      const oy = listY + 3 + i * optH;
-      const rect: Rect = { x: x + 3, y: oy, w: w - 6, h: optH - 2 };
-      const hovered = hit(rect, this.mx, this.my);
-      const selected = biome === this.bagBiome;
-      ctx.save();
-      if (selected || hovered) {
-        ctx.fillStyle = selected ? "rgba(85,170,255,0.25)" : "rgba(255,255,255,0.06)";
-        ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
-      }
-      ctx.font = `${Math.round(optH * 0.44)}px sans-serif`;
-      ctx.textAlign = "left";
-      ctx.textBaseline = "middle";
-      ctx.fillStyle = selected ? "#55aaff" : "rgba(255,255,255,0.85)";
-      ctx.fillText(biome, rect.x + 10, rect.y + rect.h / 2);
-      ctx.restore();
-    });
   }
 
   private bagRarityStats(): { count: number; color: string; name: string }[] {
@@ -1837,139 +2061,297 @@ export class GameClient {
     text(ctx, def.desc, px + 12, py + 104, 12, "rgba(255,255,255,0.7)", "left");
   }
 
+  /**
+   * Crafting panel. Same shell as the inventory: header + tabs, search bar with
+   * biome dropdown, scrollable 5-wide card grid, and the five big craft slots
+   * pinned along the bottom. Everything animates (slide-in, hover pop, spin,
+   * success burst, failure shake) and is painted in the panel's blue palette.
+   */
   private renderCraft() {
     if (this.craftAnim < 0.01) return;
     const ctx = this.ctx;
-    const p = this.craftPanelRect();
+    const layout = this.craftLayout();
+    const p = layout.panel;
+    this.clampCraftScroll();
+
+    const accent = this.craftAccent();
+    const shakeX = this.craftShake > 0 ? Math.sin(this.time * 60) * this.craftShake * 7 : 0;
+
     ctx.save();
     ctx.globalAlpha = Math.min(1, this.craftAnim * 1.3);
-    panel(ctx, p);
+    ctx.translate(shakeX, 0);
 
-    text(ctx, "Crafting", p.x + p.w / 2, p.y + 20, 20, "#ffbe5c");
-    button(ctx, this.craftCloseRect(), "x", "#c0392b", hit(this.craftCloseRect(), this.mx, this.my), 13);
+    // panel body — blue card + dark border, exactly like the inventory
+    roundRect(ctx, p.x, p.y, p.w, p.h, 10);
+    ctx.fillStyle = "#5aa0db";
+    ctx.fill();
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = "#3f7dc2";
+    ctx.stroke();
 
-    for (const { mode, rect, label } of this.craftModeRects()) {
+    text(ctx, "Crafting", p.x + p.w / 2, p.y + 24, 20, "#ffffff");
+    button(ctx, layout.closeRect, "x", "#e53232", hit(layout.closeRect, this.mx, this.my), 15);
+
+    // mode tabs
+    for (const { mode, rect, label, color } of this.craftModeRects()) {
       const active = this.craftMode === mode;
-      const color = mode === "normal" ? "#c9762b" : mode === "oracle" ? "#6a3fb0" : "#3f8f5a";
-      button(ctx, rect, label, active ? color : "#3a3a3a", hit(rect, this.mx, this.my), 13);
+      button(ctx, rect, label, active ? color : "#3f7dc2", hit(rect, this.mx, this.my), 14);
     }
 
-    if (this.craftMode === "normal") this.renderCraftNormal(ctx, p);
-    else this.renderCraftOracleOrTrade(ctx, p, this.craftMode);
+    // search + biome filter
+    searchField(ctx, layout.barRect, this.craftSearchText, this.craftSearchActive, "Search cards...");
+    dropdownField(ctx, layout.dropRect, this.craftBiome, this.craftBiomeOpen);
 
+    // scrollable browser grid
+    const hovered = this.renderCraftGrid(ctx, layout);
+
+    // five big slots + mode-specific readout
+    if (this.craftMode === "normal") this.renderCraftSlots(ctx, layout);
+    else this.renderCraftSingle(ctx, layout, this.craftMode);
+
+    // action button
+    const btn = layout.actionRect;
+    const label = this.craftActionLabel();
+    button(ctx, btn, label.text, accent, hit(btn, this.mx, this.my), 18, label.enabled);
+
+    // transient result message, right above the button
     if (this.craftMsgLife > 0) {
       ctx.save();
       ctx.globalAlpha = Math.min(1, this.craftMsgLife);
-      const bad = this.craftMsg.toLowerCase().includes("fail") || this.craftMsg.toLowerCase().includes("cooldown");
-      text(ctx, this.craftMsg, p.x + p.w / 2, p.y + p.h - 96, 13, bad ? "#ff9d9d" : "#8fffa8");
+      const bad = /fail|cooldown|need|cannot|refused|nothing|first|max/i.test(this.craftMsg);
+      text(ctx, this.craftMsg, p.x + p.w / 2, btn.y - 12, 13, bad ? "#ffbcbc" : "#c9ffd6");
       ctx.restore();
     }
+
+    // success burst over the slot row
+    if (this.craftBurstT > 0) {
+      const focus = this.craftMode === "normal" ? layout.bigSlots[2] : layout.singleSlot;
+      craftBurst(ctx, focus.x + focus.w / 2, focus.y + focus.h / 2, this.craftBurstT, this.craftBurstColor);
+    }
+
+    if (hovered) this.tooltip(hovered.cell, this.mx + 14, this.my - 10);
+    if (this.craftBiomeOpen) dropdownList(ctx, layout.dropRect, BIOME_LIST, this.craftBiome, this.mx, this.my);
 
     ctx.restore();
   }
 
-  private renderCraftNormal(ctx: CanvasRenderingContext2D, p: Rect) {
-    text(ctx, "Drag a card here — 5 combine into 1", p.x + p.w / 2, p.y + 82, 12, "rgba(255,255,255,0.75)");
+  /** Draws the clipped, pixel-scrolled card browser; returns the hovered entry (for the tooltip). */
+  private renderCraftGrid(
+    ctx: CanvasRenderingContext2D,
+    layout: ReturnType<GameClient["craftLayout"]>,
+  ): { slot: number; cell: Cell } | null {
+    const p = layout.panel;
+    const filtered = this.craftFilteredEntries();
 
-    const pads = this.craftPadRects();
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(p.x + 2, layout.gridTop, p.w - 4, layout.gridH);
+    ctx.clip();
+
+    const startRow = Math.floor(this.craftScrollY / layout.itemHeight);
+    const yOffset = -(this.craftScrollY % layout.itemHeight);
+    const startIdx = startRow * layout.cols;
+    const visible = filtered.slice(startIdx, startIdx + (layout.maxVisibleRows + 2) * layout.cols);
+
+    let hoveredEntry: { slot: number; cell: Cell } | null = null;
+    const sel = this.craftSel;
+
+    visible.forEach((entry, i) => {
+      const row = Math.floor(i / layout.cols);
+      const col = i % layout.cols;
+      const r: Rect = {
+        x: p.x + layout.pad + col * (layout.slotSize + layout.gap),
+        y: layout.gridTop + row * layout.itemHeight + yOffset,
+        w: layout.slotSize,
+        h: layout.slotSize,
+      };
+      if (r.y + r.h < layout.gridTop || r.y > layout.gridTop + layout.gridH) return;
+      const isHovered = hit(r, this.mx, this.my) && !this.drag;
+      if (isHovered) hoveredEntry = entry;
+      const picked = !!sel && sel.item === entry.cell.item && sel.rarity === entry.cell.rarity;
+      // hovered cards pop, the picked stack stays slightly raised
+      const scale = isHovered ? 1.07 : picked ? 1.03 : 1;
+      drawCard(ctx, r, entry.cell, { hovered: isHovered || picked, scale, dim: picked ? 1 : 0.94 });
+      if (picked) {
+        ctx.save();
+        ctx.globalAlpha = 0.6 + Math.sin(this.time * 6) * 0.3;
+        roundRect(ctx, r.x - 2, r.y - 2, r.w + 4, r.h + 4, 9);
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "#ffe763";
+        ctx.stroke();
+        ctx.restore();
+      }
+    });
+
+    ctx.restore();
+
+    if (filtered.length === 0) {
+      text(
+        ctx,
+        this.craftSearchText || this.craftBiome !== "All" ? "No cards match the filter" : "Bag is empty",
+        p.x + p.w / 2,
+        layout.gridTop + layout.gridH / 2,
+        14,
+        "rgba(255,255,255,0.75)",
+      );
+    }
+
+    const totalRows = Math.max(1, Math.ceil(filtered.length / layout.cols));
+    if (totalRows > layout.maxVisibleRows) {
+      scrollbar(ctx, layout.scrollTrack, this.craftScrollThumbRect(layout), this.craftDraggingThumb);
+    }
+
+    return hoveredEntry;
+  }
+
+  /** Craft mode: 5 big slots in a row, filled left to right as you own enough copies. */
+  private renderCraftSlots(ctx: CanvasRenderingContext2D, layout: ReturnType<GameClient["craftLayout"]>) {
+    const p = layout.panel;
     const sel = this.craftSel;
     const avail = sel ? this.countOf(sel.item, sel.rarity) : 0;
-    const spin = this.craftSpin > 0 ? (0.8 - this.craftSpin) * 14 : 0;
     const attempts = Math.floor(avail / 5);
-    pads.forEach((r, i) => {
-      const filled = sel && avail >= i + 1;
-      ctx.save();
-      if (this.craftSpin > 0) {
-        const cx = p.x + p.w / 2;
-        const cy = p.y + 195;
-        ctx.translate(cx, cy);
-        ctx.rotate(spin);
-        ctx.translate(-cx, -cy);
+    const spin = this.craftSpin > 0 ? ease.inOutCubic(1 - this.craftSpin / 0.8) * Math.PI * 2 : 0;
+
+    text(ctx, "5 identical cards combine into 1 of the next rarity", p.x + p.w / 2, layout.bigSlots[0].y - 12, 12, "rgba(255,255,255,0.85)");
+
+    layout.bigSlots.forEach((r, i) => {
+      const filled = !!sel && avail >= i + 1;
+      craftPad(ctx, r, filled ? this.craftGlow : 0, this.time + i * 0.4);
+      if (!filled) {
+        text(ctx, "+", r.x + r.w / 2, r.y + r.h / 2, Math.max(14, r.h * 0.4), "rgba(255,255,255,0.4)");
+        return;
       }
-      drawCard(ctx, r, filled && sel ? { item: sel.item, rarity: sel.rarity, count: 1 } : null, {
-        empty: "+",
+      ctx.save();
+      // each card spins in place while a craft resolves, staggered around the row
+      if (this.craftSpin > 0) {
+        ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
+        ctx.rotate(spin + i * 0.25);
+        ctx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2));
+      }
+      const bob = Math.sin(this.time * 3 + i * 0.7) * 1.5;
+      drawCard(ctx, { ...r, y: r.y + bob }, { item: sel!.item, rarity: sel!.rarity, count: 1 }, {
         showName: false,
+        scale: this.craftSpin > 0 ? 1.06 : 1,
       });
       ctx.restore();
     });
 
-    if (sel) {
-      const def = ITEMS[sel.item];
-      const chance = craftChanceFor(sel.rarity);
-      text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, p.x + p.w / 2, p.y + 295, 17, RARITIES[sel.rarity].color);
-      text(ctx, `You have ${avail} (${attempts} attempt${attempts === 1 ? "" : "s"})`, p.x + p.w / 2, p.y + 317, 13, avail >= 5 ? "#8fffa8" : "#ff9d9d");
-      if (sel.rarity < MAX_CRAFT_RARITY && chance !== undefined) {
-        const next = sel.rarity + 1;
-        text(ctx, `→ ${RARITIES[next].name} (${(chance * 100).toFixed(2)}% each)`, p.x + p.w / 2, p.y + 337, 13, RARITIES[next].color);
-      } else {
-        text(ctx, "Already at max craftable rarity", p.x + p.w / 2, p.y + 337, 13, "rgba(255,255,255,0.6)");
-      }
-    } else {
-      text(ctx, "no petal selected", p.x + p.w / 2, p.y + 305, 14, "rgba(255,255,255,0.6)");
+    const y = layout.infoY;
+    if (!sel) {
+      text(ctx, "Click or drag a card from the list above", p.x + p.w / 2, y + 10, 14, "rgba(255,255,255,0.8)");
+      return;
     }
-
-    const btn = this.craftActionButtonRect();
-    const canCraft = !!sel && avail >= 5 && sel.rarity < MAX_CRAFT_RARITY;
-    button(ctx, btn, attempts > 1 ? `CRAFT x${attempts}` : "CRAFT", "#c9762b", hit(btn, this.mx, this.my), 18, canCraft);
-  }
-
-  private renderCraftOracleOrTrade(ctx: CanvasRenderingContext2D, p: Rect, mode: "oracle" | "trade") {
-    const isOracle = mode === "oracle";
+    const def = ITEMS[sel.item];
+    const chance = craftChanceFor(sel.rarity);
+    text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, p.x + p.w / 2, y, 16, RARITIES[sel.rarity].color);
     text(
       ctx,
-      isOracle ? "Drag a card here — skip 2 rarities at once" : "Drag a card here — exchange for Coins",
+      `You have ${avail} · ${attempts} attempt${attempts === 1 ? "" : "s"}`,
       p.x + p.w / 2,
-      p.y + 82,
-      12,
-      "rgba(255,255,255,0.75)",
+      y + 20,
+      13,
+      avail >= 5 ? "#c9ffd6" : "#ffbcbc",
     );
+    if (sel.rarity < MAX_CRAFT_RARITY && chance !== undefined) {
+      const next = sel.rarity + 1;
+      text(ctx, `→ ${RARITIES[next].name} (${(chance * 100).toFixed(2)}% each)`, p.x + p.w / 2, y + 40, 13, RARITIES[next].color);
+    } else {
+      text(ctx, "Already at max craftable rarity", p.x + p.w / 2, y + 40, 13, "rgba(255,255,255,0.75)");
+    }
+  }
 
-    const r = this.craftSingleSlotRect();
+  /** Oracle / Trade modes: one centered slot plus the cooldown readout. */
+  private renderCraftSingle(
+    ctx: CanvasRenderingContext2D,
+    layout: ReturnType<GameClient["craftLayout"]>,
+    mode: "oracle" | "trade",
+  ) {
+    const p = layout.panel;
+    const isOracle = mode === "oracle";
     const sel = this.craftSel;
     const avail = sel ? this.countOf(sel.item, sel.rarity) : 0;
-    drawCard(ctx, r, sel ? { item: sel.item, rarity: sel.rarity, count: avail } : null, {
-      empty: "+",
-      showName: false,
-    });
+    const r = layout.singleSlot;
+
+    text(
+      ctx,
+      isOracle ? "Skip 2 rarities at once — guaranteed" : "Exchange cards for Coins",
+      p.x + p.w / 2,
+      r.y - 12,
+      12,
+      "rgba(255,255,255,0.85)",
+    );
+
+    craftPad(ctx, r, sel ? this.craftGlow : 0, this.time);
+    if (sel) {
+      ctx.save();
+      if (this.craftSpin > 0) {
+        const cx = r.x + r.w / 2;
+        const cy = r.y + r.h / 2;
+        ctx.translate(cx, cy);
+        ctx.rotate(ease.inOutCubic(1 - this.craftSpin / 0.8) * Math.PI * 2);
+        ctx.translate(-cx, -cy);
+      }
+      drawCard(ctx, r, { item: sel.item, rarity: sel.rarity, count: avail }, { showName: false });
+      ctx.restore();
+    } else {
+      text(ctx, "+", r.x + r.w / 2, r.y + r.h / 2, Math.max(14, r.h * 0.4), "rgba(255,255,255,0.4)");
+    }
 
     const cooldownMs = this.craftCooldownLeft(mode);
     const ready = cooldownMs <= 0;
+    const y = layout.infoY;
 
     if (sel) {
       const def = ITEMS[sel.item];
-      text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, p.x + p.w / 2, p.y + 250, 16, RARITIES[sel.rarity].color);
-
+      text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, p.x + p.w / 2, y, 16, RARITIES[sel.rarity].color);
       if (isOracle) {
         const required = oracleRequiredCount(sel.rarity);
         if (required === undefined) {
-          text(ctx, "Cannot Oracle this rarity", p.x + p.w / 2, p.y + 272, 13, "#ff9d9d");
+          text(ctx, "Cannot Oracle this rarity", p.x + p.w / 2, y + 20, 13, "#ffbcbc");
         } else {
-          text(ctx, `Need ${required} — have ${avail}`, p.x + p.w / 2, p.y + 272, 13, avail >= required ? "#8fffa8" : "#ff9d9d");
+          text(ctx, `Need ${required} — have ${avail}`, p.x + p.w / 2, y + 20, 13, avail >= required ? "#c9ffd6" : "#ffbcbc");
           const target = sel.rarity + 2;
           if (target < RARITIES.length) {
-            text(ctx, `→ ${RARITIES[target].name} ${def.name} (guaranteed)`, p.x + p.w / 2, p.y + 292, 13, RARITIES[target].color);
+            text(ctx, `→ ${RARITIES[target].name} ${def.name}`, p.x + p.w / 2, y + 40, 13, RARITIES[target].color);
           }
         }
       } else {
-        text(ctx, `${avail} card${avail === 1 ? "" : "s"} → ${avail} Coin${avail === 1 ? "" : "s"}`, p.x + p.w / 2, p.y + 272, 13, "#ffd54a");
+        text(ctx, `${avail} card${avail === 1 ? "" : "s"} → ${avail} Coin${avail === 1 ? "" : "s"}`, p.x + p.w / 2, y + 20, 13, "#ffd54a");
       }
     } else {
-      text(ctx, "no card selected", p.x + p.w / 2, p.y + 262, 14, "rgba(255,255,255,0.6)");
+      text(ctx, "Click or drag a card from the list above", p.x + p.w / 2, y + 10, 14, "rgba(255,255,255,0.8)");
     }
 
     text(
       ctx,
       `${isOracle ? "Oracle" : "Trade"} cooldown: ${ready ? "Ready" : this.formatCooldown(cooldownMs)}`,
       p.x + p.w / 2,
-      p.y + p.h - 118,
+      y + 60,
       12,
-      ready ? "#8fffa8" : "#ffd54a",
+      ready ? "#c9ffd6" : "#ffd54a",
     );
+  }
 
-    const btn = this.craftActionButtonRect();
-    const required = isOracle ? oracleRequiredCount(sel?.rarity ?? 0) : 1;
-    const canAct = !!sel && ready && required !== undefined && avail >= required;
-    button(ctx, btn, isOracle ? "ORACLE" : "TRADE", isOracle ? "#6a3fb0" : "#3f8f5a", hit(btn, this.mx, this.my), 18, canAct);
+  /** Accent color of the active mode — used by the tabs and the action button. */
+  private craftAccent(): string {
+    return this.craftMode === "normal" ? "#c9762b" : this.craftMode === "oracle" ? "#6a3fb0" : "#3f8f5a";
+  }
+
+  /** Text + enabled state of the action button for the current mode/selection. */
+  private craftActionLabel(): { text: string; enabled: boolean } {
+    const sel = this.craftSel;
+    const avail = sel ? this.countOf(sel.item, sel.rarity) : 0;
+    if (this.craftMode === "normal") {
+      const attempts = Math.floor(avail / 5);
+      const enabled = !!sel && avail >= 5 && sel.rarity < MAX_CRAFT_RARITY;
+      return { text: attempts > 1 ? `CRAFT x${attempts}` : "CRAFT", enabled };
+    }
+    if (this.craftMode === "oracle") {
+      const required = sel ? oracleRequiredCount(sel.rarity) : undefined;
+      const enabled = !!sel && required !== undefined && avail >= required && this.craftCooldownLeft("oracle") <= 0;
+      return { text: "ORACLE", enabled };
+    }
+    return { text: "TRADE", enabled: !!sel && avail >= 1 && this.craftCooldownLeft("trade") <= 0 };
   }
 
   private renderDeath() {
