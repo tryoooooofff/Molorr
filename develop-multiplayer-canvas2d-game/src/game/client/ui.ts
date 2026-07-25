@@ -570,6 +570,124 @@ export function drawItemIcon(
       ctx.stroke();
       break;
     }
+    case 21: { // Starfish — a rounded coral triangle with three pale dots
+      const cT = (
+        p1: { x: number; y: number },
+        p2: { x: number; y: number },
+        p3: { x: number; y: number },
+        r: number,
+      ) => {
+        ctx.beginPath();
+        ctx.moveTo((p3.x + p1.x) / 2, (p3.y + p1.y) / 2);
+        ctx.arcTo(p1.x, p1.y, p2.x, p2.y, r);
+        ctx.arcTo(p2.x, p2.y, p3.x, p3.y, r);
+        ctx.arcTo(p3.x, p3.y, p1.x, p1.y, r);
+        ctx.closePath();
+      };
+      const k = size / 55;
+      ctx.save();
+      ctx.scale(k, k);
+      // Cancels the shape's centroid drift after rotation so the triangle
+      // stays centered in the icon cell instead of sliding toward a corner.
+      ctx.translate(4.4, 8.3);
+      ctx.rotate((-28 * Math.PI) / 180);
+      const pts = [
+        { x: 0, y: -70 },
+        { x: 15, y: 21 },
+        { x: -15, y: 21 },
+      ];
+      cT(pts[0], pts[1], pts[2], 7);
+      ctx.fillStyle = "#be615d";
+      ctx.fill();
+      ctx.strokeStyle = "#a6514e";
+      ctx.lineWidth = 4;
+      ctx.lineJoin = "round";
+      ctx.stroke();
+      ctx.fillStyle = "#cf8982";
+      [
+        { y: 10, r: 5.5 },
+        { y: -4, r: 4 },
+        { y: -16, r: 2.5 },
+      ].forEach((c) => {
+        ctx.beginPath();
+        ctx.arc(0, c.y, c.r, 0, Math.PI * 2);
+        ctx.fill();
+      });
+      ctx.restore();
+      break;
+    }
+    case 32: { // Glass — a jagged, translucent crystal shard
+      const jitterA = [0.05, -0.08, 0.04, -0.06, 0.07, -0.03];
+      const jitterR = [1.0, 0.82, 1.05, 0.88, 1.0, 0.86];
+      const sides = jitterA.length;
+      const R = size * 0.95;
+      ctx.beginPath();
+      for (let i = 0; i < sides; i++) {
+        const a = (i * 2 * Math.PI) / sides + jitterA[i];
+        const r = R * jitterR[i];
+        const px = r * Math.cos(a);
+        const py = r * Math.sin(a);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fillStyle = "rgba(235,235,235,0.6)";
+      ctx.fill();
+      ctx.lineWidth = Math.max(2, size * 0.18);
+      ctx.strokeStyle = "rgba(225,225,225,0.9)";
+      ctx.lineJoin = "round";
+      ctx.stroke();
+      break;
+    }
+    case 33: { // Bone — a rounded dog-bone silhouette
+      const drawBonePath = (c: CanvasRenderingContext2D) => {
+        const r = 15, s = 13, l = 40, w = 2, d = 8;
+        c.beginPath();
+        c.arc(s, -l, r, -Math.PI * 0.7, Math.PI * 0.2);
+        c.quadraticCurveTo(w, 0, s + r * Math.cos(Math.PI * 0.2), l - r * Math.sin(Math.PI * 0.2));
+        c.arc(s, l, r, -Math.PI * 0.2, Math.PI * 0.7);
+        c.quadraticCurveTo(0, l - d, -s + r * Math.cos(Math.PI * 0.3), l + r * Math.sin(Math.PI * 0.3));
+        c.arc(-s, l, r, Math.PI * 0.3, Math.PI * 1.2);
+        c.quadraticCurveTo(-w, 0, -s - r * Math.cos(Math.PI * 0.2), -l + r * Math.sin(Math.PI * 0.2));
+        c.arc(-s, -l, r, Math.PI * 0.8, Math.PI * 1.7);
+        c.quadraticCurveTo(0, -l + d, s + r * Math.cos(-Math.PI * 0.7), -l + r * Math.sin(-Math.PI * 0.7));
+        c.closePath();
+      };
+      const k = size / 55;
+      ctx.save();
+      ctx.scale(k, k);
+      ctx.rotate((45 * Math.PI) / 180);
+      ctx.fillStyle = "#eef5f8";
+      drawBonePath(ctx);
+      ctx.fill();
+      ctx.strokeStyle = "#c6d5dd";
+      ctx.lineWidth = 8;
+      ctx.lineJoin = ctx.lineCap = "round";
+      drawBonePath(ctx);
+      ctx.stroke();
+      ctx.restore();
+      break;
+    }
+    case 35: { // Pincer — a curved claw blade
+      const k = size / 32;
+      ctx.save();
+      ctx.scale(k, k);
+      // Shifts the claw's drawing-space coordinates so it's centered on (0,0).
+      ctx.translate(-92, -93);
+      ctx.beginPath();
+      ctx.moveTo(68, 76);
+      ctx.quadraticCurveTo(120, 30, 116, 125);
+      ctx.quadraticCurveTo(100, 72, 68, 76);
+      ctx.closePath();
+      ctx.fillStyle = "#2c353d";
+      ctx.lineWidth = 8;
+      ctx.strokeStyle = "#222222";
+      ctx.lineJoin = "round";
+      ctx.stroke();
+      ctx.fill();
+      ctx.restore();
+      break;
+    }
     case 7: { // Wing
       ctx.beginPath();
       ctx.moveTo(-size * 0.75, -size * 1.0);
@@ -1812,60 +1930,35 @@ export function drawDefaultSkin(
   ctx.save();
   ctx.translate(x, y);
 
-  // 2. Eyes — florr.io style: two tall black rounded rectangles, no white
-  // highlight. They shift slightly toward the cursor, and the eyelids/brows
-  // express the attack (spread) and defend (contract) moods.
+  // 2. Eyes — plain black eye socket with a white pupil that shifts toward
+  // the cursor, clipped inside the eye's ellipse.
   const eyePositions = [
-    { x: -7, y: -3.5, isLeft: true },
-    { x: 7, y: -3.5, isLeft: false },
+    { x: -7, y: -5 },
+    { x: 7, y: -5 },
   ];
 
-  // Gaze offset, clamped so the pupils never leave the face.
-  const lookX = Math.cos(angleToMouse) * 1.6;
-  const lookY = Math.sin(angleToMouse) * 1.6;
-
-  const EYE_W = 6.2;
-  const EYE_H = 12.5;
+  const pOffX = Math.cos(angleToMouse) * 2;
+  const pOffY = Math.sin(angleToMouse) * 2;
 
   eyePositions.forEach((eye) => {
     ctx.save();
 
-    const ex = eye.x + lookX;
-    const ey = eye.y + lookY;
-
-    // Squint a bit while defending, widen slightly while attacking.
-    const h = EYE_H * (1 - wContract * 0.42 + wSpread * 0.06);
-
+    // 绘制黑色眼眶
     ctx.beginPath();
-    // Rounded-rectangle pupil (the classic florr.io eye).
-    const rr = EYE_W / 2;
-    ctx.moveTo(ex - EYE_W / 2, ey - h / 2 + rr);
-    ctx.arcTo(ex - EYE_W / 2, ey - h / 2, ex - EYE_W / 2 + rr, ey - h / 2, rr);
-    ctx.lineTo(ex + EYE_W / 2 - rr, ey - h / 2);
-    ctx.arcTo(ex + EYE_W / 2, ey - h / 2, ex + EYE_W / 2, ey - h / 2 + rr, rr);
-    ctx.lineTo(ex + EYE_W / 2, ey + h / 2 - rr);
-    ctx.arcTo(ex + EYE_W / 2, ey + h / 2, ex + EYE_W / 2 - rr, ey + h / 2, rr);
-    ctx.lineTo(ex - EYE_W / 2 + rr, ey + h / 2);
-    ctx.arcTo(ex - EYE_W / 2, ey + h / 2, ex - EYE_W / 2, ey + h / 2 - rr, rr);
-    ctx.closePath();
+    ctx.ellipse(eye.x, eye.y, 2.2, 6, 0, 0, Math.PI * 2);
     ctx.fillStyle = "#000000";
     ctx.fill();
 
-    // Angry brows while attacking: a filled wedge cutting into the eye's top
-    // inner corner, drawn in the face color so it reads as an eyelid.
-    if (wSpread > 0.05) {
-      ctx.save();
-      ctx.globalAlpha = wSpread;
-      ctx.fillStyle = player.hurt && player.hurt > 0 ? "#ff9d9d" : "#F6E476";
-      ctx.beginPath();
-      const dir = eye.isLeft ? 1 : -1;
-      ctx.moveTo(ex - (dir * EYE_W) / 2 - dir * 1, ey - h / 2 - 1);
-      ctx.lineTo(ex + (dir * EYE_W) / 2 + dir * 1, ey - h / 2 - 1);
-      ctx.lineTo(ex + (dir * EYE_W) / 2 + dir * 1, ey - h / 2 + h * 0.5);
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
-    }
+    // 设置裁剪区域
+    ctx.beginPath();
+    ctx.ellipse(eye.x, eye.y, 2.2, 6, 0, 0, Math.PI * 2);
+    ctx.clip();
+
+    // 瞳孔
+    ctx.fillStyle = "#FFFFFF";
+    ctx.beginPath();
+    ctx.arc(eye.x + pOffX, eye.y + pOffY, 2.5, 0, Math.PI * 2);
+    ctx.fill();
 
     ctx.restore();
   });

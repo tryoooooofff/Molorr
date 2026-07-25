@@ -38,6 +38,9 @@ export interface Cell {
   count: number;
 }
 
+/** Player hit-radius / body size. Scaled to 70% of the original 26px. */
+export const PLAYER_RADIUS = 26 * 0.7;
+
 interface PetalState {
   id: number;
   alive: boolean;
@@ -660,7 +663,7 @@ export class GameServer {
     p.y += p.vy * dt;
     p.x = clamp(p.x, 20, map.width - 20);
     p.y = clamp(p.y, 20, map.height - 20);
-    const [cx, cy] = collideWalls(map.walls, p.x, p.y, 26);
+    const [cx, cy] = collideWalls(map.walls, p.x, p.y, PLAYER_RADIUS);
     p.x = cx;
     p.y = cy;
 
@@ -670,8 +673,8 @@ export class GameServer {
       const dx = p.x - o.x;
       const dy = p.y - o.y;
       const d = Math.hypot(dx, dy);
-      if (d < 52 && d > 0.001) {
-        const push = (52 - d) * 0.5;
+      if (d < PLAYER_RADIUS * 2 && d > 0.001) {
+        const push = (PLAYER_RADIUS * 2 - d) * 0.5;
         p.x += (dx / d) * push;
         p.y += (dy / d) * push;
       }
@@ -885,8 +888,8 @@ export class GameServer {
       if (!mob.friendly) {
         for (const p of here) {
           const d = Math.hypot(p.x - mob.x, p.y - mob.y);
-          if (d < mob.radius + 26) {
-            const push = (mob.radius + 26 - d) * 0.5;
+          if (d < mob.radius + PLAYER_RADIUS) {
+            const push = (mob.radius + PLAYER_RADIUS - d) * 0.5;
             const ux = (p.x - mob.x) / (d || 1);
             const uy = (p.y - mob.y) / (d || 1);
             p.x += ux * push;
@@ -1050,7 +1053,7 @@ export class GameServer {
         .i16(Math.round(op.x))
         .i16(Math.round(op.y))
         .u16(Math.round(((op.baseAngle % (Math.PI * 2)) / (Math.PI * 2)) * 65535))
-        .u8(26)
+        .u8(Math.round(PLAYER_RADIUS))
         .u8(Math.round((op.hp / op.maxHp) * 255))
         .str(op.name);
       count++;
