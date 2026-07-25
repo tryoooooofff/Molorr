@@ -225,6 +225,8 @@ export class GameClient {
   private craftShowTimer = 0; // seconds the result card is shown
   private craftShowDuration = 3.0; // seconds before auto-clearing the result card (result card stays)
   private craftPending: { item: number; rarity: number; count: number } | null = null;
+  /** Cards optimistically reserved from bag when placed in craft slots. */
+  private craftReserved: { item: number; rarity: number; count: number } | null = null;
   // Slot-fill animation when a card lands (grow + spin) - smooth cubic ease-out
   private craftFillActive = false;
   private craftFillElapsed = 0; // ms, 0..320
@@ -1155,6 +1157,7 @@ export class GameClient {
     this.craftResultPulse = 0;
     this.craftPending = result;
     this.craftSel = null;
+    this.craftReserved = null;
     this.craftSpawnSuccessParticles(this.rarityRgb(result.rarity), Math.min(50 * Math.max(1, result.count), 1600));
   }
 
@@ -1188,6 +1191,7 @@ export class GameClient {
       this.craftPhase = "none";
     }
     this.craftSel = null;
+    this.craftReserved = null;
   }
 
   /** Per-frame update for the rotation phase machine, fill animation and particles.
@@ -1212,11 +1216,7 @@ export class GameClient {
     } else if (this.craftPhase === "showing") {
       this.craftShowTimer += dt;
       this.craftResultPulse += dt * 4;
-      if (this.craftShowTimer >= this.craftShowDuration) {
-        this.craftPhase = "none";
-        this.craftPending = null;
-        this.craftResultPulse = 0;
-      }
+      // Result card stays until player clicks it (handled in handleCraftClick)
     }
 
     if (this.craftFillActive) {
@@ -1661,6 +1661,7 @@ export class GameClient {
       if (this.craftMode !== mode) {
         this.craftMode = mode;
         this.craftSel = null;
+        this.craftReserved = null;
         this.craftMsg = "";
         this.craftScrollY = 0;
         this.clampCraftScroll();
@@ -1727,7 +1728,19 @@ export class GameClient {
     for (const r of slots) {
       if (hit(r, mx, my) && this.craftSel) {
         this.craftSel = null;
+        this.craftReserved = null;
         this.craftMsg = "";
+        return true;
+      }
+    }
+
+    // click result card to dismiss it (item already added to bag by server)
+    if (this.craftPhase === "showing" && this.craftPending) {
+      const rr = layout.resultRect;
+      if (hit(rr, mx, my)) {
+        this.craftPhase = "none";
+        this.craftPending = null;
+        this.craftResultPulse = 0;
         return true;
       }
     }
@@ -1744,6 +1757,15 @@ export class GameClient {
       return;
     }
     this.craftSel = { item: cell.item, rarity: cell.rarity };
+    // optimistic reservation from bag so the count drops immediately
+    if (this.craftMode === "normal") {
+      this.craftReserved = { item: cell.item, rarity: cell.rarity, count: 5 };
+    } else if (this.craftMode === "oracle") {
+      const req = oracleRequiredCount(cell.rarity) ?? 0;
+      this.craftReserved = { item: cell.item, rarity: cell.rarity, count: req };
+    } else {
+      this.craftReserved = { item: cell.item, rarity: cell.rarity, count: 1 };
+    }
     this.craftMsg = "";
     this.craftGlow = 1;
     this.craftStartFill();
@@ -1905,7 +1927,10 @@ export class GameClient {
   private countOf(item: number, rarity: number) {
     let n = 0;
     for (const c of this.bag) if (c && c.item === item && c.rarity === rarity) n += c.count;
-    return n;
+    if (this.craftReserved && this.craftReserved.item === item && this.craftReserved.rarity === rarity) {
+      n -= this.craftReserved.count;
+    }
+    return Math.max(0, n);
   }
 
   private dropDrag(mx: number, my: number) {
@@ -2555,7 +2580,7 @@ export class GameClient {
     const rr = (layout as any).resultRect as Rect;
     const rarity = this.craftPending.rarity;
     const color = this.rarityRgb(rarity);
-    const pulse = 1 + Math.sin(this.time * 6) * 0.06 + this.craftResultPulse * 0.08;
+    const pulse = 1 + Math.sin(this.time * 6) * 0.04; // small pulse, no endless growth
 
     ctx.save();
     // glow behind
@@ -2590,6 +2615,8 @@ export class GameClient {
     if (this.craftPending.count > 1) {
       text(ctx, `x${this.craftPending.count}`, layout.cx, rr.y + rr.h + 14, 13, "#ffffff");
     }
+    // Click-to-collect hint
+    text(ctx, "Click to collect", layout.cx, rr.y + rr.h + 30, 11, "rgba(255,255,255,0.65)");
   }
 
   /** Draws the clipped, pixel-scrolled matrix card browser — one item per row,
@@ -2708,7 +2735,7 @@ export class GameClient {
       const cy = layout.cy + px * Math.sin(rad) + py * Math.cos(rad);
       const r: Rect = { x: cx - baseRect.w / 2, y: cy - baseRect.h / 2, w: baseRect.w, h: baseRect.h };
 
-      const filled = !!sel && avail >= i + 1 && this.craftPhase !== "showing";
+      const filled = !!sel && avail >= i + 1; // draw petals in slots even during result showing
       // Slot background always drawn (CraftAnimation drawSlots behavior)
       ctx.save();
       roundRect(ctx, r.x, r.y, r.w, r.h, 8);
