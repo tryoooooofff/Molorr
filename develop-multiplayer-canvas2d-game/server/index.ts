@@ -19,7 +19,9 @@ import { GameServer } from "../src/game/shared/sim";
 import { TICK_MS } from "../src/game/shared/defs";
 
 const PORT = Number(process.env.PORT || 8080);
-const game = new GameServer();
+const MAX_PLAYERS = Number(process.env.GAME_MAX_PLAYERS || 8);
+const MOB_CAP_SCALE = Number(process.env.GAME_MOB_CAP_SCALE || 0.5);
+const game = new GameServer({ mobCapScale: MOB_CAP_SCALE });
 let nextClientId = 1;
 
 const httpServer = http.createServer((req, res) => {
@@ -35,6 +37,10 @@ const httpServer = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server: httpServer });
 
 wss.on("connection", (socket: WebSocket) => {
+  if (game.playerCount() >= MAX_PLAYERS) {
+    socket.close(1013, "server full");
+    return;
+  }
   const id = nextClientId++;
   socket.binaryType = "arraybuffer";
   game.addClient(id, (data: Uint8Array) => {
@@ -68,5 +74,7 @@ setInterval(() => {
 }, TICK_MS);
 
 httpServer.listen(PORT, () => {
-  console.log(`[petalia] game server listening on :${PORT}`);
+  console.log(
+    `[petalia] game server listening on :${PORT} | maxPlayers=${MAX_PLAYERS} | mobCapScale=${MOB_CAP_SCALE}`,
+  );
 });
