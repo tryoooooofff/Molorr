@@ -81,7 +81,21 @@ export function oracleRequiredCount(rarity: number): number | undefined {
 }
 
 
-export type ItemKind = "petal" | "summon" | "trinket";
+/**
+ * "dna" is reserved: no DNA item ships in ITEMS yet, but the summon rarity
+ * roll (see `getSummonRarityWithDna` in sim.ts) already understands them, so
+ * adding one here is all that's needed to turn the mechanic on.
+ */
+export type ItemKind = "petal" | "summon" | "trinket" | "dna";
+
+/**
+ * Kinds that orbit the player in a hotbar slot and can be broken/reloaded.
+ * Trinkets are inert cargo; everything else spins around the flower — summons
+ * included, since they sit in the ring whenever they aren't reloading.
+ */
+export function orbitsAsPetal(kind: ItemKind): boolean {
+  return kind !== "trinket";
+}
 
 export interface ItemDef {
   id: number;
@@ -104,6 +118,11 @@ export interface ItemDef {
    * 0.002 because it should be effectively impossible at any non-Omega mob.
    */
   dropFactor?: number;
+  /**
+   * Summons only. When true the hatched mob keeps the egg's own rarity instead
+   * of being mapped one tier down by `mapRarityToSummonRarity`.
+   */
+  noDowngrade?: boolean;
   desc: string;
 }
 
@@ -465,24 +484,137 @@ export function getDropRarityByItem(itemType: number, mobRarity: string): string
   return fallbackRarity;
 }
 
+// ------------------------------------------------------------------ summons
+
 /**
- * Returns the number of pets summoned by a summon item.
+ * Item id of the Clover petal. Clovers boost the DNA upgrade chance when a
+ * summon rolls its hatch rarity.
  */
-export function getSummonCount(itemId: number): number {
-  switch (itemId) {
-    case 8:  return 1; // Ladybug Egg (described as cactus egg:1 in prompt?)
-    case 9:  return 2; // Stick (summons 2 sandstorms)
-    case 12: return 3; // Soldier Ant Egg
-    case 14: return 4; // Worker Ant Egg
-    case 15: return 1; // Rock Egg
-    case 20: return 1; // Bee Egg
-    case 23: return 3; // Starfish Egg
-    case 26: return 2; // Jellyfish Egg
-    case 29: return 1; // Crab Egg
-    case 34: return 1; // Beetle Egg
-    case 37: return 2; // Scorpion Egg
-    default: return 1;
+export const CLOVER_ITEM = 11;
+
+/**
+ * Base chance that a summon backed by a valid DNA petal hatches one rarity
+ * tier above its mapped rarity.
+ */
+export const DNA_UPGRADE_BASE_CHANCE = 0.01;
+
+/**
+ * Absolute DNA-upgrade chance added by ONE equipped clover, indexed by the
+ * clover's rarity (Common .. Unique). A Common clover is worth +0.1% and an
+ * Eternal one +1.2%, so clover luck tops out just above the 1% DNA base rate.
+ */
+export const CLOVER_DNA_UPGRADE_BONUS: number[] = [
+  0.001, // Common    +0.1%
+  0.002, // Unusual   +0.2%
+  0.003, // Rare      +0.3%
+  0.004, // Epic      +0.4%
+  0.005, // Legendary +0.5%
+  0.006, // Mythic    +0.6%
+  0.007, // Ultra     +0.7%
+  0.008, // Super     +0.8%
+  0.010, // Omega     +1.0%
+  0.012, // Eternal   +1.2%
+  0.012, // Unique (sits outside the craft ladder; matches Eternal)
+];
+
+/**
+ * A summon's hatched mob is normally one rarity tier *below* the egg itself
+ * (Common eggs still hatch Common). Eggs flagged `noDowngrade` skip this.
+ */
+export function mapRarityToSummonRarity(rarity: number): number {
+  return Math.max(0, Math.min(MAX_RARITY, rarity) - 1);
+}
+
+/**
+ * Total DNA-upgrade chance contributed by clover petals. Each equipped clover
+ * adds its own `CLOVER_DNA_UPGRADE_BONUS` entry, so a stack of high-tier
+ * clovers is worth meaningfully more luck.
+ */
+export function cloverDnaBonus(cloverRarities: number[]): number {
+  let bonus = 0;
+  for (const rarity of cloverRarities) {
+    const tier = Math.max(0, Math.min(MAX_RARITY, rarity));
+    bonus += CLOVER_DNA_UPGRADE_BONUS[tier] ?? 0;
   }
+  return bonus;
+}
+
+// -------------------------------------------------------------------- drops
+
+/**
+ * Hard cap on simultaneously-lying drops per map. When the cap is hit the
+ * oldest `DROP_TRIM_COUNT` cards are dropped so fresh loot always has a home.
+ */
+export const MAX_DROPPED_CARDS = 220;
+/** How many of the oldest drops are discarded when `MAX_DROPPED_CARDS` is hit. */
+export const DROP_TRIM_COUNT = 5;
+/** Distance under which two same item+rarity drops merge into one stacked card. */
+export const DROP_STACK_RADIUS = 34;
+/** Highest count a single dropped card can accumulate through stacking. */
+export const DROP_STACK_MAX = 99;
+
+/**
+ * "Magic" upgrades: a base item id -> its magic counterpart id. A magic item
+ * can only drop while a Magic Core sits in the player's hotbar, and the Core's
+ * rarity caps (never raises) the magic drop's rarity.
+ *
+ * No Magic Core / magic items ship yet, so this map is intentionally empty —
+ * filling it in is all that's needed to switch the mechanic on.
+ */
+export const MAGIC_ITEM_MAP: Record<number, number> = {};
+
+/** Item id of the Magic Core, or -1 while no such item exists in ITEMS. */
+export const MAGIC_CORE_ITEM = -1;
+
+/**
+ * Per-summon spawn configuration.
+ *
+ * This is the data-table version of the old `createSpawnMethod(cfg)` factory:
+ * instead of generating a bespoke trySpawnX/_cleanDeadX/updateX trio per egg,
+ * the single generic summon loop in sim.ts reads its numbers from here. Adding
+ * a new egg is one row, no new code — which is what keeps this manageable once
+ * there are dozens of mobs.
+ */
+export interface SummonCfg {
+  /** How many pets this summon keeps alive at once. */
+  maxCount: number;
+  /** How many pets hatch per reload cycle (batch spawn). Defaults to 1. */
+  spawnCount?: number;
+  /** Seconds of spawn invulnerability, so a fresh pet isn't instantly deleted. */
+  spawnProtection?: number;
+}
+
+export const SUMMON_CFG: Record<number, SummonCfg> = {
+  8:  { maxCount: 1 },                                  // Ladybug Egg
+  9:  { maxCount: 2, spawnCount: 2 },                   // Stick — whips up both sandstorms at once
+  12: { maxCount: 3 },                                  // Soldier Ant Egg
+  14: { maxCount: 4, spawnCount: 2 },                   // Worker Ant Egg — ants come in pairs
+  15: { maxCount: 1, spawnProtection: 1.5 },            // Rock Egg — slow, needs a moment
+  20: { maxCount: 1 },                                  // Bee Egg
+  23: { maxCount: 3 },                                  // Starfish Egg
+  26: { maxCount: 2 },                                  // Jellyfish Egg
+  29: { maxCount: 1 },                                  // Crab Egg
+  34: { maxCount: 1, spawnProtection: 1.5 },            // Beetle Egg
+  37: { maxCount: 2 },                                  // Scorpion Egg
+};
+
+/** Default seconds of post-spawn invulnerability for a freshly hatched pet. */
+export const DEFAULT_SPAWN_PROTECTION = 1.0;
+
+/** Returns the number of pets summoned by a summon item. */
+export function getSummonCount(itemId: number): number {
+  return SUMMON_CFG[itemId]?.maxCount ?? 1;
+}
+
+/** How many pets one reload cycle of this summon hatches at once. */
+export function getSummonBatch(itemId: number): number {
+  const cfg = SUMMON_CFG[itemId];
+  return Math.max(1, Math.min(cfg?.spawnCount ?? 1, cfg?.maxCount ?? 1));
+}
+
+/** Seconds of spawn protection granted to a pet hatched by this summon. */
+export function getSpawnProtection(itemId: number): number {
+  return SUMMON_CFG[itemId]?.spawnProtection ?? DEFAULT_SPAWN_PROTECTION;
 }
 
 export const EMPTY_ITEM = 255;
