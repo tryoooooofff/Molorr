@@ -33,6 +33,18 @@ export function getStingerPetalCount(rarity: number): number {
   return 1;
 }
 
+/**
+ * 获取物品的固定花瓣数量（覆盖稀有度规则）
+ * 返回 -1 表示使用稀有度规则
+ */
+export function getFixedPetalCount(itemId: number): number {
+  if (itemId === 0) return 1;      // Basic - 永远 1 个
+  if (itemId === 6) return 1;      // Pearl - 永远 1 个
+  if (itemId === 5) return 1;      // Bubble - 永远 1 个
+  if (itemId === 4) return 4;      // Sand - 永远 4 个
+  return -1;
+}
+
 // ============================================
 // 基础绘图工具
 // ============================================
@@ -144,10 +156,6 @@ export function panel(ctx: CanvasRenderingContext2D, r: Rect, fill = "rgba(28,36
 // UI 组件
 // ============================================
 
-/**
- * Flat white input box used by every searchable panel (inventory + crafting).
- * Draws the placeholder, the typed text and a blinking caret while focused.
- */
 export function searchField(
   ctx: CanvasRenderingContext2D,
   r: Rect,
@@ -177,7 +185,6 @@ export function searchField(
   ctx.restore();
 }
 
-/** Closed state of the biome picker that sits next to a search field. */
 export function dropdownField(ctx: CanvasRenderingContext2D, r: Rect, label: string, open: boolean) {
   ctx.save();
   ctx.fillStyle = "rgba(255,255,255,0.65)";
@@ -196,7 +203,6 @@ export function dropdownField(ctx: CanvasRenderingContext2D, r: Rect, label: str
   ctx.restore();
 }
 
-/** Open option list of a dropdown. `optionRect` must match the click hit-test in game.ts. */
 export function dropdownList(
   ctx: CanvasRenderingContext2D,
   r: Rect,
@@ -234,7 +240,6 @@ export function dropdownList(
   });
 }
 
-/** Vertical scrollbar shared by the inventory grid and the crafting grid. */
 export function scrollbar(ctx: CanvasRenderingContext2D, track: Rect, thumb: Rect, dragging: boolean) {
   roundRect(ctx, track.x, track.y, track.w, track.h, 3);
   ctx.fillStyle = "rgba(20,30,45,0.25)";
@@ -244,7 +249,6 @@ export function scrollbar(ctx: CanvasRenderingContext2D, track: Rect, thumb: Rec
   ctx.fill();
 }
 
-/** Big empty crafting pad: dashed socket with a soft glow when it is filled/ready. */
 export function craftPad(ctx: CanvasRenderingContext2D, r: Rect, glow: number, pulse: number) {
   ctx.save();
   roundRect(ctx, r.x, r.y, r.w, r.h, 10);
@@ -265,7 +269,6 @@ export function craftPad(ctx: CanvasRenderingContext2D, r: Rect, glow: number, p
   ctx.restore();
 }
 
-/** One-shot success burst drawn over the craft slots. `t` goes 1 -> 0. */
 export function craftBurst(ctx: CanvasRenderingContext2D, x: number, y: number, t: number, color: string) {
   if (t <= 0) return;
   const p = 1 - t;
@@ -289,10 +292,325 @@ export function craftBurst(ctx: CanvasRenderingContext2D, x: number, y: number, 
 }
 
 // ============================================
-// 核心绘制函数 - drawItemIcon (支持稀有度)
+// 独立的图标绘制函数
 // ============================================
 
-/** Draw the artwork of an item (petal or summon). */
+/** Basic/Light - 圆形花瓣簇 (根据稀有度变化数量) */
+function drawBasicIcon(
+  ctx: CanvasRenderingContext2D,
+  size: number,
+  color: string,
+  outline: string,
+  rarity: number,
+) {
+  const count = getLightPetalCount(rarity);
+  const cx = 0;
+  const cy = 0;
+  const orbit = size * 0.5;
+  const radius = size * 0.4;
+
+  for (let i = 0; i < count; i++) {
+    const a = (i * Math.PI / (count / 2)) - Math.PI / 2;
+    const x = cx + orbit * Math.cos(a);
+    const y = cy + orbit * Math.sin(a);
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = outline;
+    ctx.lineWidth = Math.max(2, size * 0.12);
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+  }
+}
+
+/** Leaf - 叶子形状 */
+function drawLeafIcon(
+  ctx: CanvasRenderingContext2D,
+  size: number,
+  color: string,
+  outline: string,
+) {
+  const s = size;
+
+  ctx.beginPath();
+  ctx.moveTo(0, s * 0.45);
+  ctx.quadraticCurveTo(-s * 0.45, 0, 0, -s * 0.45);
+  ctx.quadraticCurveTo(s * 0.45, 0, 0, s * 0.45);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.lineWidth = Math.max(2, size * 0.08);
+  ctx.strokeStyle = outline;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(0, -s * 0.3);
+  ctx.quadraticCurveTo(s * 0.1, -s * 0.05, 0, s * 0.2);
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = "rgba(0,0,0,0.2)";
+  ctx.lineWidth = Math.max(1, size * 0.05);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(0, s * 0.45);
+  ctx.lineTo(0, s * 0.7);
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = Math.max(2, size * 0.06);
+  ctx.stroke();
+}
+
+/** Stinger - 三角形簇 (根据稀有度变化数量) */
+function drawStingerIcon(
+  ctx: CanvasRenderingContext2D,
+  size: number,
+  color: string,
+  outline: string,
+  rarity: number,
+) {
+  const count = getStingerPetalCount(rarity);
+  const cx = 0;
+  const cy = 0;
+
+  for (let i = 0; i < count; i++) {
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate((i * 2 * Math.PI / count) - Math.PI / 2);
+    ctx.beginPath();
+    ctx.moveTo(0, size * 0.15);
+    ctx.lineTo(-size * 0.25, size * 0.55);
+    ctx.lineTo(size * 0.25, size * 0.55);
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.strokeStyle = outline;
+    ctx.lineWidth = Math.max(2, size * 0.08);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+/** Rock - 五边形 */
+function drawRockIcon(
+  ctx: CanvasRenderingContext2D,
+  size: number,
+  color: string,
+  outline: string,
+) {
+  ctx.beginPath();
+  for (let i = 0; i < 5; i++) {
+    const a = (i * 2 * Math.PI / 5) - Math.PI / 2;
+    const r = size * 0.55;
+    if (i === 0) ctx.moveTo(r * Math.cos(a), r * Math.sin(a));
+    else ctx.lineTo(r * Math.cos(a), r * Math.sin(a));
+  }
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = Math.max(2, size * 0.08);
+  ctx.stroke();
+}
+
+/** Sand - 六边形簇 (固定4个) */
+function drawSandIcon(
+  ctx: CanvasRenderingContext2D,
+  size: number,
+  color: string,
+  outline: string,
+) {
+  const cx = 0;
+  const cy = 0;
+  const r = size * 0.3;
+  const offset = size * 0.45;
+
+  drawHexagon(ctx, cx - offset, cy - offset, r, false, color, outline);
+  drawHexagon(ctx, cx + offset, cy - offset, r, false, color, outline);
+  drawHexagon(ctx, cx - offset, cy + offset, r, true, color, outline);
+  drawHexagon(ctx, cx + offset, cy + offset, r, true, color, outline);
+}
+
+function drawHexagon(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  r: number,
+  rotated: boolean,
+  color: string,
+  outline: string,
+) {
+  ctx.save();
+  ctx.translate(x, y);
+  if (rotated) ctx.rotate(Math.PI / 6);
+  ctx.beginPath();
+  for (let i = 0; i < 6; i++) {
+    const a = i * Math.PI / 3;
+    if (i === 0) ctx.moveTo(r * Math.cos(a), r * Math.sin(a));
+    else ctx.lineTo(r * Math.cos(a), r * Math.sin(a));
+  }
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = Math.max(2, r * 0.15);
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** Bubble - 圆形带光泽 (单个) */
+function drawBubbleIcon(
+  ctx: CanvasRenderingContext2D,
+  size: number,
+  color: string,
+  outline: string,
+) {
+  ctx.beginPath();
+  ctx.arc(0, 0, size * 0.45, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = Math.max(2, size * 0.08);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(-size * 0.15, -size * 0.2, size * 0.2, size * 0.12, -0.5, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(255,255,255,0.4)";
+  ctx.fill();
+}
+
+/** Pearl - 圆形带光泽和阴影 (单个) */
+function drawPearlIcon(
+  ctx: CanvasRenderingContext2D,
+  size: number,
+  color: string,
+  outline: string,
+) {
+  ctx.beginPath();
+  ctx.arc(0, 0, size * 0.4, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = Math.max(2, size * 0.08);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(-size * 0.12, -size * 0.15, size * 0.2, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(255,255,255,0.5)";
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(size * 0.1, size * 0.15, size * 0.15, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(0,0,0,0.1)";
+  ctx.fill();
+}
+
+/** Wing - 翅膀形状 */
+function drawWingIcon(
+  ctx: CanvasRenderingContext2D,
+  size: number,
+  color: string,
+  outline: string,
+) {
+  const s = size;
+  ctx.beginPath();
+  ctx.moveTo(0, -s * 0.35);
+  ctx.quadraticCurveTo(s * 0.3, 0, 0, s * 0.35);
+  ctx.quadraticCurveTo(s * 0.55, 0, 0, -s * 0.35);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = Math.max(2, size * 0.08);
+  ctx.lineJoin = 'round';
+  ctx.stroke();
+}
+
+/** Egg - 蛋形 */
+function drawEggIcon(
+  ctx: CanvasRenderingContext2D,
+  size: number,
+  color: string,
+  outline: string,
+) {
+  ctx.beginPath();
+  ctx.ellipse(0, -size * 0.02, size * 0.35, size * 0.5, 0, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = Math.max(2, size * 0.08);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.ellipse(-size * 0.1, -size * 0.15, size * 0.1, size * 0.15, -0.3, 0, Math.PI * 2);
+  ctx.fillStyle = "rgba(255,255,255,0.3)";
+  ctx.fill();
+}
+
+/** Stick - 树枝形状 */
+function drawStickIcon(
+  ctx: CanvasRenderingContext2D,
+  size: number,
+  color: string,
+  outline: string,
+) {
+  const s = size;
+  ctx.save();
+  ctx.rotate(-Math.PI / 12);
+  ctx.lineJoin = 'round';
+
+  const drawBranches = () => {
+    roundRect(ctx, -s * 0.12, -s * 0.04, s * 0.14, s * 0.7, s * 0.08);
+    ctx.save();
+    ctx.rotate(Math.PI / 6);
+    roundRect(ctx, -s * 0.13, -s * 0.62, s * 0.14, s * 0.62, s * 0.08);
+    ctx.restore();
+    ctx.save();
+    ctx.rotate(-Math.PI / 5);
+    roundRect(ctx, -s * 0.13, -s * 0.48, s * 0.14, s * 0.48, s * 0.08);
+    ctx.restore();
+  };
+
+  ctx.beginPath();
+  drawBranches();
+  ctx.fillStyle = outline;
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = s * 0.12;
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.beginPath();
+  drawBranches();
+  ctx.fillStyle = color;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = s * 0.018;
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+/** Star - 星形 */
+function drawStarIcon(
+  ctx: CanvasRenderingContext2D,
+  size: number,
+  color: string,
+  outline: string,
+) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = (i / 10) * Math.PI * 2 - Math.PI / 2;
+    const r = i % 2 === 0 ? size * 0.55 : size * 0.28;
+    if (i === 0) ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+    else ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.strokeStyle = outline;
+  ctx.lineWidth = Math.max(2, size * 0.08);
+  ctx.stroke();
+}
+
+// ============================================
+// drawItemIcon - 根据 icon 字段调用对应函数
+// ============================================
+
 export function drawItemIcon(
   ctx: CanvasRenderingContext2D,
   itemId: number,
@@ -304,106 +622,58 @@ export function drawItemIcon(
 ) {
   const def = ITEMS[itemId];
   if (!def) return;
+
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(spin);
-  ctx.lineWidth = Math.max(1.5, size * 0.16);
-  ctx.strokeStyle = def.outline;
-  ctx.fillStyle = def.color;
-  switch (def.shape) {
-    case "circle": {
-      // Light - 根据稀有度决定花瓣数量
-      const count = getLightPetalCount(rarity);
-      const orbit = count > 1 ? size * 1.2 : 0;
-      const radius = count > 1 ? size * 0.5 : size;
-      for (let i = 0; i < count; i++) {
-        const a = (i * Math.PI / (count / 2)) - Math.PI / 2;
-        const cx = orbit * Math.cos(a);
-        const cy = orbit * Math.sin(a);
-        ctx.beginPath();
-        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-      }
+
+  const color = def.color;
+  const outline = def.outline;
+
+  switch (def.icon) {
+    case "basic":
+      drawBasicIcon(ctx, size, color, outline, rarity);
       break;
-    }
-    case "square": {
-      roundRect(ctx, -size, -size, size * 2, size * 2, size * 0.3);
+    case "leaf":
+      drawLeafIcon(ctx, size, color, outline);
+      break;
+    case "stinger":
+      drawStingerIcon(ctx, size, color, outline, rarity);
+      break;
+    case "rock":
+      drawRockIcon(ctx, size, color, outline);
+      break;
+    case "sand":
+      drawSandIcon(ctx, size, color, outline);
+      break;
+    case "bubble":
+      drawBubbleIcon(ctx, size, color, outline);
+      break;
+    case "pearl":
+      drawPearlIcon(ctx, size, color, outline);
+      break;
+    case "wing":
+      drawWingIcon(ctx, size, color, outline);
+      break;
+    case "egg":
+      drawEggIcon(ctx, size, color, outline);
+      break;
+    case "stick":
+      drawStickIcon(ctx, size, color, outline);
+      break;
+    case "star":
+      drawStarIcon(ctx, size, color, outline);
+      break;
+    default:
+      ctx.beginPath();
+      ctx.arc(0, 0, size * 0.45, 0, Math.PI * 2);
+      ctx.fillStyle = color;
       ctx.fill();
+      ctx.strokeStyle = outline;
+      ctx.lineWidth = Math.max(2, size * 0.08);
       ctx.stroke();
-      break;
-    }
-    case "triangle": {
-      // Stinger - 根据稀有度决定三角形数量
-      const count = getStingerPetalCount(rarity);
-      const triSize = count > 1 ? size * 0.8 : size;
-      const orbit = count > 1 ? size * 1.1 : 0;
-      for (let i = 0; i < count; i++) {
-        const a = (i * 2 * Math.PI / count) - Math.PI / 2;
-        const cx = orbit * Math.cos(a);
-        const cy = orbit * Math.sin(a);
-        ctx.save();
-        ctx.translate(cx, cy);
-        ctx.rotate(a);
-        ctx.beginPath();
-        ctx.moveTo(0, -triSize * 1.2);
-        ctx.lineTo(triSize, triSize * 0.9);
-        ctx.lineTo(-triSize, triSize * 0.9);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-        ctx.restore();
-      }
-      break;
-    }
-    case "leaf": {
-      ctx.beginPath();
-      ctx.ellipse(0, 0, size * 1.25, size * 0.75, Math.PI / 5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(-size, size * 0.5);
-      ctx.lineTo(size, -size * 0.5);
-      ctx.lineWidth = Math.max(1, size * 0.14);
-      ctx.strokeStyle = "rgba(0,0,0,0.25)";
-      ctx.stroke();
-      break;
-    }
-    case "egg": {
-      ctx.beginPath();
-      ctx.ellipse(0, 0, size * 0.85, size * 1.15, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-      break;
-    }
-    case "stick": {
-      ctx.lineCap = "round";
-      ctx.strokeStyle = def.color;
-      ctx.lineWidth = size * 0.5;
-      ctx.beginPath();
-      ctx.moveTo(-size * 0.9, size * 0.9);
-      ctx.lineTo(size * 0.7, -size * 0.9);
-      ctx.stroke();
-      ctx.lineWidth = size * 0.34;
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(size * 0.9, size * 0.3);
-      ctx.stroke();
-      break;
-    }
-    case "star": {
-      ctx.beginPath();
-      for (let i = 0; i < 10; i++) {
-        const a = (i / 10) * Math.PI * 2 - Math.PI / 2;
-        const rr = i % 2 === 0 ? size * 1.25 : size * 0.55;
-        ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
-      }
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      break;
-    }
   }
+
   ctx.restore();
 }
 
@@ -411,7 +681,6 @@ export function drawItemIcon(
 // 卡片绘制
 // ============================================
 
-/** Inventory / hotbar card. */
 export function drawCard(
   ctx: CanvasRenderingContext2D,
   r: Rect,
@@ -421,11 +690,14 @@ export function drawCard(
   const scale = opts.scale ?? 1;
   const cx = r.x + r.w / 2;
   const cy = r.y + r.h / 2;
+  const size = Math.min(r.w, r.h);
+
   ctx.save();
   ctx.globalAlpha = opts.dim ?? 1;
   ctx.translate(cx, cy);
   ctx.scale(scale, scale);
   ctx.translate(-cx, -cy);
+
   if (!cell) {
     roundRect(ctx, r.x, r.y, r.w, r.h, 8);
     ctx.fillStyle = opts.hovered ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.28)";
@@ -437,25 +709,138 @@ export function drawCard(
     ctx.restore();
     return;
   }
-  const rarity = RARITIES[cell.rarity];
+
+  const rarity = RARITIES[Math.min(cell.rarity, RARITIES.length - 1)];
+  const def = ITEMS[cell.item];
+
   roundRect(ctx, r.x, r.y, r.w, r.h, 8);
   ctx.fillStyle = rarity.color;
   ctx.fill();
-  roundRect(ctx, r.x + 3, r.y + 3, r.w - 6, r.h - 6, 6);
-  ctx.fillStyle = shade(rarity.color, -34);
-  ctx.fill();
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = opts.hovered ? "#ffffff" : "rgba(0,0,0,0.35)";
-  roundRect(ctx, r.x, r.y, r.w, r.h, 8);
+
+  ctx.lineWidth = Math.max(3, size * 0.06);
+  ctx.strokeStyle = shade(rarity.color, -80);
   ctx.stroke();
-  // 传入 rarity
-  drawItemIcon(ctx, cell.item, cx, cy - (opts.showName ? r.h * 0.08 : 0), Math.min(r.w, r.h) * 0.26, 0, cell.rarity);
-  if (opts.showName !== false) {
-    text(ctx, ITEMS[cell.item].name, cx, r.y + r.h - 11, Math.max(9, r.h * 0.16), "#ffffff");
+
+  if (opts.hovered) {
+    ctx.lineWidth = Math.max(2, size * 0.04);
+    ctx.strokeStyle = "rgba(255,255,255,0.6)";
+    roundRect(ctx, r.x + 2, r.y + 2, r.w - 4, r.h - 4, 6);
+    ctx.stroke();
   }
+
+  const iconSize = Math.min(r.w, r.h) * 0.18;
+  drawItemIcon(ctx, cell.item, cx, cy - (opts.showName ? r.h * 0.06 : 0), iconSize, 0, cell.rarity);
+
+  if (opts.showName !== false && def) {
+    ctx.save();
+
+    let itemName = def.name;
+    const maxWidth = r.w * 0.92;
+    const maxHeight = r.h * 0.22;
+    const fontSizeBase = Math.min(maxHeight * 0.85, 16);
+
+    let lines: string[] = [];
+    const maxCharsPerLine = 10;
+
+    if (itemName.length > maxCharsPerLine) {
+      const spaceIndex = itemName.indexOf(' ');
+      if (spaceIndex !== -1 && spaceIndex <= maxCharsPerLine && spaceIndex < itemName.length - 1) {
+        lines = [itemName.substring(0, spaceIndex), itemName.substring(spaceIndex + 1)];
+      } else {
+        const mid = Math.ceil(itemName.length / 2);
+        let splitPoint = mid;
+        for (let i = mid; i < itemName.length; i++) {
+          if (itemName[i] === ' ') {
+            splitPoint = i;
+            break;
+          }
+        }
+        if (splitPoint === mid) {
+          for (let i = mid - 1; i > 0; i--) {
+            if (itemName[i] === ' ') {
+              splitPoint = i;
+              break;
+            }
+          }
+        }
+        if (splitPoint === mid) {
+          splitPoint = Math.floor(itemName.length / 2);
+        }
+        lines = [itemName.substring(0, splitPoint), itemName.substring(splitPoint + 1)];
+      }
+    } else {
+      lines = [itemName];
+    }
+
+    let fontSize = lines.length > 1 ? Math.floor(maxHeight * 0.55) : Math.floor(maxHeight * 0.8);
+    fontSize = Math.min(fontSize, fontSizeBase);
+
+    ctx.font = `900 ${fontSize}px "Trebuchet MS", "Segoe UI", sans-serif`;
+    let longestLineWidth = Math.max(...lines.map(line => ctx.measureText(line).width));
+
+    while (longestLineWidth > maxWidth && fontSize > 7) {
+      fontSize--;
+      ctx.font = `900 ${fontSize}px "Trebuchet MS", "Segoe UI", sans-serif`;
+      longestLineWidth = Math.max(...lines.map(line => ctx.measureText(line).width));
+    }
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const textX = cx;
+    const spacing = fontSize * 0.85;
+
+    lines.forEach((line, index) => {
+      let textY: number;
+      if (lines.length === 1) {
+        textY = r.y + r.h - (maxHeight / 2) - 2;
+      } else {
+        const baseY = r.y + r.h - (maxHeight / 2) - 4;
+        textY = (index === 0) ? baseY - (spacing / 2) : baseY + (spacing / 2);
+      }
+
+      ctx.strokeStyle = "rgba(0,0,0,0.7)";
+      ctx.lineWidth = Math.max(2, fontSize * 0.18);
+      ctx.lineJoin = "round";
+      ctx.strokeText(line, textX, textY);
+
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(line, textX, textY);
+    });
+
+    ctx.restore();
+  }
+
   if (cell.count > 1) {
-    text(ctx, "x" + cell.count, r.x + r.w - 6, r.y + 11, Math.max(9, r.h * 0.16), "#ffffff", "right");
+    ctx.save();
+
+    let countStr = "x" + (cell.count >= 1000000 ? (cell.count / 1000000).toFixed(1) + 'M' :
+                          cell.count >= 1000 ? (cell.count / 1000).toFixed(1) + 'K' :
+                          cell.count);
+
+    const fontSize = Math.max(12, Math.floor(18 * size / 70));
+    ctx.font = `900 ${fontSize}px "Trebuchet MS", "Segoe UI", sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    const centerX = r.x + r.w - 10;
+    const centerY = r.y + 8;
+
+    ctx.save();
+    ctx.translate(centerX, centerY);
+    ctx.rotate(0.3);
+
+    ctx.strokeStyle = "rgba(0,0,0,0.8)";
+    ctx.lineWidth = Math.max(3, fontSize * 0.22);
+    ctx.lineJoin = "round";
+    ctx.strokeText(countStr, 0, 0);
+
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(countStr, 0, 0);
+
+    ctx.restore();
+    ctx.restore();
   }
+
   ctx.restore();
 }
 
@@ -463,7 +848,6 @@ export function drawCard(
 // 怪物绘制
 // ============================================
 
-/** Mobs are drawn procedurally, no images. */
 export function drawMob(
   ctx: CanvasRenderingContext2D,
   type: number,
