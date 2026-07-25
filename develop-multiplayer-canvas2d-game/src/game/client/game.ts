@@ -579,30 +579,34 @@ export class GameClient {
         this.killFeed = this.killFeed.slice(0, 5);
         break;
       case EVT.CRAFT_OK:
-        this.craftMsg = value > 1
-          ? `Crafted ${value}x ${RARITIES[rarity].name} ${ITEMS[item].name}!`
-          : `Crafted ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
-        this.craftSucceeded(rarity);
+        this.craftMsg = value > 1 ? `Crafted ${value}x ${RARITIES[rarity].name} ${ITEMS[item].name}!` : `Crafted ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
+        this.craftLogCrafted += value;
+        this.craftLogLast = this.craftMsg;
+        this.craftResolve({ item, rarity, count: value });
         break;
       case EVT.CRAFT_FAIL:
         this.craftMsg = value > 0 ? `Craft failed... ${value} petal${value === 1 ? "" : "s"} lost.` : "Craft failed.";
-        this.craftFailed();
+        this.craftLogBurned += value;
+        this.craftLogLast = this.craftMsg;
+        this.craftResolve(null);
         break;
       case EVT.ORACLE_OK:
         this.craftMsg = `Oracle success! Created ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
-        this.craftSucceeded(rarity);
+        this.craftLogCrafted += value || 1;
+        this.craftLogLast = this.craftMsg;
+        this.craftResolve({ item, rarity, count: value || 1 });
         break;
       case EVT.ORACLE_FAIL:
-        this.craftMsg = "Oracle refused — check the requirement and cooldown.";
-        this.craftFailed();
+        this.craftRefused("Oracle refused — check the requirement and cooldown.");
         break;
       case EVT.TRADE_OK:
         this.craftMsg = `Traded for ${value}x ${RARITIES[rarity].name} Coin!`;
-        this.craftSucceeded(rarity);
+        this.craftLogCrafted += value;
+        this.craftLogLast = this.craftMsg;
+        this.craftResolve({ item, rarity, count: value });
         break;
       case EVT.TRADE_FAIL:
-        this.craftMsg = "Trade refused — check the cooldown.";
-        this.craftFailed();
+        this.craftRefused("Trade refused — check the requirement and cooldown.");
         break;
       case EVT.DEATH:
         this.alive = false;
@@ -657,6 +661,9 @@ export class GameClient {
     if (this.craftBurstT > 0) this.craftBurstT = Math.max(0, this.craftBurstT - dt * 1.6);
     if (this.craftShake > 0) this.craftShake = Math.max(0, this.craftShake - dt * 2);
     this.craftGlow += ((this.craftSel ? 1 : 0) - this.craftGlow) * Math.min(1, dt * 8);
+    // Keep the complete CraftAnimation port alive even while the panel is sliding.
+    // This drives pentagon contraction, fill cards, delayed results, and particles.
+    this.craftUpdate(dt);
 
     for (const e of this.ents.values()) {
       const k = Math.min(1, dt * 16);
@@ -1077,6 +1084,21 @@ export class GameClient {
     this.craftPending = result;
     this.craftSel = null;
     this.craftSpawnSuccessParticles(this.rarityRgb(result.rarity), Math.min(50 * Math.max(1, result.count), 1600));
+  }
+
+  /** Accept a server craft response. The result is revealed after the active spin completes. */
+  private craftResolve(result: { item: number; rarity: number; count: number } | null) {
+    this.craftMsgLife = 2.8;
+    this.craftBurstColor = result ? RARITIES[result.rarity]?.color ?? "#ffe763" : "#ff8080";
+    if (this.craftPhase === "rotating" || this.craftPhase === "waiting") {
+      this.craftPending = result;
+      return;
+    }
+    if (result) this.craftStartShow(result);
+    else {
+      this.craftSpawnFailParticles();
+      this.craftShake = 0.5;
+    }
   }
 
   /** Called once the spin finishes: spawn particles and (optionally) reveal the result card. */
@@ -1644,6 +1666,7 @@ export class GameClient {
     this.craftSel = { item: cell.item, rarity: cell.rarity };
     this.craftMsg = "";
     this.craftGlow = 1;
+    this.craftStartFill();
   }
 
   /** Fires the current mode's request if the selection satisfies its requirements. */
@@ -1666,6 +1689,9 @@ export class GameClient {
       }
       const w = new Writer(6);
       w.u8(C2S.CRAFT).u8(sel.item).u8(sel.rarity).u16(0);
+      this.craftLogPetals += 5;
+      this.craftLogAttempts += Math.floor(avail / 5);
+      this.craftStartRotation();
       this.net?.send(w.bytes());
       this.craftSpin = 0.8;
       return;
@@ -1681,6 +1707,9 @@ export class GameClient {
       }
       const w = new Writer(4);
       w.u8(C2S.ORACLE).u8(sel.item).u8(sel.rarity);
+      this.craftLogPetals += required;
+      this.craftLogAttempts += 1;
+      this.craftStartRotation();
       this.net?.send(w.bytes());
       this.craftSpin = 0.8;
       return;
@@ -1694,6 +1723,9 @@ export class GameClient {
     }
     const w = new Writer(6);
     w.u8(C2S.TRADE).u8(sel.item).u8(sel.rarity).u16(0);
+    this.craftLogPetals += 1;
+    this.craftLogAttempts += 1;
+    this.craftStartRotation();
     this.net?.send(w.bytes());
     this.craftSpin = 0.8;
   }
@@ -2336,12 +2368,14 @@ export class GameClient {
     ctx.globalAlpha = Math.min(1, this.craftAnim * 1.3);
     ctx.translate(shakeX, 0);
 
-    // panel body — blue card + dark border, exactly like the inventory
+    // The supplied panel palette: warm craft gold, oracle blue, trade green.
+    const panelColor = this.craftMode === "normal" ? "#CDA46E" : this.craftMode === "oracle" ? "#4A6FA5" : "#4A8C5E";
+    const panelBorder = this.craftMode === "normal" ? "#A8865A" : this.craftMode === "oracle" ? "#1E3C78" : "#1E6432";
     roundRect(ctx, p.x, p.y, p.w, p.h, 10);
-    ctx.fillStyle = "#5aa0db";
+    ctx.fillStyle = panelColor;
     ctx.fill();
     ctx.lineWidth = 5;
-    ctx.strokeStyle = "#3f7dc2";
+    ctx.strokeStyle = panelBorder;
     ctx.stroke();
 
     text(ctx, "Crafting", p.x + p.w / 2, p.y + 24, 20, "#ffffff");
@@ -2469,8 +2503,17 @@ export class GameClient {
 
     text(ctx, "5 identical cards combine into 1 of the next rarity", p.x + p.w / 2, layout.bigSlots[0].y - 12, 12, "rgba(255,255,255,0.85)");
 
-    layout.bigSlots.forEach((r, i) => {
-      const filled = !!sel && avail >= i + 1;
+    layout.bigSlots.forEach((baseRect, i) => {
+      // Five slots use the original star/pentagon arrangement. During a craft,
+      // their local coordinates contract and rotate around the center.
+      const [ox, oy] = this.craftLocalPos(i);
+      const progress = this.craftPhase === "rotating" ? Math.min(1, this.craftRotTime / this.craftRotDuration) : 0;
+      const [px, py] = this.craftPhase === "rotating" ? this.craftContractedPos(progress, ox, oy) : [ox, oy];
+      const rad = (Math.PI / 180) * this.craftAngle;
+      const cx = layout.cx + px * Math.cos(rad) - py * Math.sin(rad);
+      const cy = layout.cy + px * Math.sin(rad) + py * Math.cos(rad);
+      const r: Rect = { x: cx - baseRect.w / 2, y: cy - baseRect.h / 2, w: baseRect.w, h: baseRect.h };
+      const filled = !!sel && avail >= i + 1 && this.craftPhase !== "showing";
       craftPad(ctx, r, filled ? this.craftGlow : 0, this.time + i * 0.4);
       if (!filled) {
         text(ctx, "+", r.x + r.w / 2, r.y + r.h / 2, Math.max(14, r.h * 0.4), "rgba(255,255,255,0.4)");
@@ -2484,12 +2527,27 @@ export class GameClient {
         ctx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2));
       }
       const bob = Math.sin(this.time * 3 + i * 0.7) * 1.5;
+      if (this.craftFillActive) {
+        const fill = this.craftFillTransform();
+        ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
+        ctx.rotate(fill.angle);
+        ctx.scale(fill.scale, fill.scale);
+        ctx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2));
+      }
       drawCard(ctx, { ...r, y: r.y + bob }, { item: sel!.item, rarity: sel!.rarity, count: 1 }, {
         showName: false,
         scale: this.craftSpin > 0 ? 1.06 : 1,
       });
       ctx.restore();
     });
+
+    if (this.craftPhase === "showing" && this.craftPending) {
+      const resultSize = Math.min(layout.bigSize * 1.22, 92);
+      const result: Rect = { x: layout.cx - resultSize / 2, y: layout.cy - resultSize / 2, w: resultSize, h: resultSize };
+      craftPad(ctx, result, 1, this.time);
+      drawCard(ctx, result, this.craftPending, { showName: false, hovered: true, scale: 1 + Math.sin(this.time * 7) * 0.035 });
+      text(ctx, "RESULT", layout.cx, result.y - 14, 13, RARITIES[this.craftPending.rarity].color);
+    }
 
     const y = layout.infoY;
     if (!sel) {
