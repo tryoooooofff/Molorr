@@ -71,6 +71,19 @@ interface Floater {
   vy: number;
 }
 
+/** Burst particle used by the crafting animation (ported from CraftAnimation). */
+interface CraftParticle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  life: number;
+  decay: number;
+  size: number;
+  color: [number, number, number];
+  gravity: boolean;
+}
+
 interface SaveData {
   slots: (Cell | null)[];
   bag: (Cell | null)[];
@@ -78,6 +91,10 @@ interface SaveData {
   mapId: number;
   nextOracleAt?: number;
   nextTradeAt?: number;
+  craftPetals?: number;
+  craftCrafted?: number;
+  craftBurned?: number;
+  craftAttempts?: number;
 }
 
 const SAVE_KEY = "petalia.save";
@@ -193,6 +210,33 @@ export class GameClient {
   private craftBurstColor = "#ffe763";
   private craftShake = 0;
 
+  // ── Ported CraftAnimation state (color / arrangement / animation) ──
+  // Rotation phase machine: "none" | "rotating" | "waiting" | "showing"
+  private craftPhase: "none" | "rotating" | "waiting" | "showing" = "none";
+  private craftRotTime = 0; // seconds elapsed while rotating
+  private craftRotDuration = 1.5; // seconds, mirrors startAnimation(1.5)
+  private craftAngle = 0; // degrees, accumulates during rotation
+  private craftRotDir = 1;
+  private craftRotSpeed = 300; // deg/s, accelerates 300 -> 800
+  private craftWaitStart = 0; // performance.now() ms
+  private craftWaitDuration = 0.3; // seconds before revealing result
+  private craftShowTimer = 0; // seconds the result card is shown
+  private craftShowDuration = 1.6; // seconds before auto-clearing the result card
+  private craftPending: { item: number; rarity: number; count: number } | null = null;
+  // Slot-fill animation when a card lands (grow + spin)
+  private craftFillActive = false;
+  private craftFillElapsed = 0; // ms, 0..200
+  private craftFillTotal = 200; // ms
+  // Particle bursts
+  private craftSuccessParticles: CraftParticle[] = [];
+  private craftFailParticles: CraftParticle[] = [];
+  // Craft log stats (mirrors drawCraftLog)
+  private craftLogPetals = 0;
+  private craftLogCrafted = 0;
+  private craftLogBurned = 0;
+  private craftLogAttempts = 0;
+  private craftLogLast = "No Result";
+
   private drag: { from: number; cell: Cell } | null = null;
   private dragX = 0;
   private dragY = 0;
@@ -285,6 +329,10 @@ export class GameClient {
     this.selectedMap = Math.max(0, Math.min(MAPS.length - 1, data.mapId || 0));
     this.nextOracleAt = data.nextOracleAt || 0;
     this.nextTradeAt = data.nextTradeAt || 0;
+    this.craftLogPetals = data.craftPetals || 0;
+    this.craftLogCrafted = data.craftCrafted || 0;
+    this.craftLogBurned = data.craftBurned || 0;
+    this.craftLogAttempts = data.craftAttempts || 0;
   }
 
   private currentSave(): SaveData {
@@ -295,6 +343,10 @@ export class GameClient {
       mapId: this.mapId,
       nextOracleAt: this.nextOracleAt,
       nextTradeAt: this.nextTradeAt,
+      craftPetals: this.craftLogPetals,
+      craftCrafted: this.craftLogCrafted,
+      craftBurned: this.craftLogBurned,
+      craftAttempts: this.craftLogAttempts,
     };
   }
 
@@ -979,6 +1031,206 @@ export class GameClient {
     const slotY = layout.gridTop + row * layout.itemHeight + yOffset;
     if (x < slotX || x > slotX + layout.slotSize || y < slotY || y > slotY + layout.slotSize) return null;
     return entry;
+  }
+
+  // ── Ported CraftAnimation helpers (spin / contraction / particles / fill) ──
+
+  /** Local position of the i-th pentagon slot (before rotation/contraction). */
+  private craftLocalPos(i: number): [number, number] {
+    const { radius } = this.craftLayout();
+    const a = (Math.PI / 180) * (-90 + i * 72);
+    return [Math.cos(a) * radius, Math.sin(a) * radius];
+  }
+
+  /** Contraction curve from CraftAnimation.getContractedPosition (slots suck toward center). */
+  private craftContractedPos(progress: number, ox: number, oy: number): [number, number] {
+    const originalRadius = Math.sqrt(ox * ox + oy * oy);
+    const originalAngle = Math.atan2(oy, ox);
+    const maxContraction = 1.0;
+    const minContraction = 0.2;
+    const currentBase = maxContraction - (maxContraction - minContraction) * progress;
+    const frequency = 4.0 + progress * 7.0;
+    const oscillation = Math.sin(progress * Math.PI * frequency);
+    const factor = currentBase + 0.3 * oscillation;
+    return [Math.cos(originalAngle) * originalRadius * factor, Math.sin(originalAngle) * originalRadius * factor];
+  }
+
+  /** Begin the accelerating spin + contraction animation when a craft is fired. */
+  private craftStartRotation() {
+    this.craftPhase = "rotating";
+    this.craftRotTime = 0;
+    this.craftAngle = 0;
+    this.craftRotDir = 1;
+    this.craftRotSpeed = 300;
+    this.craftPending = null;
+    this.craftSuccessParticles.length = 0;
+    this.craftFailParticles.length = 0;
+  }
+
+  /** Reveal a successful result card immediately + success particles (Oracle/Trade). */
+  private craftStartShow(result: { item: number; rarity: number; count: number }) {
+    this.craftPhase = "showing";
+    this.craftShowTimer = 0;
+    this.craftPending = result;
+    this.craftSel = null;
+    this.craftSpawnSuccessParticles(this.rarityRgb(result.rarity), Math.min(50 * Math.max(1, result.count), 1600));
+  }
+
+  /** Called once the spin finishes: spawn particles and (optionally) reveal the result card. */
+  private craftFinalizeShow() {
+    if (this.craftPending) {
+      this.craftPhase = "showing";
+      this.craftShowTimer = 0;
+      this.craftSpawnSuccessParticles(this.rarityRgb(this.craftPending.rarity), Math.min(50 * Math.max(1, this.craftPending.count), 1600));
+    } else {
+      // Nothing crafted — burst failure particles from each pentagon slot.
+      this.craftSpawnFailParticles();
+      this.craftPhase = "none";
+    }
+    this.craftSel = null;
+  }
+
+  /** Per-frame update for the rotation phase machine, fill animation and particles. */
+  private craftUpdate(dt: number) {
+    if (this.craftPhase === "rotating") {
+      this.craftRotTime += dt;
+      const progress = Math.min(this.craftRotTime / this.craftRotDuration, 1);
+      this.craftRotSpeed = 300 + (800 - 300) * progress;
+      this.craftAngle -= this.craftRotDir * this.craftRotSpeed * dt;
+      if (this.craftRotTime >= this.craftRotDuration) {
+        this.craftAngle = 0;
+        this.craftPhase = "waiting";
+        this.craftWaitStart = performance.now();
+      }
+    } else if (this.craftPhase === "waiting") {
+      if ((performance.now() - this.craftWaitStart) / 1000 >= this.craftWaitDuration) {
+        this.craftFinalizeShow();
+      }
+    } else if (this.craftPhase === "showing") {
+      this.craftShowTimer += dt;
+      if (this.craftShowTimer >= this.craftShowDuration) {
+        this.craftPhase = "none";
+        this.craftPending = null;
+      }
+    }
+
+    if (this.craftFillActive) {
+      this.craftFillElapsed += dt * 1000;
+      if (this.craftFillElapsed >= this.craftFillTotal) {
+        this.craftFillActive = false;
+        this.craftFillElapsed = 0;
+      }
+    }
+
+    // Particles move per-frame (mirrors CraftAnimation.updateParticles).
+    this.craftSuccessParticles = this.craftSuccessParticles.filter((p) => {
+      p.x += p.vx;
+      p.y += p.vy;
+      p.life -= p.decay;
+      return p.life > 0;
+    });
+    this.craftFailParticles = this.craftFailParticles.filter((p) => {
+      p.x += p.vx;
+      p.y += p.vy;
+      if (p.gravity) p.vy += 0.1;
+      p.life -= p.decay;
+      return p.life > 0;
+    });
+  }
+
+  private craftSpawnSuccessParticles(color: [number, number, number], count: number) {
+    const { cx, cy } = this.craftLayout();
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * 2 * Math.PI;
+      const speed = 3 + Math.random() * 7;
+      this.craftSuccessParticles.push({
+        x: cx,
+        y: cy,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        life: 1.0,
+        decay: 0.005 + Math.random() * 0.015,
+        size: 4 + Math.floor(Math.random() * 5),
+        color,
+        gravity: false,
+      });
+    }
+  }
+
+  private craftSpawnFailParticles() {
+    const { cx, cy } = this.craftLayout();
+    const color: [number, number, number] = this.craftSel ? this.rarityRgb(this.craftSel.rarity) : [200, 80, 80];
+    for (let i = 0; i < 5; i++) {
+      const [ox, oy] = this.craftLocalPos(i);
+      const rad = (Math.PI / 180) * this.craftAngle;
+      const wx = cx + ox * Math.cos(rad) - oy * Math.sin(rad);
+      const wy = cy + ox * Math.sin(rad) + oy * Math.cos(rad);
+      const count = 10 + Math.floor(Math.random() * 11);
+      for (let j = 0; j < count; j++) {
+        const angle = Math.random() * 2 * Math.PI;
+        const speed = 2 + Math.random() * 5;
+        this.craftFailParticles.push({
+          x: wx,
+          y: wy,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 1.0,
+          decay: 0.01 + Math.random() * 0.02,
+          size: 3 + Math.floor(Math.random() * 5),
+          color,
+          gravity: true,
+        });
+      }
+    }
+  }
+
+  private drawCraftParticles(ctx: CanvasRenderingContext2D) {
+    const draw = (list: CraftParticle[]) => {
+      for (const p of list) {
+        const alpha = Math.max(0, Math.min(1, p.life));
+        const size = Math.max(1, p.size * p.life);
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = `rgb(${p.color[0]},${p.color[1]},${p.color[2]})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    };
+    draw(this.craftSuccessParticles);
+    draw(this.craftFailParticles);
+  }
+
+  private rarityRgb(r: number): [number, number, number] {
+    const idx = Math.max(0, Math.min(RARITIES.length - 1, r));
+    const c = RARITIES[idx]?.color ?? "rgb(160,160,160)";
+    const m = c.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+    if (m) {
+      const out: [number, number, number] = [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)];
+      return out;
+    }
+    return [160, 160, 160];
+  }
+
+  /** Start the slot grow+spin fill animation (when a card lands). */
+  private craftStartFill() {
+    this.craftFillActive = true;
+    this.craftFillElapsed = 0;
+  }
+
+  /** A craft/oracle/trade was refused by the server (cooldown / requirement): show why and cancel feedback. */
+  private craftRefused(msg: string) {
+    this.craftMsg = msg;
+    this.craftMsgLife = 2.6;
+    this.craftFillActive = false;
+  }
+
+  /** Ease-out fill curve (mirrors drawFillAnimation): scale 0.01 -> 1, spin PI -> 0. */
+  private craftFillTransform(): { scale: number; angle: number } {
+    const t = Math.min(1, this.craftFillElapsed / this.craftFillTotal);
+    const e = 1 - Math.pow(1 - t, 3);
+    return { scale: 0.01 + e * 0.99, angle: (1 - e) * Math.PI };
   }
 
   private formatCooldown(msLeft: number): string {
@@ -2234,7 +2486,7 @@ export class GameClient {
         scale: this.craftSpin > 0 ? 1.06 : 1,
       });
       ctx.restore();
-    });
+    }
 
     const y = layout.infoY;
     if (!sel) {
