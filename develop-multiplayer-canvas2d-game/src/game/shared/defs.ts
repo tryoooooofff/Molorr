@@ -8,66 +8,18 @@ export const SLOT_COUNT = 8;
 export const BAG_COUNT = 32;
 export const TOTAL_CELLS = SLOT_COUNT + BAG_COUNT;
 
-function rgb([r, g, b]: readonly [number, number, number]): string {
-  return `rgb(${r},${g},${b})`;
-}
-
-export interface RarityDef {
-  name: string;
-  /** Fill color used for cards/UI. */
-  color: string;
-  /** Darker border/outline color for cards. */
-  border: string;
-  /** Multiplier applied to petal damage/health at this rarity. */
-  mult: number;
-  /** Multiplier applied to wild mob health at this rarity. */
-  enemyMult: number;
-  /** Chance [0-1] that ONE craft attempt from this rarity succeeds. Absent = not craftable further. */
-  craftChance?: number;
-}
-
-// Full 11-tier rarity ladder. Colors/multipliers below match the reference
-// RARITY_COLORS / BORDER_COLORS / RARITY_MULTIPLIERS / ENEMY_HEALTH_MULTIPLIERS /
-// CRAFT_PROBABILITIES tables (ordered low -> high rarity here).
-export const RARITIES: RarityDef[] = [
-  { name: "Common", color: rgb([102, 192, 87]), border: rgb([73, 138, 62]), mult: 1, enemyMult: 1, craftChance: 0.64 },
-  { name: "Unusual", color: rgb([204, 184, 74]), border: rgb([147, 133, 54]), mult: 3, enemyMult: 3.75, craftChance: 0.32 },
-  { name: "Rare", color: rgb([62, 66, 182]), border: rgb([44, 47, 131]), mult: 9, enemyMult: 13.5, craftChance: 0.16 },
-  { name: "Epic", color: rgb([107, 25, 178]), border: rgb([77, 18, 128]), mult: 27, enemyMult: 54, craftChance: 0.08 },
-  { name: "Legendary", color: rgb([178, 26, 25]), border: rgb([128, 19, 18]), mult: 81, enemyMult: 405, craftChance: 0.04 },
-  { name: "Mythic", color: rgb([26, 175, 178]), border: rgb([20, 126, 127]), mult: 243, enemyMult: 2430, craftChance: 0.02 },
-  { name: "Ultra", color: rgb([209, 71, 98]), border: rgb([148, 26, 67]), mult: 729, enemyMult: 24500, craftChance: 0.01 },
-  { name: "Super", color: rgb([34, 204, 130]), border: rgb([25, 148, 94]), mult: 2187, enemyMult: 177800, craftChance: 0.005 },
-  { name: "Omega", color: rgb([195, 33, 174]), border: rgb([141, 24, 126]), mult: 19683, enemyMult: 510510, craftChance: 0.0005 },
-  { name: "Eternal", color: rgb([220, 220, 220]), border: rgb([112, 112, 112]), mult: 31415, enemyMult: 5059830 },
-  { name: "Unique", color: rgb([50, 50, 50]), border: rgb([12, 12, 12]), mult: 30000, enemyMult: 3059830 },
+export const RARITIES = [
+  { name: "Common", color: "#7eef6d", mult: 1 },
+  { name: "Unusual", color: "#ffe65d", mult: 1.7 },
+  { name: "Rare", color: "#4d52e3", mult: 3 },
+  { name: "Epic", color: "#861fde", mult: 5.5 },
+  { name: "Legendary", color: "#de1f1f", mult: 10 },
+  { name: "Mythic", color: "#1fdbde", mult: 19 },
 ];
-
-/** Highest rarity index that can ever be stored/displayed. */
 export const MAX_RARITY = RARITIES.length - 1;
-/** Highest rarity reachable through the normal 5-combine crafting ladder (Eternal). Unique sits outside it. */
-export const MAX_CRAFT_RARITY = RARITIES.length - 2;
-/** Wild mob drops never roll above this rarity (Legendary) — everything past it is crafting-only. */
-export const MAX_WILD_DROP_RARITY = 4;
 
-/** Oracle skips this many rarity tiers in one guaranteed (non-random) conversion. */
-export const ORACLE_SKIP = 2;
-/** Hours between allowed Oracle uses, per player. */
-export const ORACLE_COOLDOWN_HOURS = 2;
-/** Hours between allowed Trade uses, per player. */
-export const TRADE_COOLDOWN_HOURS = 3;
-
-/**
- * Cards of `rarity` required to Oracle-skip straight to `rarity + ORACLE_SKIP`.
- * Returns undefined if that rarity can't be Oracled (too high, or skip would land past the craft ladder).
- */
-export function oracleRequiredCount(rarity: number): number | undefined {
-  if (rarity < 0 || rarity + ORACLE_SKIP > MAX_CRAFT_RARITY) return undefined;
-  return 15 + rarity * 5;
-}
-
-
-export type ItemKind = "petal" | "summon" | "trinket";
+export type ItemKind = "petal" | "summon";
+export type IconType = "basic" | "leaf" | "stinger" | "rock" | "sand" | "bubble" | "pearl" | "wing" | "egg" | "stick" | "star";
 
 export interface ItemDef {
   id: number;
@@ -75,33 +27,29 @@ export interface ItemDef {
   kind: ItemKind;
   color: string;
   outline: string;
-  shape: "circle" | "square" | "leaf" | "triangle" | "egg" | "stick" | "star";
+  icon: IconType;      // 独立图标类型
   radius: number;
   damage: number;
   health: number;
-  reload: number; // seconds
-  heal?: number; // hp per second while alive
-  speed?: number; // % move speed bonus
-  petMob?: number; // mob type spawned when this is a summon
+  reload: number;      // seconds
+  heal?: number;       // hp per second while alive
+  speed?: number;      // % move speed bonus
+  petMob?: number;     // mob type spawned when this is a summon
   desc: string;
 }
 
 export const ITEMS: ItemDef[] = [
-  { id: 0, name: "Basic", kind: "petal", color: "#ffffff", outline: "#cfcfcf", shape: "circle", radius: 8, damage: 10, health: 12, reload: 1.0, desc: "A nice and simple petal." },
-  { id: 1, name: "Leaf", kind: "petal", color: "#39b54a", outline: "#2b8a38", shape: "leaf", radius: 9, damage: 8, health: 14, reload: 1.0, heal: 2.5, desc: "Heals you slowly over time." },
-  { id: 2, name: "Stinger", kind: "petal", color: "#333333", outline: "#111111", shape: "triangle", radius: 6, damage: 38, health: 4, reload: 1.6, desc: "Hurts a lot, breaks fast." },
-  { id: 3, name: "Rock", kind: "petal", color: "#8d8d8d", outline: "#6a6a6a", shape: "square", radius: 10, damage: 8, health: 55, reload: 2.2, desc: "Heavy and very sturdy." },
-  { id: 4, name: "Sand", kind: "petal", color: "#e0c068", outline: "#b89b45", shape: "circle", radius: 7, damage: 14, health: 16, reload: 1.2, desc: "Gritty desert clump." },
-  { id: 5, name: "Bubble", kind: "petal", color: "#bfe9ff", outline: "#84c9ee", shape: "circle", radius: 10, damage: 3, health: 3, reload: 2.6, speed: 9, desc: "Makes you swim faster." },
-  { id: 6, name: "Pearl", kind: "petal", color: "#eafaff", outline: "#a8d8e8", shape: "circle", radius: 8, damage: 24, health: 12, reload: 1.4, desc: "Shiny treasure of the sea." },
-  { id: 7, name: "Wing", kind: "petal", color: "#f3f3ff", outline: "#c3c3e0", shape: "triangle", radius: 9, damage: 14, health: 9, reload: 1.1, speed: 5, desc: "Flaps around, light and quick." },
-  { id: 8, name: "Egg", kind: "summon", color: "#fff1cf", outline: "#e0c48a", shape: "egg", radius: 10, damage: 4, health: 20, reload: 3.0, petMob: 0, desc: "Hatches a friendly ladybug." },
-  { id: 9, name: "Stick", kind: "summon", color: "#a97442", outline: "#7d5228", shape: "stick", radius: 10, damage: 6, health: 22, reload: 4.0, petMob: 1, desc: "Calls a loyal wasp to fight." },
-  { id: 10, name: "Coin", kind: "trinket", color: "#ffd54a", outline: "#c79a1e", shape: "circle", radius: 7, damage: 0, health: 0, reload: 0, desc: "A shiny coin. Worth trading, worth nothing in a fight." },
+  { id: 0, name: "Basic", kind: "petal", color: "#ffffff", outline: "#cfcfcf", icon: "basic", radius: 8, damage: 10, health: 12, reload: 1.0, desc: "A nice and simple petal." },
+  { id: 1, name: "Leaf", kind: "petal", color: "#39b54a", outline: "#2b8a38", icon: "leaf", radius: 9, damage: 8, health: 14, reload: 1.0, heal: 2.5, desc: "Heals you slowly over time." },
+  { id: 2, name: "Stinger", kind: "petal", color: "#333333", outline: "#111111", icon: "stinger", radius: 6, damage: 38, health: 4, reload: 1.6, desc: "Hurts a lot, breaks fast." },
+  { id: 3, name: "Rock", kind: "petal", color: "#8d8d8d", outline: "#6a6a6a", icon: "rock", radius: 10, damage: 8, health: 55, reload: 2.2, desc: "Heavy and very sturdy." },
+  { id: 4, name: "Sand", kind: "petal", color: "#e0c068", outline: "#b89b45", icon: "sand", radius: 7, damage: 14, health: 16, reload: 1.2, desc: "Gritty desert clump." },
+  { id: 5, name: "Bubble", kind: "petal", color: "#bfe9ff", outline: "#84c9ee", icon: "bubble", radius: 10, damage: 3, health: 3, reload: 2.6, speed: 9, desc: "Makes you swim faster." },
+  { id: 6, name: "Pearl", kind: "petal", color: "#eafaff", outline: "#a8d8e8", icon: "pearl", radius: 8, damage: 24, health: 12, reload: 1.4, desc: "Shiny treasure of the sea." },
+  { id: 7, name: "Wing", kind: "petal", color: "#f3f3ff", outline: "#c3c3e0", icon: "wing", radius: 9, damage: 14, health: 9, reload: 1.1, speed: 5, desc: "Flaps around, light and quick." },
+  { id: 8, name: "Egg", kind: "summon", color: "#fff1cf", outline: "#e0c48a", icon: "egg", radius: 10, damage: 4, health: 20, reload: 3.0, petMob: 0, desc: "Hatches a friendly ladybug." },
+  { id: 9, name: "Stick", kind: "summon", color: "#a97442", outline: "#7d5228", icon: "stick", radius: 10, damage: 6, health: 22, reload: 4.0, petMob: 1, desc: "Calls a loyal wasp to fight." },
 ];
-
-/** Item ids that Oracle/Trade may hand back — never dropped by mobs, never craftable by combining. */
-export const TRINKET_ITEM = 10;
 
 export interface MobDef {
   id: number;
@@ -147,7 +95,7 @@ export interface MapDef {
   height: number;
   mobs: number[];
   mobCap: number;
-  rarityBias: number; // extra chance for higher rarity drops
+  rarityBias: number;
   walls: Wall[];
 }
 
@@ -229,17 +177,6 @@ export const MAPS: MapDef[] = [
 export function rarityMult(r: number): number {
   return RARITIES[Math.max(0, Math.min(MAX_RARITY, r))].mult;
 }
-
-/** Multiplier applied to a wild mob's health when it spawns at rarity `r`. */
-export function enemyRarityMult(r: number): number {
-  return RARITIES[Math.max(0, Math.min(MAX_RARITY, r))].enemyMult;
-}
-
-/** Chance that a single craft attempt made from rarity `r` succeeds, or undefined if `r` can't be crafted further. */
-export function craftChanceFor(r: number): number | undefined {
-  return RARITIES[Math.max(0, Math.min(MAX_RARITY, r))].craftChance;
-}
-
 
 export function xpForLevel(level: number): number {
   return Math.floor(18 * Math.pow(level, 1.7));
