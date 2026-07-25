@@ -10,11 +10,13 @@ import {
   EMPTY_ITEM,
   ITEMS,
   MAPS,
-  MAX_RARITY,
+  MAX_CRAFT_RARITY,
   MOBS,
   RARITIES,
   SLOT_COUNT,
   Wall,
+  craftChanceFor,
+  oracleRequiredCount,
   xpForLevel,
 } from "../shared/defs";
 import { C2S, ENT, EVT, Reader, S2C, TEAM, Writer } from "../shared/protocol";
@@ -68,6 +70,8 @@ interface SaveData {
   bag: (Cell | null)[];
   xp: number;
   mapId: number;
+  nextOracleAt?: number;
+  nextTradeAt?: number;
 }
 
 const SAVE_KEY = "petalia.save";
@@ -142,6 +146,8 @@ export class GameClient {
   private xp = 0;
   private level = 1;
   private alive = true;
+  private nextOracleAt = 0;
+  private nextTradeAt = 0;
   private slots: (Cell | null)[] = emptyCells(SLOT_COUNT);
   private bag: (Cell | null)[] = emptyCells(BAG_COUNT);
   private floaters: Floater[] = [];
@@ -161,10 +167,12 @@ export class GameClient {
   private itemBiomeCache: Map<number, Set<string>> | null = null;
   private craftOpen = false;
   private craftAnim = 0;
+  private craftMode: "normal" | "oracle" | "trade" = "normal";
   private craftSel: { item: number; rarity: number } | null = null;
   private craftSpin = 0;
   private craftMsg = "";
   private craftMsgLife = 0;
+
   private drag: { from: number; cell: Cell } | null = null;
   private dragX = 0;
   private dragY = 0;
@@ -255,10 +263,19 @@ export class GameClient {
     (data.bag || []).slice(0, BAG_COUNT).forEach((c, i) => (this.bag[i] = c ?? null));
     this.xp = data.xp || 0;
     this.selectedMap = Math.max(0, Math.min(MAPS.length - 1, data.mapId || 0));
+    this.nextOracleAt = data.nextOracleAt || 0;
+    this.nextTradeAt = data.nextTradeAt || 0;
   }
 
   private currentSave(): SaveData {
-    return { slots: this.slots, bag: this.bag, xp: this.xp, mapId: this.mapId };
+    return {
+      slots: this.slots,
+      bag: this.bag,
+      xp: this.xp,
+      mapId: this.mapId,
+      nextOracleAt: this.nextOracleAt,
+      nextTradeAt: this.nextTradeAt,
+    };
   }
 
   private persist() {
@@ -346,6 +363,9 @@ export class GameClient {
     for (let i = 0; i < SLOT_COUNT; i++) this.writeCell(w, this.slots[i]);
     w.u8(BAG_COUNT);
     for (let i = 0; i < BAG_COUNT; i++) this.writeCell(w, this.bag[i]);
+    const now = Date.now();
+    w.u32(Math.max(0, Math.ceil((this.nextOracleAt - now) / 1000)));
+    w.u32(Math.max(0, Math.ceil((this.nextTradeAt - now) / 1000)));
     this.net?.send(w.bytes());
   }
 
@@ -436,6 +456,11 @@ export class GameClient {
         this.maxHp = r.u16();
         this.mapId = r.u8();
         this.alive = r.u8() === 1;
+        const oracleSecLeft = r.u32();
+        const tradeSecLeft = r.u32();
+        const now = Date.now();
+        this.nextOracleAt = oracleSecLeft > 0 ? now + oracleSecLeft * 1000 : 0;
+        this.nextTradeAt = tradeSecLeft > 0 ? now + tradeSecLeft * 1000 : 0;
         break;
       }
       case S2C.EVENT: {
@@ -472,8 +497,7 @@ export class GameClient {
           msg: `${RARITIES[rarity].name} ${ITEMS[item]?.name ?? "?"}`,
           color: RARITIES[rarity].color,
           life: 1.6,
-          vy: -22,
-        });
+          vy: -22,        });
         break;
       case EVT.HIT:
         this.floaters.push({ x, y, msg: `-${value}`, color: "#ff6f6f", life: 0.9, vy: -40 });
@@ -483,14 +507,25 @@ export class GameClient {
         this.killFeed = this.killFeed.slice(0, 5);
         break;
       case EVT.CRAFT_OK:
-        this.craftMsg = `Crafted ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
+        this.craftMsg = value > 1
+          ? `Crafted ${value}x ${RARITIES[rarity].name} ${ITEMS[item].name}!`
+          : `Crafted ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
         this.craftMsgLife = 2.6;
         this.craftSpin = 0;
-        if (this.craftSel) this.craftSel = { item, rarity: this.craftSel.rarity };
         break;
       case EVT.CRAFT_FAIL:
-        this.craftMsg = "Craft failed... 2 petals lost.";
+        this.craftMsg = value > 0 ? `Craft failed... ${value} petal${value === 1 ? "" : "s"} lost.` : "Craft failed.";
         this.craftMsgLife = 2.6;
+        this.craftSpin = 0;
+        break;
+      case EVT.ORACLE_OK:
+        this.craftMsg = `Oracle success! Created ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
+        this.craftMsgLife = 3;
+        this.craftSpin = 0;
+        break;
+      case EVT.TRADE_OK:
+        this.craftMsg = `Traded for ${value}x ${RARITIES[rarity].name} Coin!`;
+        this.craftMsgLife = 3;
         this.craftSpin = 0;
         break;
       case EVT.DEATH:
@@ -720,23 +755,55 @@ export class GameClient {
   }
 
   private craftPanelRect(): Rect {
-    const w = Math.min(330, this.w * 0.4);
-    const h = 400;
+    const w = Math.min(340, this.w * 0.42);
+    const h = 460;
     const t = ease.outCubic(this.craftAnim);
     const hidden = this.w + 20;
     const shown = this.w - w - 18;
-    return { x: hidden + (shown - hidden) * t, y: Math.max(70, this.h / 2 - h / 2), w, h };
+    return { x: hidden + (shown - hidden) * t, y: Math.max(50, this.h / 2 - h / 2), w, h };
+  }
+
+  private craftModeRects(): { mode: "normal" | "oracle" | "trade"; rect: Rect; label: string }[] {
+    const p = this.craftPanelRect();
+    const gap = 6;
+    const w = (p.w - 24 - gap * 2) / 3;
+    const y = p.y + 40;
+    return [
+      { mode: "normal", rect: { x: p.x + 12, y, w, h: 30 }, label: "Craft" },
+      { mode: "oracle", rect: { x: p.x + 12 + w + gap, y, w, h: 30 }, label: "Oracle" },
+      { mode: "trade", rect: { x: p.x + 12 + (w + gap) * 2, y, w, h: 30 }, label: "Trade" },
+    ];
   }
 
   private craftPadRects(): Rect[] {
     const p = this.craftPanelRect();
     const size = 54;
     const cx = p.x + p.w / 2;
-    const cy = p.y + 150;
+    const cy = p.y + 195;
     return new Array(5).fill(0).map((_, i) => {
       const a = (i / 5) * Math.PI * 2 - Math.PI / 2;
       return { x: cx + Math.cos(a) * 80 - size / 2, y: cy + Math.sin(a) * 72 - size / 2, w: size, h: size };
     });
+  }
+
+  /** Single centered slot used by Oracle/Trade modes (they only ever hold one item type). */
+  private craftSingleSlotRect(): Rect {
+    const p = this.craftPanelRect();
+    const size = 64;
+    return { x: p.x + p.w / 2 - size / 2, y: p.y + 165, w: size, h: size };
+  }
+
+  private craftActionButtonRect(): Rect {
+    const p = this.craftPanelRect();
+    return { x: p.x + p.w / 2 - 90, y: p.y + p.h - 66, w: 180, h: 48 };
+  }
+
+  private formatCooldown(msLeft: number): string {
+    if (msLeft <= 0) return "Ready";
+    const h = Math.floor(msLeft / 3600000);
+    const m = Math.floor((msLeft % 3600000) / 60000);
+    const s = Math.floor((msLeft % 60000) / 1000);
+    return `${h}h ${String(m).padStart(2, "0")}m ${String(s).padStart(2, "0")}s`;
   }
 
   private cellAt(index: number): Cell | null {
@@ -929,8 +996,7 @@ export class GameClient {
   private gameClick(mx: number, my: number) {
     if (!this.alive) {
       const bw = 180;
-      const cx = this.w / 2;
-      if (hit({ x: cx - bw - 10, y: this.h / 2 + 40, w: bw, h: 52 }, mx, my)) {
+      const cx = this.w / 2;      if (hit({ x: cx - bw - 10, y: this.h / 2 + 40, w: bw, h: 52 }, mx, my)) {
         const w = new Writer(2);
         w.u8(C2S.RESPAWN);
         this.net?.send(w.bytes());
@@ -959,24 +1025,10 @@ export class GameClient {
       return;
     }
 
-    if (this.craftAnim > 0.4) {
-      const cp = this.craftPanelRect();
-      if (hit(cp, mx, my)) {
-        const craftBtn = { x: cp.x + cp.w / 2 - 90, y: cp.y + cp.h - 66, w: 180, h: 48 };
-        if (hit(craftBtn, mx, my) && this.craftSel) {
-          const avail = this.countOf(this.craftSel.item, this.craftSel.rarity);
-          if (avail >= 5 && this.craftSel.rarity < MAX_RARITY) {
-            const w = new Writer(4);
-            w.u8(C2S.CRAFT).u8(this.craftSel.item).u8(this.craftSel.rarity);
-            this.net?.send(w.bytes());
-            this.craftSpin = 0.8;
-          }
-        }
-        return;
-      }
-    }
+    if (this.craftAnim > 0.4 && this.handleCraftClick(mx, my)) return;
 
     if (this.bagAnim > 0.4 && this.handleBagClick(mx, my)) return;
+
 
     const idx = this.cellIndexAtPoint(mx, my);
     if (idx >= 0) {
@@ -988,6 +1040,98 @@ export class GameClient {
       }
       return;
     }
+  }
+
+  private craftCloseRect(): Rect {
+    const p = this.craftPanelRect();
+    return { x: p.x + p.w - 34, y: p.y + 8, w: 24, h: 24 };
+  }
+
+  /** Cooldown remaining (ms) for the given craft mode; 0 if ready or not applicable. */
+  private craftCooldownLeft(mode: "oracle" | "trade"): number {
+    const until = mode === "oracle" ? this.nextOracleAt : this.nextTradeAt;
+    return Math.max(0, until - Date.now());
+  }
+
+  /** Handles clicks that land on the crafting panel's own chrome (tabs/slots/action button). */
+  private handleCraftClick(mx: number, my: number): boolean {
+    const p = this.craftPanelRect();
+    if (!hit(p, mx, my)) return false;
+
+    if (hit(this.craftCloseRect(), mx, my)) {
+      this.craftOpen = false;
+      return true;
+    }
+
+    for (const { mode, rect } of this.craftModeRects()) {
+      if (hit(rect, mx, my)) {
+        if (this.craftMode !== mode) {
+          this.craftMode = mode;
+          this.craftSel = null;
+          this.craftMsg = "";
+        }
+        return true;
+      }
+    }
+
+    if (this.craftMode === "normal") {
+      for (const r of this.craftPadRects()) {
+        if (hit(r, mx, my) && this.craftSel) {
+          this.craftSel = null;
+          return true;
+        }
+      }
+      const btn = this.craftActionButtonRect();
+      if (hit(btn, mx, my) && this.craftSel) {
+        const avail = this.countOf(this.craftSel.item, this.craftSel.rarity);
+        if (avail >= 5 && this.craftSel.rarity < MAX_CRAFT_RARITY) {
+          const w = new Writer(6);
+          w.u8(C2S.CRAFT).u8(this.craftSel.item).u8(this.craftSel.rarity).u16(0);
+          this.net?.send(w.bytes());
+          this.craftSpin = 0.8;
+        }
+      }
+      return true;
+    }
+
+    if (this.craftMode === "oracle") {
+      if (hit(this.craftSingleSlotRect(), mx, my) && this.craftSel) {
+        this.craftSel = null;
+        return true;
+      }
+      const btn = this.craftActionButtonRect();
+      if (hit(btn, mx, my) && this.craftSel) {
+        const required = oracleRequiredCount(this.craftSel.rarity);
+        const avail = this.countOf(this.craftSel.item, this.craftSel.rarity);
+        if (required !== undefined && avail >= required && this.craftCooldownLeft("oracle") <= 0) {
+          const w = new Writer(4);
+          w.u8(C2S.ORACLE).u8(this.craftSel.item).u8(this.craftSel.rarity);
+          this.net?.send(w.bytes());
+          this.craftSpin = 0.8;
+        }
+      }
+      return true;
+    }
+
+    if (this.craftMode === "trade") {
+      if (hit(this.craftSingleSlotRect(), mx, my) && this.craftSel) {
+        this.craftSel = null;
+        return true;
+      }
+      const btn = this.craftActionButtonRect();
+      if (hit(btn, mx, my) && this.craftSel) {
+        const avail = this.countOf(this.craftSel.item, this.craftSel.rarity);
+        if (avail >= 1 && this.craftCooldownLeft("trade") <= 0) {
+          const w = new Writer(6);
+          w.u8(C2S.TRADE).u8(this.craftSel.item).u8(this.craftSel.rarity).u16(0);
+          this.net?.send(w.bytes());
+          this.craftSpin = 0.8;
+        }
+      }
+      return true;
+    }
+
+    return true;
   }
 
   /** Handles clicks that land on the bag's own chrome (close/search/biome/scrollbar). */
@@ -1093,8 +1237,10 @@ export class GameClient {
     this.drag = null;
     if (!drag) return;
     if (this.craftAnim > 0.4 && hit(this.craftPanelRect(), mx, my)) {
-      this.craftSel = { item: drag.cell.item, rarity: drag.cell.rarity };
-      this.craftMsg = "";
+      if (ITEMS[drag.cell.item].kind !== "trinket") {
+        this.craftSel = { item: drag.cell.item, rarity: drag.cell.rarity };
+        this.craftMsg = "";
+      }
       return;
     }
     const target = this.cellIndexAtPoint(mx, my);
@@ -1349,8 +1495,7 @@ export class GameClient {
     roundRect(ctx, e.x - 15, e.y - 18 + bob, 30, 36, 6);
     ctx.fillStyle = rarity.color;
     ctx.fill();
-    roundRect(ctx, e.x - 12, e.y - 15 + bob, 24, 30, 5);
-    ctx.fillStyle = shade(rarity.color, -40);
+    roundRect(ctx, e.x - 12, e.y - 15 + bob, 24, 30, 5);    ctx.fillStyle = shade(rarity.color, -40);
     ctx.fill();
     drawItemIcon(ctx, e.type, e.x, e.y + bob, 9, this.time * 2);
     ctx.restore();
@@ -1683,9 +1828,11 @@ export class GameClient {
     if (def.kind === "petal") {
       text(ctx, `Damage ${(def.damage * mult).toFixed(0)}`, px + 12, py + 62, 13, "#ffffff", "left");
       text(ctx, `Health ${(def.health * mult).toFixed(0)}`, px + 12, py + 80, 13, "#ffffff", "left");
-    } else {
+    } else if (def.kind === "summon") {
       text(ctx, `Summons ${MOBS[def.petMob ?? 0].name}`, px + 12, py + 62, 13, "#8fffa8", "left");
       text(ctx, `Respawn ${def.reload}s`, px + 12, py + 80, 13, "#ffffff", "left");
+    } else {
+      text(ctx, "Trade fodder — no combat use", px + 12, py + 62, 13, "#ffd54a", "left");
     }
     text(ctx, def.desc, px + 12, py + 104, 12, "rgba(255,255,255,0.7)", "left");
   }
@@ -1697,19 +1844,44 @@ export class GameClient {
     ctx.save();
     ctx.globalAlpha = Math.min(1, this.craftAnim * 1.3);
     panel(ctx, p);
-    text(ctx, "Crafting", p.x + p.w / 2, p.y + 26, 22, "#ffbe5c");
-    text(ctx, "Drag a card here — 5 combine into 1", p.x + p.w / 2, p.y + 50, 12, "rgba(255,255,255,0.75)");
+
+    text(ctx, "Crafting", p.x + p.w / 2, p.y + 20, 20, "#ffbe5c");
+    button(ctx, this.craftCloseRect(), "x", "#c0392b", hit(this.craftCloseRect(), this.mx, this.my), 13);
+
+    for (const { mode, rect, label } of this.craftModeRects()) {
+      const active = this.craftMode === mode;
+      const color = mode === "normal" ? "#c9762b" : mode === "oracle" ? "#6a3fb0" : "#3f8f5a";
+      button(ctx, rect, label, active ? color : "#3a3a3a", hit(rect, this.mx, this.my), 13);
+    }
+
+    if (this.craftMode === "normal") this.renderCraftNormal(ctx, p);
+    else this.renderCraftOracleOrTrade(ctx, p, this.craftMode);
+
+    if (this.craftMsgLife > 0) {
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, this.craftMsgLife);
+      const bad = this.craftMsg.toLowerCase().includes("fail") || this.craftMsg.toLowerCase().includes("cooldown");
+      text(ctx, this.craftMsg, p.x + p.w / 2, p.y + p.h - 96, 13, bad ? "#ff9d9d" : "#8fffa8");
+      ctx.restore();
+    }
+
+    ctx.restore();
+  }
+
+  private renderCraftNormal(ctx: CanvasRenderingContext2D, p: Rect) {
+    text(ctx, "Drag a card here — 5 combine into 1", p.x + p.w / 2, p.y + 82, 12, "rgba(255,255,255,0.75)");
 
     const pads = this.craftPadRects();
     const sel = this.craftSel;
     const avail = sel ? this.countOf(sel.item, sel.rarity) : 0;
     const spin = this.craftSpin > 0 ? (0.8 - this.craftSpin) * 14 : 0;
+    const attempts = Math.floor(avail / 5);
     pads.forEach((r, i) => {
       const filled = sel && avail >= i + 1;
       ctx.save();
       if (this.craftSpin > 0) {
         const cx = p.x + p.w / 2;
-        const cy = p.y + 150;
+        const cy = p.y + 195;
         ctx.translate(cx, cy);
         ctx.rotate(spin);
         ctx.translate(-cx, -cy);
@@ -1723,23 +1895,81 @@ export class GameClient {
 
     if (sel) {
       const def = ITEMS[sel.item];
-      text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, p.x + p.w / 2, p.y + 250, 18, RARITIES[sel.rarity].color);
-      text(ctx, `You have ${avail} / 5`, p.x + p.w / 2, p.y + 274, 14, avail >= 5 ? "#8fffa8" : "#ff9d9d");
-      const next = Math.min(MAX_RARITY, sel.rarity + 1);
-      text(ctx, `→ ${RARITIES[next].name}`, p.x + p.w / 2, p.y + 298, 15, RARITIES[next].color);
+      const chance = craftChanceFor(sel.rarity);
+      text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, p.x + p.w / 2, p.y + 295, 17, RARITIES[sel.rarity].color);
+      text(ctx, `You have ${avail} (${attempts} attempt${attempts === 1 ? "" : "s"})`, p.x + p.w / 2, p.y + 317, 13, avail >= 5 ? "#8fffa8" : "#ff9d9d");
+      if (sel.rarity < MAX_CRAFT_RARITY && chance !== undefined) {
+        const next = sel.rarity + 1;
+        text(ctx, `→ ${RARITIES[next].name} (${(chance * 100).toFixed(2)}% each)`, p.x + p.w / 2, p.y + 337, 13, RARITIES[next].color);
+      } else {
+        text(ctx, "Already at max craftable rarity", p.x + p.w / 2, p.y + 337, 13, "rgba(255,255,255,0.6)");
+      }
     } else {
-      text(ctx, "no petal selected", p.x + p.w / 2, p.y + 262, 15, "rgba(255,255,255,0.6)");
+      text(ctx, "no petal selected", p.x + p.w / 2, p.y + 305, 14, "rgba(255,255,255,0.6)");
     }
-    if (this.craftMsgLife > 0) {
-      ctx.save();
-      ctx.globalAlpha = Math.min(1, this.craftMsgLife);
-      text(ctx, this.craftMsg, p.x + p.w / 2, p.y + 322, 14, this.craftMsg.includes("failed") ? "#ff9d9d" : "#8fffa8");
-      ctx.restore();
+
+    const btn = this.craftActionButtonRect();
+    const canCraft = !!sel && avail >= 5 && sel.rarity < MAX_CRAFT_RARITY;
+    button(ctx, btn, attempts > 1 ? `CRAFT x${attempts}` : "CRAFT", "#c9762b", hit(btn, this.mx, this.my), 18, canCraft);
+  }
+
+  private renderCraftOracleOrTrade(ctx: CanvasRenderingContext2D, p: Rect, mode: "oracle" | "trade") {
+    const isOracle = mode === "oracle";
+    text(
+      ctx,
+      isOracle ? "Drag a card here — skip 2 rarities at once" : "Drag a card here — exchange for Coins",
+      p.x + p.w / 2,
+      p.y + 82,
+      12,
+      "rgba(255,255,255,0.75)",
+    );
+
+    const r = this.craftSingleSlotRect();
+    const sel = this.craftSel;
+    const avail = sel ? this.countOf(sel.item, sel.rarity) : 0;
+    drawCard(ctx, r, sel ? { item: sel.item, rarity: sel.rarity, count: avail } : null, {
+      empty: "+",
+      showName: false,
+    });
+
+    const cooldownMs = this.craftCooldownLeft(mode);
+    const ready = cooldownMs <= 0;
+
+    if (sel) {
+      const def = ITEMS[sel.item];
+      text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, p.x + p.w / 2, p.y + 250, 16, RARITIES[sel.rarity].color);
+
+      if (isOracle) {
+        const required = oracleRequiredCount(sel.rarity);
+        if (required === undefined) {
+          text(ctx, "Cannot Oracle this rarity", p.x + p.w / 2, p.y + 272, 13, "#ff9d9d");
+        } else {
+          text(ctx, `Need ${required} — have ${avail}`, p.x + p.w / 2, p.y + 272, 13, avail >= required ? "#8fffa8" : "#ff9d9d");
+          const target = sel.rarity + 2;
+          if (target < RARITIES.length) {
+            text(ctx, `→ ${RARITIES[target].name} ${def.name} (guaranteed)`, p.x + p.w / 2, p.y + 292, 13, RARITIES[target].color);
+          }
+        }
+      } else {
+        text(ctx, `${avail} card${avail === 1 ? "" : "s"} → ${avail} Coin${avail === 1 ? "" : "s"}`, p.x + p.w / 2, p.y + 272, 13, "#ffd54a");
+      }
+    } else {
+      text(ctx, "no card selected", p.x + p.w / 2, p.y + 262, 14, "rgba(255,255,255,0.6)");
     }
-    const btn = { x: p.x + p.w / 2 - 90, y: p.y + p.h - 66, w: 180, h: 48 };
-    const canCraft = !!sel && avail >= 5 && sel.rarity < MAX_RARITY;
-    button(ctx, btn, "CRAFT", "#c9762b", hit(btn, this.mx, this.my), 20, canCraft);
-    ctx.restore();
+
+    text(
+      ctx,
+      `${isOracle ? "Oracle" : "Trade"} cooldown: ${ready ? "Ready" : this.formatCooldown(cooldownMs)}`,
+      p.x + p.w / 2,
+      p.y + p.h - 118,
+      12,
+      ready ? "#8fffa8" : "#ffd54a",
+    );
+
+    const btn = this.craftActionButtonRect();
+    const required = isOracle ? oracleRequiredCount(sel?.rarity ?? 0) : 1;
+    const canAct = !!sel && ready && required !== undefined && avail >= required;
+    button(ctx, btn, isOracle ? "ORACLE" : "TRADE", isOracle ? "#6a3fb0" : "#3f8f5a", hit(btn, this.mx, this.my), 18, canAct);
   }
 
   private renderDeath() {
