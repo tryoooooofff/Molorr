@@ -927,6 +927,9 @@ export class GameClient {
       actionRect: { x: p.x + p.w / 2 - 100, y: p.y + p.h - btnH - 16, w: 200, h: btnH } as Rect,
       closeRect: { x: p.x + p.w - 34, y: p.y + 10, w: 24, h: 24 } as Rect,
       scrollTrack,
+      cx: bigSlots[2].x + bigSlots[2].w / 2,
+      cy: bigSlots[2].y + bigSlots[2].h / 2,
+      radius: bigSize * 0.8,
     };
   }
 
@@ -2486,7 +2489,7 @@ export class GameClient {
         scale: this.craftSpin > 0 ? 1.06 : 1,
       });
       ctx.restore();
-    }
+    });
 
     const y = layout.infoY;
     if (!sel) {
