@@ -7,6 +7,7 @@
  */
 import {
   BAG_COUNT,
+  CRAFT_CARD_COUNT,
   EMPTY_ITEM,
   ITEMS,
   MAPS,
@@ -195,7 +196,7 @@ export class GameClient {
   private craftSpin = 0;
   private craftMsg = "";
   private craftMsgLife = 0;
-  // crafting browser (mirrors the inventory: search bar, biome filter, scrollable 5-wide grid)
+  // crafting browser: search/filter plus an item-by-rarity matrix
   private craftSearchText = "";
   private craftSearchActive = false;
   private craftBiome = "All";
@@ -216,7 +217,7 @@ export class GameClient {
   // animation time for more juice.
   private craftPhase: "none" | "rotating" | "waiting" | "showing" = "none";
   private craftRotTime = 0; // seconds elapsed while rotating
-  private craftRotDuration = 2.8; // seconds, increased from 1.5 (animation time increase)
+  private craftRotDuration = 2.5; // seconds — matches CraftAnimation.startAnimation(duration=2.5)
   private craftAngle = 0; // degrees, accumulates during rotation
   private craftRotDir = 1;
   private craftRotSpeed = 300; // deg/s, accelerates 300 -> 800
@@ -874,72 +875,69 @@ export class GameClient {
 
   /**
    * Geometry for the widened crafting panel.
-   * - Inventory slots are SMALLER (38px) so they don't cover the 5 craft slots
-   * - 5 craft slots form a pentagon (CraftAnimation style) centered left-ish
-   * - Craft button sits on the right-up corner as requested
-   * - Result card has its own centered rect
-   * - Grid lives strictly BELOW the craft pentagon to avoid overlap
+   * - Five 70px craft slots form a compact pentagon near the top
+   * - Mode selectors sit in a small top-right row
+   * - The action button is vertically centered beside the pentagon
+   * - Filters and the item-by-rarity matrix live below the craft area
    */
   private craftLayout() {
     const p = this.craftPanelRect();
     const pad = 14;
     const headerH = 42;
-    const tabsH = 28;
+    const tabsH = 32;
     const barH = 26;
 
-    // tabs just below header
-    const tabsY = p.y + headerH + 2;
+    // Craft log and compact mode selectors share the top row.
+    const logRect: Rect = { x: p.x + pad, y: p.y + 10, w: 150, h: 82 };
+    const tabsY = p.y + 10;
 
-    // search + biome row
-    const barY = tabsY + tabsH + 8;
-    const barGap = 8;
-    const dropW = 110;
-    const barW = Math.min(210, p.w * 0.34);
-    const barX = p.x + pad;
-    const dropX = barX + barW + barGap;
-
-    // --- Craft pentagon config (mirrors CraftAnimation) ---
-    const bigSize = 64; // slotSize for the 5 craft slots (bigger than inventory)
-    const radius = 92; // distance from center to each slot (matches CraftAnimation.radius ~80)
-    // Center placed slightly left of panel center so right side is free for button/log
+    // CraftAnimation geometry: radius 80 and slot size 70.
+    const bigSize = 70;
+    const radius = 80;
     const cx = p.x + p.w * 0.38;
-    const cy = p.y + 182; // fixed from top, ensures space for search bar above
+    const cy = p.y + 148;
 
-    // Build pentagon positions (static base, will be rotated/contracted during animation)
     const bigSlots: Rect[] = [];
-    for (let i = 0; i < 5; i++) {
-      const ang = (Math.PI / 180) * (-90 + i * 72);
+    for (let i = 0; i < CRAFT_CARD_COUNT; i++) {
+      const ang = (Math.PI / 180) * (-90 + i * (360 / CRAFT_CARD_COUNT));
       const ox = Math.cos(ang) * radius;
       const oy = Math.sin(ang) * radius;
       bigSlots.push({ x: cx + ox - bigSize / 2, y: cy + oy - bigSize / 2, w: bigSize, h: bigSize });
     }
     const singleSlot: Rect = { x: cx - bigSize / 2, y: cy - bigSize / 2, w: bigSize, h: bigSize };
 
-    // Result card - prominent center card (larger) after craft succeeds
     const resultSize = 88;
     const resultRect: Rect = { x: cx - resultSize / 2, y: cy - resultSize / 2, w: resultSize, h: resultSize };
 
-    // Craft button on RIGHT-UP position as requested
-    // top-right area, just below the close button, fully visible
-    const actionRect: Rect = { x: p.x + p.w - 124, y: p.y + 14, w: 110, h: 36 };
+    // Pin the action to the right edge, centered beside the pentagon.
+    const actionW = 110;
+    const actionH = 36;
+    const actionRect: Rect = { x: p.x + p.w - 124, y: cy - actionH / 2, w: actionW, h: actionH };
     const closeRect: Rect = { x: p.x + p.w - 34, y: p.y + 10, w: 24, h: 24 };
 
-    // --- Inventory browser (below the pentagon, small slots, never covers craft) ---
     const craftBottom = cy + radius + bigSize / 2 + 24;
-    const infoY = craftBottom + 4;
+
+    // Filters are directly above the prompt and matrix: biome first, search second.
+    const barGap = 8;
+    const dropW = 110;
+    const barW = Math.min(210, p.w * 0.34);
+    const dropX = p.x + pad;
+    const barY = craftBottom + 4;
+    const barX = dropX + dropW + barGap;
+    const infoY = barY + barH + 10;
     const gridTop = infoY + 38;
     const gridBottom = p.y + p.h - 10;
-    const slotSizeSmall = 40; // SMALLER inventory slots as requested
+
+    // Matrix columns map directly to rarity indexes; rows map to item types.
+    const slotSizeSmall = 40;
     const gapSmall = 6;
     const itemHeightSmall = slotSizeSmall + gapSmall;
-    const availableW = p.w - pad * 2 - 10; // minus scrollbar
-    const cols = Math.max(6, Math.floor(availableW / (slotSizeSmall + gapSmall)));
+    const cols = RARITIES.length;
+    const totalGridWidth = cols * (slotSizeSmall + gapSmall) - gapSmall;
+    const gridStartX = p.x + p.w / 2 - totalGridWidth / 2;
     const gridH = Math.max(itemHeightSmall, gridBottom - gridTop);
     const maxVisibleRows = Math.max(1, Math.floor(gridH / itemHeightSmall));
-    const scrollTrack: Rect = { x: p.x + p.w - pad - 2, y: gridTop, w: 6, h: gridH };
-
-    // Craft log area (top-left small box)
-    const logRect: Rect = { x: p.x + pad, y: p.y + 10, w: 150, h: 82 };
+    const scrollTrack: Rect = { x: gridStartX + totalGridWidth + 10, y: gridTop, w: 6, h: gridH };
 
     return {
       panel: p,
@@ -954,6 +952,8 @@ export class GameClient {
       barRect: { x: barX, y: barY, w: barW, h: barH } as Rect,
       dropRect: { x: dropX, y: barY, w: dropW, h: barH } as Rect,
       gridTop,
+      gridStartX,
+      totalGridWidth,
       gridH,
       maxVisibleRows,
       bigSlots,
@@ -974,15 +974,16 @@ export class GameClient {
 
   private craftModeRects(): { mode: "normal" | "oracle" | "trade"; rect: Rect; label: string; color: string }[] {
     const layout = this.craftLayout();
-    const p = layout.panel;
     const gap = 6;
-    const w = (p.w - layout.pad * 2 - gap * 2) / 3;
-    const y = layout.tabsY;
     const h = layout.tabsH;
+    const w = h;
+    const y = layout.tabsY;
+    const modeCount = 3;
+    const x0 = layout.closeRect.x - 10 - (w + gap) * modeCount;
     return [
-      { mode: "normal", rect: { x: p.x + layout.pad, y, w, h }, label: "Craft", color: "#c9762b" },
-      { mode: "oracle", rect: { x: p.x + layout.pad + w + gap, y, w, h }, label: "Oracle", color: "#6a3fb0" },
-      { mode: "trade", rect: { x: p.x + layout.pad + (w + gap) * 2, y, w, h }, label: "Trade", color: "#3f8f5a" },
+      { mode: "normal", rect: { x: x0, y, w, h }, label: "Cr", color: "#c9762b" },
+      { mode: "oracle", rect: { x: x0 + w + gap, y, w, h }, label: "Or", color: "#6a3fb0" },
+      { mode: "trade", rect: { x: x0 + (w + gap) * 2, y, w, h }, label: "Tr", color: "#3f8f5a" },
     ];
   }
 
@@ -1000,23 +1001,38 @@ export class GameClient {
     return this.craftLayout().actionRect;
   }
 
-  /** Bag stacks that can go into the crafting panel, filtered by search text + biome. */
-  private craftFilteredEntries(): { slot: number; cell: Cell }[] {
+  /**
+   * Distinct owned item types that pass the filters. Each item is one matrix
+   * row, while each rarity index is a fixed matrix column.
+   */
+  private craftMatrixRows(): number[] {
     const query = this.craftSearchText.trim().toLowerCase();
     const biome = this.craftBiome;
-    return this.bagEntries().filter(({ cell }) => {
+    const seen = new Set<number>();
+    for (const { cell } of this.bagEntries()) {
       const def = ITEMS[cell.item];
-      if (!def) return false;
-      if (this.craftMode !== "trade" && def.kind === "trinket") return false;
-      if (query && !def.name.toLowerCase().includes(query)) return false;
-      if (biome !== "All" && !this.itemBiomes(cell.item).has(biome)) return false;
-      return true;
+      if (!def) continue;
+      if (this.craftMode !== "trade" && def.kind === "trinket") continue;
+      if (query && !def.name.toLowerCase().includes(query)) continue;
+      if (biome !== "All" && !this.itemBiomes(cell.item).has(biome)) continue;
+      seen.add(cell.item);
+    }
+    return [...seen].sort((a, b) => {
+      const nameA = ITEMS[a]?.name ?? "";
+      const nameB = ITEMS[b]?.name ?? "";
+      return nameA.localeCompare(nameB);
     });
+  }
+
+  /** Cell for an item/rarity matrix coordinate, or null when none is owned. */
+  private craftMatrixCell(item: number, rarity: number): Cell | null {
+    const count = this.countOf(item, rarity);
+    return count > 0 ? { item, rarity, count } : null;
   }
 
   private craftMaxScroll(): number {
     const layout = this.craftLayout();
-    const totalRows = Math.ceil(this.craftFilteredEntries().length / layout.cols);
+    const totalRows = this.craftMatrixRows().length;
     const totalHeight = totalRows * layout.itemHeight;
     const visibleHeight = layout.maxVisibleRows * layout.itemHeight;
     return Math.max(0, totalHeight - visibleHeight);
@@ -1028,7 +1044,7 @@ export class GameClient {
 
   private craftScrollThumbRect(layout: ReturnType<GameClient["craftLayout"]>): Rect {
     const track = layout.scrollTrack;
-    const totalRows = Math.max(1, Math.ceil(this.craftFilteredEntries().length / layout.cols));
+    const totalRows = Math.max(1, this.craftMatrixRows().length);
     if (totalRows <= layout.maxVisibleRows) return { x: track.x, y: track.y, w: track.w, h: track.h };
     const maxScroll = this.craftMaxScroll();
     const thumbH = Math.max(20, (layout.maxVisibleRows / totalRows) * track.h);
@@ -1044,7 +1060,7 @@ export class GameClient {
       return;
     }
     const track = layout.scrollTrack;
-    const totalRows = Math.max(1, Math.ceil(this.craftFilteredEntries().length / layout.cols));
+    const totalRows = Math.max(1, this.craftMatrixRows().length);
     const thumbH = Math.max(20, (layout.maxVisibleRows / totalRows) * track.h);
     const maxDrag = track.h - thumbH;
     if (maxDrag <= 0) return;
@@ -1052,27 +1068,29 @@ export class GameClient {
     this.craftScrollY = Math.max(0, Math.min(maxScroll, this.craftScrollAtDragStart + ratio * maxScroll));
   }
 
-  /** Card the pointer is over inside the crafting browser grid, or null. */
+  /** Card under the pointer in the item-row/rarity-column matrix. */
   private craftGridEntryAtPoint(x: number, y: number): { slot: number; cell: Cell } | null {
     const layout = this.craftLayout();
     const p = layout.panel;
     if (x < p.x || x > p.x + p.w || y < layout.gridTop || y > layout.gridTop + layout.gridH) return null;
     this.clampCraftScroll();
-    const filtered = this.craftFilteredEntries();
+    const rows = this.craftMatrixRows();
     const startRow = Math.floor(this.craftScrollY / layout.itemHeight);
     const yOffset = -(this.craftScrollY % layout.itemHeight);
-    const relX = x - (p.x + layout.pad);
+    const relX = x - layout.gridStartX;
     const relY = y - layout.gridTop - yOffset;
     if (relX < 0 || relY < 0) return null;
     const col = Math.floor(relX / (layout.slotSize + layout.gap));
-    const row = Math.floor(relY / (layout.slotSize + layout.gap));
-    if (col < 0 || col >= layout.cols || row < 0) return null;
-    const entry = filtered[startRow * layout.cols + row * layout.cols + col];
-    if (!entry) return null;
-    const slotX = p.x + layout.pad + col * (layout.slotSize + layout.gap);
-    const slotY = layout.gridTop + row * layout.itemHeight + yOffset;
+    const rowOffset = Math.floor(relY / (layout.slotSize + layout.gap));
+    if (col < 0 || col >= layout.cols || rowOffset < 0) return null;
+    const item = rows[startRow + rowOffset];
+    if (item === undefined) return null;
+    const cell = this.craftMatrixCell(item, col);
+    if (!cell) return null;
+    const slotX = layout.gridStartX + col * (layout.slotSize + layout.gap);
+    const slotY = layout.gridTop + rowOffset * layout.itemHeight + yOffset;
     if (x < slotX || x > slotX + layout.slotSize || y < slotY || y > slotY + layout.slotSize) return null;
-    return entry;
+    return { slot: -1, cell };
   }
 
   // ── Ported CraftAnimation helpers (spin / contraction / particles / fill) ──
@@ -1080,7 +1098,7 @@ export class GameClient {
   /** Local position of the i-th pentagon slot (before rotation/contraction). */
   private craftLocalPos(i: number): [number, number] {
     const { radius } = this.craftLayout();
-    const a = (Math.PI / 180) * (-90 + i * 72);
+    const a = (Math.PI / 180) * (-90 + i * (360 / CRAFT_CARD_COUNT));
     return [Math.cos(a) * radius, Math.sin(a) * radius];
   }
 
@@ -1229,7 +1247,7 @@ export class GameClient {
   private craftSpawnFailParticles() {
     const { cx, cy } = this.craftLayout();
     const color: [number, number, number] = this.craftSel ? this.rarityRgb(this.craftSel.rarity) : [200, 80, 80];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < CRAFT_CARD_COUNT; i++) {
       const [ox, oy] = this.craftLocalPos(i);
       const rad = (Math.PI / 180) * this.craftAngle;
       const wx = cx + ox * Math.cos(rad) - oy * Math.sin(rad);
@@ -1620,6 +1638,10 @@ export class GameClient {
       return true;
     }
 
+    // Keep the five submitted cards fixed in place until their animation resolves.
+    // This also prevents a double click from starting a second craft.
+    if (this.craftPhase !== "none") return true;
+
     for (const { mode, rect } of this.craftModeRects()) {
       if (!hit(rect, mx, my)) continue;
       if (this.craftMode !== mode) {
@@ -1702,6 +1724,7 @@ export class GameClient {
 
   /** Puts a bag cell into the craft slots, with a little pop of feedback. */
   private selectCraftCell(cell: Cell) {
+    if (this.craftPhase !== "none") return;
     if (this.craftMode !== "trade" && ITEMS[cell.item]?.kind === "trinket") {
       this.craftMsg = "Coins can only be traded.";
       this.craftMsgLife = 2;
@@ -1715,6 +1738,7 @@ export class GameClient {
 
   /** Fires the current mode's request if the selection satisfies its requirements. */
   private submitCraft() {
+    if (this.craftPhase !== "none") return;
     const sel = this.craftSel;
     if (!sel) {
       this.craftMsg = "Pick a card first.";
@@ -1725,16 +1749,18 @@ export class GameClient {
     const avail = this.countOf(sel.item, sel.rarity);
 
     if (this.craftMode === "normal") {
-      if (avail < 5 || sel.rarity >= MAX_CRAFT_RARITY) {
-        this.craftMsg = avail < 5 ? "Need 5 identical cards." : "Already at max craftable rarity.";
+      if (avail < CRAFT_CARD_COUNT || sel.rarity >= MAX_CRAFT_RARITY) {
+        this.craftMsg = avail < CRAFT_CARD_COUNT ? `Need ${CRAFT_CARD_COUNT} identical cards.` : "Already at max craftable rarity.";
         this.craftMsgLife = 2;
         this.craftShake = 0.35;
         return;
       }
       const w = new Writer(6);
-      w.u8(C2S.CRAFT).u8(sel.item).u8(sel.rarity).u16(0);
-      this.craftLogPetals += 5;
-      this.craftLogAttempts += Math.floor(avail / 5);
+      // Send an explicit group size for compatibility with older servers that
+      // treated zero as "craft every available group".
+      w.u8(C2S.CRAFT).u8(sel.item).u8(sel.rarity).u16(CRAFT_CARD_COUNT);
+      this.craftLogPetals += CRAFT_CARD_COUNT;
+      this.craftLogAttempts += 1;
       this.craftStartRotation();
       this.net?.send(w.bytes());
       this.craftSpin = 0.8;
@@ -2393,13 +2419,8 @@ drawItemIcon(ctx, e.type, e.x, e.y + bob, 9, this.time * 2, e.team || 0);
   }
 
   /**
-   * Crafting panel - WIDER version matching CraftAnimation spec:
-   * - Width 780px (was 400px)
-   * - 5 craft slots in pentagon star, never covered by inventory grid
-   * - Inventory slots are SMALLER (40px vs 64px)
-   * - Craft button at RIGHT-UP corner
-   * - Added dedicated Result Card with glow & pulse
-   * - Longer animation time (2.8s rotation + particles)
+   * Wide CraftAnimation-style panel with compact mode selectors, a pentagon
+   * input area, a side action button, result effects, and a rarity matrix.
    */
   private renderCraft() {
     if (this.craftAnim < 0.01) return;
@@ -2424,11 +2445,10 @@ drawItemIcon(ctx, e.type, e.x, e.y + bob, 9, this.time * 2, e.team || 0);
     ctx.strokeStyle = panelBorder;
     ctx.stroke();
 
-    // Title left of center (leave room for action button right-up)
     text(ctx, this.craftMode === "normal" ? "Craft" : this.craftMode === "oracle" ? "Oracle" : "Trade", p.x + p.w * 0.38, p.y + 24, 22, "#ffffff");
     button(ctx, layout.closeRect, "x", "#e53232", hit(layout.closeRect, this.mx, this.my), 14);
 
-    // Craft button at RIGHT-UP as requested
+    // Action button centered beside the pentagon.
     const btn = layout.actionRect;
     const label = this.craftActionLabel();
     button(ctx, btn, label.text, accent, hit(btn, this.mx, this.my), 15, label.enabled);
@@ -2440,15 +2460,15 @@ drawItemIcon(ctx, e.type, e.x, e.y + bob, 9, this.time * 2, e.team || 0);
       }
     }
 
-    // mode tabs
+    // Compact Cr / Or / Tr selectors in the top-right row.
     for (const { mode, rect, label: lab, color } of this.craftModeRects()) {
       const active = this.craftMode === mode;
-      button(ctx, rect, lab, active ? color : "#3f7dc2", hit(rect, this.mx, this.my), 13);
+      button(ctx, rect, lab, active ? color : "#3f7dc2", hit(rect, this.mx, this.my), 12);
     }
 
-    // search + biome filter (below tabs, above craft pentagon)
-    searchField(ctx, layout.barRect, this.craftSearchText, this.craftSearchActive, "Search cards...");
+    // Biome and search filters directly above the matrix.
     dropdownField(ctx, layout.dropRect, this.craftBiome, this.craftBiomeOpen);
+    searchField(ctx, layout.barRect, this.craftSearchText, this.craftSearchActive, "Search cards...");
 
     // Craft log (top-left compact)
     this.drawCraftLogPanel(ctx, layout);
@@ -2556,75 +2576,81 @@ drawItemIcon(ctx, e.type, e.x, e.y + bob, 9, this.time * 2, e.team || 0);
     }
   }
 
-  /** Draws the clipped, pixel-scrolled card browser — SMALLER slots now */
+  /** Draws the item-row/rarity-column crafting matrix. */
   private renderCraftGrid(
     ctx: CanvasRenderingContext2D,
     layout: ReturnType<GameClient["craftLayout"]>,
   ): { slot: number; cell: Cell } | null {
     const p = layout.panel;
-    const filtered = this.craftFilteredEntries();
+    const rows = this.craftMatrixRows();
 
-    // background for grid area
     ctx.save();
-    roundRect(ctx, p.x + layout.pad - 4, layout.gridTop - 4, p.w - layout.pad * 2 + 8, layout.gridH + 8, 8);
+    roundRect(ctx, layout.gridStartX - 4, layout.gridTop - 4, layout.totalGridWidth + 8, layout.gridH + 8, 8);
     ctx.fillStyle = "rgba(0,0,0,0.10)";
     ctx.fill();
     ctx.restore();
 
     ctx.save();
     ctx.beginPath();
-    ctx.rect(p.x + 2, layout.gridTop, p.w - 4, layout.gridH);
+    ctx.rect(layout.gridStartX - 4, layout.gridTop, layout.totalGridWidth + 8, layout.gridH);
     ctx.clip();
 
     const startRow = Math.floor(this.craftScrollY / layout.itemHeight);
     const yOffset = -(this.craftScrollY % layout.itemHeight);
-    const startIdx = startRow * layout.cols;
-    const visible = filtered.slice(startIdx, startIdx + (layout.maxVisibleRows + 2) * layout.cols);
-
+    const visibleRows = rows.slice(startRow, startRow + layout.maxVisibleRows + 2);
     let hoveredEntry: { slot: number; cell: Cell } | null = null;
     const sel = this.craftSel;
 
-    // draw empty placeholders first (small)
+    // Every item/rarity coordinate gets a background, even when no card exists.
     for (let ri = 0; ri < layout.maxVisibleRows + 1; ri++) {
+      const ry = layout.gridTop + ri * layout.itemHeight + yOffset;
+      if (ry + layout.slotSize < layout.gridTop || ry > layout.gridTop + layout.gridH) continue;
       for (let ci = 0; ci < layout.cols; ci++) {
-        const rx = p.x + layout.pad + ci * (layout.slotSize + layout.gap);
-        const ry = layout.gridTop + ri * layout.itemHeight + yOffset;
-        if (ry + layout.slotSize < layout.gridTop || ry > layout.gridTop + layout.gridH) continue;
+        const rx = layout.gridStartX + ci * (layout.slotSize + layout.gap);
         roundRect(ctx, rx, ry, layout.slotSize, layout.slotSize, 6);
         ctx.fillStyle = "rgba(0,0,0,0.14)";
         ctx.fill();
       }
     }
 
-    visible.forEach((entry, i) => {
-      const row = Math.floor(i / layout.cols);
-      const col = i % layout.cols;
-      const r: Rect = {
-        x: p.x + layout.pad + col * (layout.slotSize + layout.gap),
-        y: layout.gridTop + row * layout.itemHeight + yOffset,
-        w: layout.slotSize,
-        h: layout.slotSize,
-      };
-      if (r.y + r.h < layout.gridTop || r.y > layout.gridTop + layout.gridH) return;
-      const isHovered = hit(r, this.mx, this.my) && !this.drag;
-      if (isHovered) hoveredEntry = entry;
-      const picked = !!sel && sel.item === entry.cell.item && sel.rarity === entry.cell.rarity;
-      const scale = isHovered ? 1.08 : picked ? 1.04 : 1;
-      drawCard(ctx, r, entry.cell, { hovered: isHovered || picked, scale, dim: picked ? 1 : 0.92, showName: false });
-      if (picked) {
-        ctx.save();
-        ctx.globalAlpha = 0.65 + Math.sin(this.time * 6) * 0.25;
-        roundRect(ctx, r.x - 1, r.y - 1, r.w + 2, r.h + 2, 7);
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = "#ffe763";
-        ctx.stroke();
-        ctx.restore();
+    visibleRows.forEach((item, ri) => {
+      const ry = layout.gridTop + ri * layout.itemHeight + yOffset;
+      if (ry + layout.slotSize < layout.gridTop || ry > layout.gridTop + layout.gridH) return;
+      for (let col = 0; col < layout.cols; col++) {
+        const cell = this.craftMatrixCell(item, col);
+        if (!cell) continue;
+        const r: Rect = {
+          x: layout.gridStartX + col * (layout.slotSize + layout.gap),
+          y: ry,
+          w: layout.slotSize,
+          h: layout.slotSize,
+        };
+        const isHovered = hit(r, this.mx, this.my) && !this.drag;
+        if (isHovered) hoveredEntry = { slot: -1, cell };
+        const picked = !!sel && sel.item === cell.item && sel.rarity === cell.rarity;
+        const scale = isHovered ? 1.08 : picked ? 1.04 : 1;
+        drawCard(ctx, r, cell, { hovered: isHovered || picked, scale, dim: picked ? 1 : 0.92, showName: false });
+        if (picked) {
+          ctx.save();
+          ctx.globalAlpha = 0.65 + Math.sin(this.time * 6) * 0.25;
+          roundRect(ctx, r.x - 1, r.y - 1, r.w + 2, r.h + 2, 7);
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = "#ffe763";
+          ctx.stroke();
+          ctx.restore();
+        }
       }
     });
 
     ctx.restore();
 
-    if (filtered.length === 0) {
+    // Color-coded rarity headings make each matrix column easy to scan.
+    for (let col = 0; col < layout.cols; col++) {
+      const x = layout.gridStartX + col * (layout.slotSize + layout.gap) + layout.slotSize / 2;
+      text(ctx, RARITIES[col]?.name ?? "", x, layout.gridTop - 10, 9, RARITIES[col]?.color ?? "rgba(255,255,255,0.6)");
+    }
+
+    if (rows.length === 0) {
       text(
         ctx,
         this.craftSearchText || this.craftBiome !== "All" ? "No cards match filter" : "Bag empty",
@@ -2635,8 +2661,7 @@ drawItemIcon(ctx, e.type, e.x, e.y + bob, 9, this.time * 2, e.team || 0);
       );
     }
 
-    const totalRows = Math.max(1, Math.ceil(filtered.length / layout.cols));
-    if (totalRows > layout.maxVisibleRows) {
+    if (rows.length > layout.maxVisibleRows) {
       scrollbar(ctx, layout.scrollTrack, this.craftScrollThumbRect(layout), this.craftDraggingThumb);
     }
 
@@ -2648,10 +2673,10 @@ drawItemIcon(ctx, e.type, e.x, e.y + bob, 9, this.time * 2, e.team || 0);
     const p = layout.panel;
     const sel = this.craftSel;
     const avail = sel ? this.countOf(sel.item, sel.rarity) : 0;
-    const attempts = Math.floor(avail / 5);
+    const submitting = this.craftPhase === "rotating" || this.craftPhase === "waiting";
     const spin = this.craftSpin > 0 ? ease.inOutCubic(1 - this.craftSpin / 0.8) * Math.PI * 2 : 0;
 
-    text(ctx, "Combine 5 identical to upgrade", p.x + p.w * 0.38, (layout as any).craftBottom - 46, 11, "rgba(255,255,255,0.85)");
+    text(ctx, `Combine ${CRAFT_CARD_COUNT} identical to upgrade`, p.x + p.w * 0.38, (layout as any).craftBottom - 46, 11, "rgba(255,255,255,0.85)");
 
     // Draw animated slots (pentagon with rotation/contraction)
     layout.bigSlots.forEach((baseRect, i) => {
@@ -2663,7 +2688,9 @@ drawItemIcon(ctx, e.type, e.x, e.y + bob, 9, this.time * 2, e.team || 0);
       const cy = layout.cy + px * Math.sin(rad) + py * Math.cos(rad);
       const r: Rect = { x: cx - baseRect.w / 2, y: cy - baseRect.h / 2, w: baseRect.w, h: baseRect.h };
 
-      const filled = !!sel && avail >= i + 1 && this.craftPhase !== "showing";
+      // Once submitted, keep all five input cards visible even after the
+      // authoritative inventory update removes them from the bag.
+      const filled = !!sel && (submitting || avail >= i + 1) && this.craftPhase !== "showing";
       // Slot background always drawn (CraftAnimation drawSlots behavior)
       ctx.save();
       roundRect(ctx, r.x, r.y, r.w, r.h, 8);
@@ -2708,13 +2735,18 @@ drawItemIcon(ctx, e.type, e.x, e.y + bob, 9, this.time * 2, e.team || 0);
     const def = ITEMS[sel.item];
     const chance = craftChanceFor(sel.rarity);
     text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, layout.cx, y, 14, RARITIES[sel.rarity].color);
+    const status = submitting
+      ? `Using ${CRAFT_CARD_COUNT} cards...`
+      : avail >= CRAFT_CARD_COUNT
+        ? `Have ${avail} · Ready`
+        : `Have ${avail} · Need ${CRAFT_CARD_COUNT - avail} more`;
     text(
       ctx,
-      `Have ${avail} · ${attempts} attempt${attempts === 1 ? "" : "s"}`,
+      status,
       layout.cx,
       y + 16,
       11,
-      avail >= 5 ? "#c9ffd6" : "#ffbcbc",
+      submitting || avail >= CRAFT_CARD_COUNT ? "#c9ffd6" : "#ffbcbc",
     );
     if (sel.rarity < MAX_CRAFT_RARITY && chance !== undefined) {
       const next = sel.rarity + 1;
@@ -2819,9 +2851,11 @@ drawItemIcon(ctx, e.type, e.x, e.y + bob, 9, this.time * 2, e.team || 0);
     const sel = this.craftSel;
     const avail = sel ? this.countOf(sel.item, sel.rarity) : 0;
     if (this.craftMode === "normal") {
-      const attempts = Math.floor(avail / 5);
-      const enabled = !!sel && avail >= 5 && sel.rarity < MAX_CRAFT_RARITY;
-      return { text: attempts > 1 ? `CRAFT x${attempts}` : "CRAFT", enabled };
+      const enabled = !!sel
+        && avail >= CRAFT_CARD_COUNT
+        && sel.rarity < MAX_CRAFT_RARITY
+        && this.craftPhase === "none";
+      return { text: "CRAFT", enabled };
     }
     if (this.craftMode === "oracle") {
       const required = sel ? oracleRequiredCount(sel.rarity) : undefined;
