@@ -434,8 +434,9 @@ export function drawItemIcon(
 // ============================================
 // 卡片绘制
 // ============================================
+// src/game/client/ui.ts - 修改 drawCard 函数
 
-/** Inventory / hotbar card. */
+/** Inventory / hotbar card - 使用深色边框 + 浅色内部填充 */
 export function drawCard(
   ctx: CanvasRenderingContext2D,
   r: Rect,
@@ -445,12 +446,16 @@ export function drawCard(
   const scale = opts.scale ?? 1;
   const cx = r.x + r.w / 2;
   const cy = r.y + r.h / 2;
+  const size = Math.min(r.w, r.h);
+  
   ctx.save();
   ctx.globalAlpha = opts.dim ?? 1;
   ctx.translate(cx, cy);
   ctx.scale(scale, scale);
   ctx.translate(-cx, -cy);
+  
   if (!cell) {
+    // 空卡槽
     roundRect(ctx, r.x, r.y, r.w, r.h, 8);
     ctx.fillStyle = opts.hovered ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.28)";
     ctx.fill();
@@ -461,28 +466,151 @@ export function drawCard(
     ctx.restore();
     return;
   }
-  const rarity = RARITIES[cell.rarity];
+  
+  const rarity = RARITIES[Math.min(cell.rarity, RARITIES.length - 1)];
+  const def = ITEMS[cell.item];
+  
+  // 绘制背景（内部）- 使用 rarity.color（浅色）
   roundRect(ctx, r.x, r.y, r.w, r.h, 8);
   ctx.fillStyle = rarity.color;
   ctx.fill();
-  roundRect(ctx, r.x + 3, r.y + 3, r.w - 6, r.h - 6, 6);
-  ctx.fillStyle = shade(rarity.color, -34);
-  ctx.fill();
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = opts.hovered ? "#ffffff" : "rgba(0,0,0,0.35)";
-  roundRect(ctx, r.x, r.y, r.w, r.h, 8);
+  
+  // 绘制边框 - 使用深色版本（通过 shade 函数变暗）
+  ctx.lineWidth = Math.max(3, size * 0.06);
+  ctx.strokeStyle = shade(rarity.color, -80);
   ctx.stroke();
-  // 传入 rarity
-  drawItemIcon(ctx, cell.item, cx, cy - (opts.showName ? r.h * 0.08 : 0), Math.min(r.w, r.h) * 0.26, 0, cell.rarity);
-  if (opts.showName !== false) {
-    text(ctx, ITEMS[cell.item].name, cx, r.y + r.h - 11, Math.max(9, r.h * 0.16), "#ffffff");
+  
+  // 如果有悬停，添加高亮边框
+  if (opts.hovered) {
+    ctx.lineWidth = Math.max(2, size * 0.04);
+    ctx.strokeStyle = "rgba(255,255,255,0.6)";
+    roundRect(ctx, r.x + 2, r.y + 2, r.w - 4, r.h - 4, 6);
+    ctx.stroke();
   }
+  
+  // 物品图标
+  const iconSize = Math.min(r.w, r.h) * 0.35;
+  drawItemIcon(ctx, cell.item, cx, cy - (opts.showName ? r.h * 0.06 : 0), iconSize, 0, cell.rarity);
+  
+  // 绘制物品名字 (在卡片底部)
+  if (opts.showName !== false && def) {
+    ctx.save();
+    
+    let itemName = def.name;
+    const maxWidth = r.w * 0.92;
+    const maxHeight = r.h * 0.22;
+    const fontSizeBase = Math.min(maxHeight * 0.85, 16);
+    
+    // 分行逻辑
+    let lines: string[] = [];
+    const maxCharsPerLine = 10;
+    
+    if (itemName.length > maxCharsPerLine) {
+      const spaceIndex = itemName.indexOf(' ');
+      if (spaceIndex !== -1 && spaceIndex <= maxCharsPerLine && spaceIndex < itemName.length - 1) {
+        lines = [itemName.substring(0, spaceIndex), itemName.substring(spaceIndex + 1)];
+      } else {
+        const mid = Math.ceil(itemName.length / 2);
+        let splitPoint = mid;
+        for (let i = mid; i < itemName.length; i++) {
+          if (itemName[i] === ' ') {
+            splitPoint = i;
+            break;
+          }
+        }
+        if (splitPoint === mid) {
+          for (let i = mid - 1; i > 0; i--) {
+            if (itemName[i] === ' ') {
+              splitPoint = i;
+              break;
+            }
+          }
+        }
+        if (splitPoint === mid) {
+          splitPoint = Math.floor(itemName.length / 2);
+        }
+        lines = [itemName.substring(0, splitPoint), itemName.substring(splitPoint + 1)];
+      }
+    } else {
+      lines = [itemName];
+    }
+    
+    let fontSize = lines.length > 1 ? Math.floor(maxHeight * 0.55) : Math.floor(maxHeight * 0.8);
+    fontSize = Math.min(fontSize, fontSizeBase);
+    
+    ctx.font = `900 ${fontSize}px "Trebuchet MS", "Segoe UI", sans-serif`;
+    let longestLineWidth = Math.max(...lines.map(line => ctx.measureText(line).width));
+    
+    while (longestLineWidth > maxWidth && fontSize > 7) {
+      fontSize--;
+      ctx.font = `900 ${fontSize}px "Trebuchet MS", "Segoe UI", sans-serif`;
+      longestLineWidth = Math.max(...lines.map(line => ctx.measureText(line).width));
+    }
+    
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const textX = cx;
+    const spacing = fontSize * 0.85;
+    
+    lines.forEach((line, index) => {
+      let textY: number;
+      if (lines.length === 1) {
+        textY = r.y + r.h - (maxHeight / 2) - 2;
+      } else {
+        const baseY = r.y + r.h - (maxHeight / 2) - 4;
+        textY = (index === 0) ? baseY - (spacing / 2) : baseY + (spacing / 2);
+      }
+      
+      // 描边（黑色轮廓）
+      ctx.strokeStyle = "rgba(0,0,0,0.7)";
+      ctx.lineWidth = Math.max(2, fontSize * 0.18);
+      ctx.lineJoin = "round";
+      ctx.strokeText(line, textX, textY);
+      
+      // 填充（白色文字）
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(line, textX, textY);
+    });
+    
+    ctx.restore();
+  }
+  
+  // 数量显示
   if (cell.count > 1) {
-    text(ctx, "x" + cell.count, r.x + r.w - 6, r.y + 11, Math.max(9, r.h * 0.16), "#ffffff", "right");
+    ctx.save();
+    
+    let countStr = "x" + (cell.count >= 1000000 ? (cell.count / 1000000).toFixed(1) + 'M' :
+                          cell.count >= 1000 ? (cell.count / 1000).toFixed(1) + 'K' :
+                          cell.count);
+    
+    const fontSize = Math.max(12, Math.floor(18 * size / 70));
+    ctx.font = `900 ${fontSize}px "Trebuchet MS", "Segoe UI", sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    
+    const centerX = r.x + r.w - 10;
+    const centerY = r.y + 8;
+    
+    ctx.save();
+    ctx.translate(centerX, centerY);
+    ctx.rotate(0.3);
+    
+    // 数量描边
+    ctx.strokeStyle = "rgba(0,0,0,0.8)";
+    ctx.lineWidth = Math.max(3, fontSize * 0.22);
+    ctx.lineJoin = "round";
+    ctx.strokeText(countStr, 0, 0);
+    
+    // 数量填充
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(countStr, 0, 0);
+    
+    ctx.restore();
+    ctx.restore();
   }
+  
   ctx.restore();
 }
-
 // ============================================
 // 怪物绘制
 // ============================================
