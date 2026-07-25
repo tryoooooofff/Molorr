@@ -5,8 +5,20 @@ export const TICK_RATE = 20;
 export const TICK_MS = 1000 / TICK_RATE;
 
 export const SLOT_COUNT = 8;
+/**
+ * Starting size of the bag. The bag is *unlimited*: it grows on demand whenever
+ * a new item/rarity stack needs a home, so a mob that drops 2-3 items at once can
+ * never have part of its loot silently rejected. This constant only decides how
+ * many empty cells a fresh player begins with (and the minimum the UI reserves).
+ */
 export const BAG_COUNT = 32;
-export const TOTAL_CELLS = SLOT_COUNT + BAG_COUNT;
+/**
+ * Hard ceiling on bag cells. It exists purely so a malicious/corrupt save can't
+ * make the server allocate forever; it is far above what real play can reach
+ * (distinct item x rarity combinations number in the low hundreds).
+ */
+export const BAG_MAX = 4096;
+export const TOTAL_CELLS = SLOT_COUNT + BAG_MAX;
 
 function rgb([r, g, b]: readonly [number, number, number]): string {
   return `rgb(${r},${g},${b})`;
@@ -110,10 +122,10 @@ export const ITEMS: ItemDef[] = [
   { id: 9, name: "Stick", kind: "summon", color: "#a97442", outline: "#7d5228", shape: "stick", radius: 10, damage: 6, health: 22, reload: 4.0, petMob: 11, dropFactor: 0.6, desc: "Summons a swirling sandstorm to fight for you." },
   { id: 10, name: "Coin", kind: "trinket", color: "#ffd54a", outline: "#c79a1e", shape: "circle", radius: 7, damage: 0, health: 0, reload: 0, dropFactor: 1.0, desc: "A shiny coin. Worth trading, worth nothing in a fight." },
   // ── Soldier Ant drops ────────────────────────────────────────────────────
-  { id: 11, name: "Clover", kind: "petal", color: "#5fbf4a", outline: "#3d8a30", shape: "circle", radius: 8, damage: 6, health: 10, reload: 1.0, dropFactor: 0.55, desc: "A lucky four-leaf clover." },
+  { id: 11, name: "Clover", kind: "petal", color: "#4e9a52", outline: "#2d6833", shape: "circle", radius: 8, damage: 6, health: 10, reload: 1.0, dropFactor: 0.55, desc: "A lucky four-leaf clover." },
   { id: 12, name: "Soldier Ant Egg", kind: "summon", color: "#7a4a25", outline: "#4a2c14", shape: "egg", radius: 10, damage: 5, health: 24, reload: 3.5, petMob: 3, dropFactor: 0.55, desc: "Hatches a soldier ant." },
   // ── Worker Ant drops ────────────────────────────────────────────────────
-  { id: 13, name: "Corn", kind: "petal", color: "#f4d34a", outline: "#b8971e", shape: "circle", radius: 8, damage: 9, health: 13, reload: 1.1, dropFactor: 0.65, desc: "A golden ear of corn." },
+  { id: 13, name: "Corn", kind: "petal", color: "#eade45", outline: "#a2901c", shape: "circle", radius: 8, damage: 9, health: 13, reload: 1.1, dropFactor: 0.65, desc: "A golden ear of corn." },
   { id: 14, name: "Worker Ant Egg", kind: "summon", color: "#a97442", outline: "#5d3c1f", shape: "egg", radius: 10, damage: 4, health: 18, reload: 3.2, petMob: 10, dropFactor: 0.55, desc: "Hatches a worker ant." },
   // ── Rock drops ──────────────────────────────────────────────────────────
   { id: 15, name: "Rock Egg", kind: "summon", color: "#a8a8a8", outline: "#5f5f5f", shape: "egg", radius: 11, damage: 5, health: 40, reload: 4.5, petMob: 2, dropFactor: 0.55, desc: "Hatches a tiny rolling rock." },
@@ -125,11 +137,11 @@ export const ITEMS: ItemDef[] = [
   { id: 20, name: "Bee Egg", kind: "summon", color: "#fff0a8", outline: "#b59a1e", shape: "egg", radius: 10, damage: 5, health: 22, reload: 3.4, petMob: 1, dropFactor: 0.55, desc: "Hatches a buzzing bee." },
   // ── Starfish drops ──────────────────────────────────────────────────────
   { id: 21, name: "Starfish", kind: "petal", color: "#f2799e", outline: "#bc4c72", shape: "star", radius: 10, damage: 11, health: 15, reload: 1.2, dropFactor: 0.65, desc: "A star from the seafloor." },
-  { id: 22, name: "Salt", kind: "petal", color: "#f0f0f0", outline: "#a8a8b0", shape: "circle", radius: 7, damage: 10, health: 9, reload: 1.0, dropFactor: 0.6, desc: "Crystalline sea salt." },
+  { id: 22, name: "Salt", kind: "petal", color: "#ffffff", outline: "#c4c4c4", shape: "circle", radius: 7, damage: 10, health: 9, reload: 1.0, dropFactor: 0.6, desc: "Crystalline sea salt." },
   { id: 23, name: "Starfish Egg", kind: "summon", color: "#f8b6c8", outline: "#bc4c72", shape: "egg", radius: 10, damage: 4, health: 24, reload: 3.6, petMob: 9, dropFactor: 0.55, desc: "Hatches a starfish." },
   // ── Jellyfish drops ─────────────────────────────────────────────────────
   { id: 24, name: "Jelly", kind: "petal", color: "#d3a0ec", outline: "#7d40a8", shape: "circle", radius: 8, damage: 8, health: 12, reload: 1.1, dropFactor: 0.7, desc: "Wobbles gelatinously." },
-  { id: 25, name: "Lightning", kind: "petal", color: "#fff066", outline: "#9a8a18", shape: "triangle", radius: 7, damage: 30, health: 6, reload: 1.4, dropFactor: 0.6, desc: "Zaps hard, fades fast." },
+  { id: 25, name: "Lightning", kind: "petal", color: "#53E5E8", outline: "#4ADEDE", shape: "star", radius: 7, damage: 30, health: 6, reload: 1.4, dropFactor: 0.6, desc: "Zaps hard, fades fast." },
   { id: 26, name: "Jellyfish Egg", kind: "summon", color: "#cfb0ec", outline: "#7d40a8", shape: "egg", radius: 10, damage: 5, health: 20, reload: 3.5, petMob: 7, dropFactor: 0.55, desc: "Hatches a jellyfish." },
   // ── Crab drops ──────────────────────────────────────────────────────────
   { id: 27, name: "Claw", kind: "petal", color: "#ef7d3b", outline: "#7a3008", shape: "triangle", radius: 8, damage: 22, health: 12, reload: 1.4, dropFactor: 0.6, desc: "Snippy little claw." },

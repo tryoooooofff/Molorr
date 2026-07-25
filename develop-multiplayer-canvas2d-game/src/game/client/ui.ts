@@ -447,6 +447,129 @@ export function drawItemIcon(
       drawHex(0, size * 0.75, size * 0.5, true);
       break;
     }
+    case 11: { // Clover — three overlapping two-tone leaves around a dark hub
+      // Authored with leaf ellipses 40x60 at r=65 plus a r=28 hub. The measured
+      // ink box is 203x223 centered on (22.5, -0.5), so scale by its half-height
+      // and shift by that offset to sit dead center in the cell.
+      const k = (size * 1.2) / 111.5;
+      ctx.save();
+      ctx.scale(k, k);
+      ctx.translate(-22.5, 0.5);
+      const leaf = (a: number) => {
+        ctx.save();
+        ctx.rotate(a);
+        ctx.beginPath();
+        ctx.ellipse(0, -65, 40, 60, 0, 0, Math.PI * 2);
+        ctx.fillStyle = "#2d6833";
+        ctx.fill();
+        ctx.beginPath();
+        ctx.ellipse(0, -65, 30, 50, 0, 0, Math.PI * 2);
+        ctx.fillStyle = "#4e9a52";
+        ctx.fill();
+        ctx.restore();
+      };
+      const b = -Math.PI / 6;
+      leaf(b);
+      leaf(b + (Math.PI * 2) / 3);
+      leaf(b + (Math.PI * 4) / 3);
+      ctx.beginPath();
+      ctx.arc(0, 0, 28, 0, Math.PI * 2);
+      ctx.fillStyle = "#2d6833";
+      ctx.fill();
+      ctx.restore();
+      break;
+    }
+    case 13: { // Corn — a fat kernel-yellow crescent with a thick olive rim
+      // Authored in a 145px-tall space; its true ink center is (77.5, 83.5),
+      // measured from the stroked path, so translate by that to center it.
+      const k = (size * 2.2) / 145;
+      ctx.save();
+      ctx.scale(k, k);
+      ctx.translate(-77.5, -83.5);
+      ctx.beginPath();
+      ctx.moveTo(70, 20);
+      ctx.bezierCurveTo(120, 10, 155, 60, 125, 110);
+      ctx.bezierCurveTo(95, 160, 70, 160, 70, 120);
+      ctx.bezierCurveTo(70, 80, 20, 90, 20, 50);
+      ctx.bezierCurveTo(20, 20, 40, 25, 70, 20);
+      ctx.closePath();
+      ctx.fillStyle = "#eade45";
+      ctx.fill();
+      ctx.lineWidth = 15;
+      ctx.strokeStyle = "#a2901c";
+      ctx.lineJoin = ctx.lineCap = "round";
+      ctx.stroke();
+      ctx.restore();
+      break;
+    }
+    case 18: { // Pollen — always exactly three yellow balls
+      const r = size * 0.5;
+      const d = r * 1.05;
+      // A triangle of 3 circles sits d/4 above the origin; nudge it back down.
+      for (let i = 0; i < 3; i++) {
+        const a = (i * 2 * Math.PI) / 3 - Math.PI / 2;
+        ctx.beginPath();
+        ctx.arc(Math.cos(a) * d, Math.sin(a) * d + d / 4, r, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+      break;
+    }
+    case 22: { // Salt — an irregular white crystal (7 jittered radii)
+      const k = (size * 1.15) / 49;
+      ctx.save();
+      ctx.scale(k, k);
+      ctx.beginPath();
+      const radii = [38, 42, 39, 44, 38, 43, 36];
+      for (let i = 0; i < 7; i++) {
+        const a = (i * 2 * Math.PI) / 7 - Math.PI / 2;
+        ctx[i === 0 ? "moveTo" : "lineTo"](radii[i] * Math.cos(a), radii[i] * Math.sin(a));
+      }
+      ctx.closePath();
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
+      ctx.strokeStyle = "#c4c4c4";
+      ctx.lineWidth = 10;
+      ctx.lineJoin = "round";
+      ctx.stroke();
+      ctx.restore();
+      break;
+    }
+    case 25: { // Lightning — a 10-point cyan star
+      const k = (size * 1.2) / 60;
+      ctx.save();
+      ctx.scale(k, k);
+      const spikes = 10;
+      const outer = 55;
+      const inner = 30;
+      let rot = (Math.PI / 2) * 3;
+      const step = Math.PI / spikes;
+      ctx.beginPath();
+      ctx.moveTo(0, -outer);
+      for (let i = 0; i < spikes; i++) {
+        ctx.lineTo(Math.cos(rot) * outer, Math.sin(rot) * outer);
+        rot += step;
+        ctx.lineTo(Math.cos(rot) * inner, Math.sin(rot) * inner);
+        rot += step;
+      }
+      ctx.closePath();
+      ctx.fillStyle = "#53E5E8";
+      ctx.fill();
+      ctx.strokeStyle = "#4ADEDE";
+      ctx.lineWidth = 10;
+      ctx.lineJoin = "round";
+      ctx.stroke();
+      ctx.restore();
+      break;
+    }
+    case 36: { // Iris — a single, notably small purple ball
+      ctx.beginPath();
+      ctx.arc(0, 0, size * 0.52, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.lineWidth = Math.max(1.2, size * 0.12);
+      ctx.stroke();
+      break;
+    }
     case 7: { // Wing
       ctx.beginPath();
       ctx.moveTo(-size * 0.75, -size * 1.0);
@@ -1689,61 +1812,58 @@ export function drawDefaultSkin(
   ctx.save();
   ctx.translate(x, y);
 
-  // 2. 渲染眼睛与眉毛（比原先更加简单、纯粹且省去繁重的 Canvas clipping）
+  // 2. Eyes — florr.io style: two tall black rounded rectangles, no white
+  // highlight. They shift slightly toward the cursor, and the eyelids/brows
+  // express the attack (spread) and defend (contract) moods.
   const eyePositions = [
-    { x: -7, y: -5, isLeft: true },
-    { x: 7, y: -5, isLeft: false }
+    { x: -7, y: -3.5, isLeft: true },
+    { x: 7, y: -3.5, isLeft: false },
   ];
+
+  // Gaze offset, clamped so the pupils never leave the face.
+  const lookX = Math.cos(angleToMouse) * 1.6;
+  const lookY = Math.sin(angleToMouse) * 1.6;
+
+  const EYE_W = 6.2;
+  const EYE_H = 12.5;
 
   eyePositions.forEach((eye) => {
     ctx.save();
-    
-    // 眼神视线随鼠标微动
-    const lookX = Math.cos(angleToMouse) * 1.5;
-    const lookY = Math.sin(angleToMouse) * 1.5;
 
-    // 眼眶：简单的黑色垂直椭圆
+    const ex = eye.x + lookX;
+    const ey = eye.y + lookY;
+
+    // Squint a bit while defending, widen slightly while attacking.
+    const h = EYE_H * (1 - wContract * 0.42 + wSpread * 0.06);
+
     ctx.beginPath();
-    ctx.ellipse(eye.x + lookX, eye.y + lookY, 3, 5, 0, 0, Math.PI * 2);
+    // Rounded-rectangle pupil (the classic florr.io eye).
+    const rr = EYE_W / 2;
+    ctx.moveTo(ex - EYE_W / 2, ey - h / 2 + rr);
+    ctx.arcTo(ex - EYE_W / 2, ey - h / 2, ex - EYE_W / 2 + rr, ey - h / 2, rr);
+    ctx.lineTo(ex + EYE_W / 2 - rr, ey - h / 2);
+    ctx.arcTo(ex + EYE_W / 2, ey - h / 2, ex + EYE_W / 2, ey - h / 2 + rr, rr);
+    ctx.lineTo(ex + EYE_W / 2, ey + h / 2 - rr);
+    ctx.arcTo(ex + EYE_W / 2, ey + h / 2, ex + EYE_W / 2 - rr, ey + h / 2, rr);
+    ctx.lineTo(ex - EYE_W / 2 + rr, ey + h / 2);
+    ctx.arcTo(ex - EYE_W / 2, ey + h / 2, ex - EYE_W / 2, ey + h / 2 - rr, rr);
+    ctx.closePath();
     ctx.fillStyle = "#000000";
     ctx.fill();
 
-    // 瞳孔/高光：小白色高光，给角色注入灵魂
-    ctx.beginPath();
-    ctx.arc(eye.x + lookX * 1.6, eye.y + lookY * 1.6, 1.2, 0, Math.PI * 2);
-    ctx.fillStyle = "#ffffff";
-    ctx.fill();
-
-    // 眉毛：愤怒(Spread)与悲伤(Contract)的直接表现
-    ctx.strokeStyle = "#000000";
-    ctx.lineWidth = 1.8;
-    ctx.lineCap = "round";
-
+    // Angry brows while attacking: a filled wedge cutting into the eye's top
+    // inner corner, drawn in the face color so it reads as an eyelid.
     if (wSpread > 0.05) {
       ctx.save();
       ctx.globalAlpha = wSpread;
+      ctx.fillStyle = player.hurt && player.hurt > 0 ? "#ff9d9d" : "#F6E476";
       ctx.beginPath();
-      if (eye.isLeft) {
-        ctx.moveTo(eye.x - 4, eye.y - 7);
-        ctx.lineTo(eye.x + 3, eye.y - 4);
-      } else {
-        ctx.moveTo(eye.x - 3, eye.y - 4);
-        ctx.lineTo(eye.x + 4, eye.y - 7);
-      }
-      ctx.stroke();
-      ctx.restore();
-    } else if (wContract > 0.05) {
-      ctx.save();
-      ctx.globalAlpha = wContract;
-      ctx.beginPath();
-      if (eye.isLeft) {
-        ctx.moveTo(eye.x - 4, eye.y - 4);
-        ctx.lineTo(eye.x + 3, eye.y - 7);
-      } else {
-        ctx.moveTo(eye.x - 3, eye.y - 7);
-        ctx.lineTo(eye.x + 4, eye.y - 4);
-      }
-      ctx.stroke();
+      const dir = eye.isLeft ? 1 : -1;
+      ctx.moveTo(ex - (dir * EYE_W) / 2 - dir * 1, ey - h / 2 - 1);
+      ctx.lineTo(ex + (dir * EYE_W) / 2 + dir * 1, ey - h / 2 - 1);
+      ctx.lineTo(ex + (dir * EYE_W) / 2 + dir * 1, ey - h / 2 + h * 0.5);
+      ctx.closePath();
+      ctx.fill();
       ctx.restore();
     }
 

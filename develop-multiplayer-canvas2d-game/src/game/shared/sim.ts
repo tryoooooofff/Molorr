@@ -3,6 +3,7 @@
 
 import {
   BAG_COUNT,
+  BAG_MAX,
   CRAFT_CARD_COUNT,
   craftChanceFor,
   EMPTY_ITEM,
@@ -262,8 +263,11 @@ export class GameServer {
         p.mapId = mapId;
         p.xp = xp;
         for (let i = 0; i < SLOT_COUNT; i++) p.slots[i] = readCell(r);
-        const bagCount = r.u8();
-        for (let i = 0; i < bagCount && i < BAG_COUNT; i++) p.bag[i] = readCell(r);
+        // Bag length is dynamic (unlimited bag), so it travels as u16.
+        const bagCount = Math.min(r.u16(), BAG_MAX);
+        if (p.bag.length < bagCount) p.bag.length = bagCount;
+        for (let i = 0; i < bagCount; i++) p.bag[i] = readCell(r);
+        for (let i = 0; i < p.bag.length; i++) if (p.bag[i] === undefined) p.bag[i] = null;
         // Cooldowns are stored client-side (same trust model as xp above) as
         // "seconds remaining" so they survive reconnects without clock-sync issues.
         const oracleSecLeft = r.u32();
@@ -385,12 +389,18 @@ export class GameServer {
 
   // ------------------------------------------------------------- inventory
   private cellAt(p: Player, idx: number): Cell | null {
-    return idx < SLOT_COUNT ? p.slots[idx] : p.bag[idx - SLOT_COUNT];
+    return idx < SLOT_COUNT ? p.slots[idx] : p.bag[idx - SLOT_COUNT] ?? null;
   }
 
   private setCell(p: Player, idx: number, cell: Cell | null) {
-    if (idx < SLOT_COUNT) p.slots[idx] = cell;
-    else p.bag[idx - SLOT_COUNT] = cell;
+    if (idx < SLOT_COUNT) {
+      p.slots[idx] = cell;
+      return;
+    }
+    const bagIdx = idx - SLOT_COUNT;
+    // Grow (and null-fill) the unlimited bag if the target cell is past the end.
+    while (p.bag.length <= bagIdx) p.bag.push(null);
+    p.bag[bagIdx] = cell;
   }
 
   private swapCells(p: Player, a: number, b: number) {
@@ -408,29 +418,56 @@ export class GameServer {
     p.dirty = true;
   }
 
+  /**
+   * Puts `count` cards of item+rarity into the bag.
+   *
+   * The bag is unlimited: existing stacks are topped up to 999 first, then any
+   * leftover spills into free cells, and the bag grows if there are none. This
+   * is what makes a mob that drops 2-3 items at once always deliver *all* of
+   * them — previously the second and third drop were silently rejected (and the
+   * pickup then failed forever) as soon as the 32 fixed cells were occupied.
+   *
+   * Returns false only in the pathological case of hitting BAG_MAX.
+   */
   addItem(p: Player, item: number, rarity: number, count = 1): boolean {
     if (count <= 0) return true;
+    let left = count;
+
+    // 1) top up existing stacks of the same item+rarity
     for (const cell of p.bag) {
+      if (left <= 0) break;
       if (cell && cell.item === item && cell.rarity === rarity && cell.count < 999) {
-        cell.count = Math.min(999, cell.count + count);
-        p.dirty = true;
-        return true;
+        const room = 999 - cell.count;
+        const put = Math.min(room, left);
+        cell.count += put;
+        left -= put;
       }
     }
-    for (let i = 0; i < BAG_COUNT; i++) {
-      if (!p.bag[i]) {
-        p.bag[i] = { item, rarity, count: Math.min(999, count) };
-        p.dirty = true;
-        return true;
+
+    // 2) spill the remainder into free cells, growing the bag as needed
+    while (left > 0) {
+      let idx = p.bag.indexOf(null);
+      if (idx < 0) {
+        if (p.bag.length >= BAG_MAX) {
+          p.dirty = true;
+          return false;
+        }
+        idx = p.bag.length;
+        p.bag.push(null);
       }
+      const put = Math.min(999, left);
+      p.bag[idx] = { item, rarity, count: put };
+      left -= put;
     }
-    return false;
+
+    p.dirty = true;
+    return true;
   }
 
   /** Removes up to `count` cards of item+rarity from a player's bag. Returns how many were actually removed. */
   private takeFromBag(p: Player, item: number, rarity: number, count: number): number {
     let need = count;
-    for (let i = 0; i < BAG_COUNT && need > 0; i++) {
+    for (let i = 0; i < p.bag.length && need > 0; i++) {
       const cell = p.bag[i];
       if (!cell || cell.item !== item || cell.rarity !== rarity) continue;
       const take = Math.min(need, cell.count);
@@ -922,6 +959,10 @@ export class GameServer {
     })();
     const mobRarityName = RARITIES[biasedRarityIndex].name;
 
+    // Roll every entry of the drop table first, then lay the winners out in a
+    // small ring. Scattering them deterministically (rather than at random)
+    // guarantees a 2- or 3-item drop never stacks into what looks like one card.
+    const rolled: { item: number; rarity: number }[] = [];
     for (const drop of def.drops) {
       if (Math.random() > drop.chance) continue;
       const rarityName = getDropRarityByItem(drop.item, mobRarityName);
@@ -929,17 +970,24 @@ export class GameServer {
         0,
         Math.min(MAX_RARITY, RARITIES.findIndex((r) => r.name === rarityName)),
       );
+      rolled.push({ item: drop.item, rarity: rarityIndex });
+    }
+
+    const spread = rolled.length > 1 ? 26 : 0;
+    const baseAngle = Math.random() * Math.PI * 2;
+    rolled.forEach((roll, idx) => {
+      const a = baseAngle + (idx / rolled.length) * Math.PI * 2;
       const d = new Drop(
         this.nextId++,
         mapId,
-        mob.x + (Math.random() - 0.5) * 40,
-        mob.y + (Math.random() - 0.5) * 40,
-        drop.item,
-        rarityIndex,
+        mob.x + Math.cos(a) * spread + (Math.random() - 0.5) * 10,
+        mob.y + Math.sin(a) * spread + (Math.random() - 0.5) * 10,
+        roll.item,
+        roll.rarity,
         killer ? killer.id : 0,
       );
       world.drops.push(d);
-    }
+    });
   }
 
   private killPlayer(p: Player) {
@@ -956,6 +1004,7 @@ export class GameServer {
   private pickupDrops(p: Player) {
     if (!p.alive) return;
     const world = this.worlds[p.mapId];
+    let lootedThisTick = 0;
     for (let i = world.drops.length - 1; i >= 0; i--) {
       const d = world.drops[i];
       const dist = Math.hypot(d.x - p.x, d.y - p.y);
@@ -963,7 +1012,9 @@ export class GameServer {
         if (this.addItem(p, d.item, d.rarity)) {
           world.drops.splice(i, 1);
           const c = this.clientOf(p.id);
-          if (c) this.pushEvent(c, EVT.LOOT, d.x, d.y, 0, d.item, d.rarity);
+          // Spread the loot floaters out a little so a mob that dropped 2-3
+          // items reads as 2-3 pickups instead of one overlapping label.
+          if (c) this.pushEvent(c, EVT.LOOT, d.x, d.y - (lootedThisTick++ % 3) * 18, 0, d.item, d.rarity);
         }
       } else if (dist < (d.ownerId === p.id ? 900 : 160)) {
         const k = d.ownerId === p.id ? 0.05 : 0.06;
@@ -1056,8 +1107,12 @@ export class GameServer {
       const iw = new Writer(256);
       iw.u8(S2C.INVENTORY).u8(SLOT_COUNT);
       for (const cell of p.slots) writeCell(iw, cell);
-      iw.u8(BAG_COUNT);
-      for (const cell of p.bag) writeCell(iw, cell);
+      // The bag can grow past BAG_COUNT, so its length is sent as u16. Trailing
+      // empty cells are trimmed (never below BAG_COUNT) to keep the packet small.
+      let bagLen = p.bag.length;
+      while (bagLen > BAG_COUNT && !p.bag[bagLen - 1]) bagLen--;
+      iw.u16(bagLen);
+      for (let i = 0; i < bagLen; i++) writeCell(iw, p.bag[i] ?? null);
       c.send(iw.bytes());
     }
     if (p.statsDirty || this.tickCount % 10 === 0) {

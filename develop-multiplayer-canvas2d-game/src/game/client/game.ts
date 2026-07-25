@@ -7,6 +7,7 @@
  */
 import {
   BAG_COUNT,
+  BAG_MAX,
   CRAFT_CARD_COUNT,
   EMPTY_ITEM,
   ITEMS,
@@ -336,9 +337,11 @@ export class GameClient {
   private applySave(data: SaveData) {
     if (!data) return;
     this.slots = emptyCells(SLOT_COUNT);
-    this.bag = emptyCells(BAG_COUNT);
+    // The bag is unlimited — keep every saved cell, only padding up to BAG_COUNT.
+    const savedBag = (data.bag || []).slice(0, BAG_MAX);
+    this.bag = emptyCells(Math.max(BAG_COUNT, savedBag.length));
     (data.slots || []).slice(0, SLOT_COUNT).forEach((c, i) => (this.slots[i] = c ?? null));
-    (data.bag || []).slice(0, BAG_COUNT).forEach((c, i) => (this.bag[i] = c ?? null));
+    savedBag.forEach((c, i) => (this.bag[i] = c ?? null));
     this.xp = data.xp || 0;
     this.selectedMap = Math.max(0, Math.min(MAPS.length - 1, data.mapId || 0));
     this.nextOracleAt = data.nextOracleAt || 0;
@@ -447,8 +450,10 @@ export class GameClient {
     const w = new Writer(256);
     w.u8(C2S.JOIN).str(this.playerName).u8(this.selectedMap).u32(this.xp);
     for (let i = 0; i < SLOT_COUNT; i++) this.writeCell(w, this.slots[i]);
-    w.u8(BAG_COUNT);
-    for (let i = 0; i < BAG_COUNT; i++) this.writeCell(w, this.bag[i]);
+    // Unlimited bag: send the real (dynamic) length as u16.
+    const bagLen = Math.min(this.bag.length, BAG_MAX);
+    w.u16(bagLen);
+    for (let i = 0; i < bagLen; i++) this.writeCell(w, this.bag[i]);
     const now = Date.now();
     w.u32(Math.max(0, Math.ceil((this.nextOracleAt - now) / 1000)));
     w.u32(Math.max(0, Math.ceil((this.nextTradeAt - now) / 1000)));
@@ -525,12 +530,9 @@ export class GameClient {
           const c = this.readCell(r);
           if (i < SLOT_COUNT) slots[i] = c;
         }
-        const bagCount = r.u8();
-        const bag = emptyCells(BAG_COUNT);
-        for (let i = 0; i < bagCount; i++) {
-          const c = this.readCell(r);
-          if (i < BAG_COUNT) bag[i] = c;
-        }
+        const bagCount = Math.min(r.u16(), BAG_MAX);
+        const bag = emptyCells(Math.max(BAG_COUNT, bagCount));
+        for (let i = 0; i < bagCount; i++) bag[i] = this.readCell(r);
         this.slots = slots;
         this.bag = bag;
         this.saveDirty = true;
