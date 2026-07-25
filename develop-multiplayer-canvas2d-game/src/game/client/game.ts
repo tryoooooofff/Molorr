@@ -73,6 +73,25 @@ interface SaveData {
 const SAVE_KEY = "petalia.save";
 const AUTH_KEY = "petalia.auth";
 
+// Biome names sourced straight from the map list. Each item is tagged with every
+// biome that has at least one mob capable of dropping it.
+const BIOME_LIST = ["All", ...MAPS.map((m) => m.name)];
+
+function buildItemBiomeMap(): Map<number, Set<string>> {
+  const map = new Map<number, Set<string>>();
+  for (const m of MAPS) {
+    for (const mobId of m.mobs) {
+      const mob = MOBS[mobId];
+      if (!mob) continue;
+      for (const drop of mob.drops) {
+        if (!map.has(drop.item)) map.set(drop.item, new Set());
+        map.get(drop.item)!.add(m.name);
+      }
+    }
+  }
+  return map;
+}
+
 function emptyCells(n: number): (Cell | null)[] {
   return new Array(n).fill(null);
 }
@@ -131,6 +150,15 @@ export class GameClient {
   // ui state
   private bagOpen = false;
   private bagAnim = 0;
+  private bagScrollY = 0;
+  private bagSearchText = "";
+  private bagSearchActive = false;
+  private bagBiome = "All";
+  private bagBiomeOpen = false;
+  private bagDraggingThumb = false;
+  private bagThumbDragStartY = 0;
+  private bagScrollAtDragStart = 0;
+  private itemBiomeCache: Map<number, Set<string>> | null = null;
   private craftOpen = false;
   private craftAnim = 0;
   private craftSel: { item: number; rarity: number } | null = null;
@@ -164,6 +192,7 @@ export class GameClient {
     window.addEventListener("pointermove", this.onPointerMove);
     window.addEventListener("pointerup", this.onPointerUp);
     this.canvas.addEventListener("contextmenu", this.onContext);
+    this.canvas.addEventListener("wheel", this.onWheel, { passive: false });
     this.resize();
     window.addEventListener("resize", this.resize);
     this.loop(performance.now());
@@ -177,9 +206,11 @@ export class GameClient {
     window.removeEventListener("pointermove", this.onPointerMove);
     window.removeEventListener("pointerup", this.onPointerUp);
     this.canvas.removeEventListener("contextmenu", this.onContext);
+    this.canvas.removeEventListener("wheel", this.onWheel);
     window.removeEventListener("resize", this.resize);
     this.net?.close();
   }
+
 
   private resize = () => {
     const dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -566,29 +597,126 @@ export class GameClient {
   }
 
   private bagPanelRect(): Rect {
-    const cols = 8;
-    const size = Math.min(58, this.w / 14);
-    const gap = 7;
-    const rows = Math.ceil(BAG_COUNT / cols);
-    const w = cols * size + (cols - 1) * gap + 28;
-    const h = rows * size + (rows - 1) * gap + 56;
+    const w = Math.min(400, this.w * 0.92);
+    const hotbarH = Math.min(66, this.w / 12);
+    const maxH = this.h - hotbarH - 130;
+    const h = Math.min(560, Math.max(320, maxH));
     const hidden = this.h + 20;
-    const shown = this.h - h - Math.min(96, this.w / 10) - 26;
+    const shown = this.h - hotbarH - h - 26;
     const t = ease.outCubic(this.bagAnim);
     return { x: (this.w - w) / 2, y: hidden + (shown - hidden) * t, w, h };
   }
 
-  private bagRects(): Rect[] {
+  /** Geometry for the scrollable item grid + header widgets inside the bag panel. */
+  private bagLayout() {
     const p = this.bagPanelRect();
-    const cols = 8;
-    const size = Math.min(58, this.w / 14);
-    const gap = 7;
-    return new Array(BAG_COUNT).fill(0).map((_, i) => ({
-      x: p.x + 14 + (i % cols) * (size + gap),
-      y: p.y + 42 + Math.floor(i / cols) * (size + gap),
-      w: size,
-      h: size,
-    }));
+    const cols = 5;
+    const gap = 10;
+    const pad = 15;
+    const slotSize = Math.floor((p.w - pad * 2 - gap * (cols - 1)) / cols);
+    const itemHeight = slotSize + gap;
+    const headerH = 44;
+    const barY = p.y + headerH;
+    const barH = 28;
+    const dropW = Math.min(120, p.w * 0.3);
+    const barGap = 6;
+    const barW = p.w - dropW - barGap - pad * 2;
+    const barX = p.x + pad;
+    const dropX = barX + barW + barGap;
+    const statsH = 92;
+    const gridTop = barY + barH + 12;
+    const gridBottom = p.y + p.h - statsH - 6;
+    const gridH = Math.max(itemHeight, gridBottom - gridTop);
+    const maxVisibleRows = Math.max(1, Math.floor(gridH / itemHeight));
+    const scrollTrack: Rect = { x: p.x + p.w - pad + 2, y: gridTop, w: 6, h: gridH };
+    return {
+      panel: p,
+      cols,
+      gap,
+      pad,
+      slotSize,
+      itemHeight,
+      headerH,
+      barX,
+      barY,
+      barW,
+      barH,
+      dropX,
+      dropW,
+      gridTop,
+      gridH,
+      maxVisibleRows,
+      statsH,
+      closeRect: { x: p.x + p.w - 34, y: p.y + 10, w: 24, h: 24 } as Rect,
+      scrollTrack,
+    };
+  }
+
+  private bagEntries(): { slot: number; cell: Cell }[] {
+    const entries: { slot: number; cell: Cell }[] = [];
+    for (let i = 0; i < this.bag.length; i++) {
+      const cell = this.bag[i];
+      if (cell) entries.push({ slot: i, cell });
+    }
+    entries.sort((a, b) => b.cell.rarity - a.cell.rarity);
+    return entries;
+  }
+
+  private itemBiomes(item: number): Set<string> {
+    if (!this.itemBiomeCache) this.itemBiomeCache = buildItemBiomeMap();
+    return this.itemBiomeCache.get(item) ?? new Set();
+  }
+
+  private bagFilteredEntries(): { slot: number; cell: Cell }[] {
+    const all = this.bagEntries();
+    const query = this.bagSearchText.trim().toLowerCase();
+    const biome = this.bagBiome;
+    return all.filter(({ cell }) => {
+      const def = ITEMS[cell.item];
+      if (!def) return false;
+      if (query && !def.name.toLowerCase().includes(query)) return false;
+      if (biome !== "All" && !this.itemBiomes(cell.item).has(biome)) return false;
+      return true;
+    });
+  }
+
+  private bagMaxScroll(): number {
+    const layout = this.bagLayout();
+    const filtered = this.bagFilteredEntries();
+    const totalRows = Math.ceil(filtered.length / layout.cols);
+    const totalHeight = totalRows * layout.itemHeight;
+    const visibleHeight = layout.maxVisibleRows * layout.itemHeight;
+    return Math.max(0, totalHeight - visibleHeight);
+  }
+
+  private clampBagScroll() {
+    this.bagScrollY = Math.max(0, Math.min(this.bagMaxScroll(), this.bagScrollY));
+  }
+
+  /** Rect of the i-th slot currently visible in the scrolled/filtered grid (i relative to render start). */
+  private bagSlotAtPoint(x: number, y: number): number {
+    const layout = this.bagLayout();
+    const p = layout.panel;
+    if (x < p.x || x > p.x + p.w || y < layout.gridTop || y > layout.gridTop + layout.gridH) return -1;
+    this.clampBagScroll();
+    const filtered = this.bagFilteredEntries();
+    const startRow = Math.floor(this.bagScrollY / layout.itemHeight);
+    const yOffset = -(this.bagScrollY % layout.itemHeight);
+    const startIdx = startRow * layout.cols;
+    const relX = x - (p.x + layout.pad);
+    const relY = y - layout.gridTop - yOffset;
+    if (relX < 0 || relY < 0) return -1;
+    const col = Math.floor(relX / (layout.slotSize + layout.gap));
+    const row = Math.floor(relY / (layout.slotSize + layout.gap));
+    if (col < 0 || col >= layout.cols || row < 0) return -1;
+    const localIdx = row * layout.cols + col;
+    const entry = filtered[startIdx + localIdx];
+    if (!entry) return -1;
+    // make sure the click actually landed on the card, not the margin gap
+    const slotX = p.x + layout.pad + col * (layout.slotSize + layout.gap);
+    const slotY = layout.gridTop + row * (layout.slotSize + layout.gap) + yOffset;
+    if (x < slotX || x > slotX + layout.slotSize || y < slotY || y > slotY + layout.slotSize) return -1;
+    return SLOT_COUNT + entry.slot;
   }
 
   private craftPanelRect(): Rect {
@@ -611,10 +739,6 @@ export class GameClient {
     });
   }
 
-  private cellRect(index: number): Rect {
-    return index < SLOT_COUNT ? this.hotbarRects()[index] : this.bagRects()[index - SLOT_COUNT];
-  }
-
   private cellAt(index: number): Cell | null {
     return index < SLOT_COUNT ? this.slots[index] : this.bag[index - SLOT_COUNT];
   }
@@ -622,10 +746,7 @@ export class GameClient {
   private cellIndexAtPoint(x: number, y: number): number {
     const hb = this.hotbarRects();
     for (let i = 0; i < hb.length; i++) if (hit(hb[i], x, y)) return i;
-    if (this.bagAnim > 0.35) {
-      const bags = this.bagRects();
-      for (let i = 0; i < bags.length; i++) if (hit(bags[i], x, y)) return SLOT_COUNT + i;
-    }
+    if (this.bagAnim > 0.35) return this.bagSlotAtPoint(x, y);
     return -1;
   }
 
@@ -653,6 +774,11 @@ export class GameClient {
       this.typeInto(e.key);
       return;
     }
+    if (this.scene === "game" && this.bagOpen && this.bagSearchActive) {
+      e.preventDefault();
+      this.typeIntoBagSearch(e.key);
+      return;
+    }
     this.keys.add(e.code);
     if (e.code === "Space") e.preventDefault();
     if (this.scene === "game") {
@@ -665,6 +791,14 @@ export class GameClient {
   private onKeyUp = (e: KeyboardEvent) => {
     this.keys.delete(e.code);
   };
+
+  private typeIntoBagSearch(key: string) {
+    if (key === "Backspace") this.bagSearchText = this.bagSearchText.slice(0, -1);
+    else if (key === "Escape" || key === "Enter") this.bagSearchActive = false;
+    else if (key.length === 1 && this.bagSearchText.length < 24) this.bagSearchText += key;
+    this.bagScrollY = 0;
+    this.clampBagScroll();
+  }
 
   private typeInto(key: string) {
     const field = this.focus;
@@ -694,6 +828,7 @@ export class GameClient {
       this.dragX = p.x;
       this.dragY = p.y;
     }
+    if (this.bagDraggingThumb) this.dragBagThumb(p.y);
   };
 
   private onPointerDown = (e: PointerEvent) => {
@@ -715,7 +850,22 @@ export class GameClient {
       return;
     }
     this.mouseDown = false;
+    this.bagDraggingThumb = false;
     if (this.drag) this.dropDrag(this.mx, this.my);
+  };
+
+  private onWheel = (e: WheelEvent) => {
+    if (this.scene !== "game" || !this.bagOpen || this.bagAnim < 0.4) return;
+    const layout = this.bagLayout();
+    if (!hit(layout.panel, this.mx, this.my)) return;
+    e.preventDefault();
+    // Pixel-accurate scrolling: translate the wheel delta directly into scrollY pixels
+    // (with a little extra punch for coarse "line" deltas some browsers/mice report).
+    let amount = e.deltaY;
+    if (e.deltaMode === 1) amount *= 18; // DOM_DELTA_LINE
+    else if (e.deltaMode === 2) amount *= layout.gridH; // DOM_DELTA_PAGE
+    this.bagScrollY += amount;
+    this.clampBagScroll();
   };
 
   // ------------------------------------------------------------ menu logic
@@ -826,6 +976,8 @@ export class GameClient {
       }
     }
 
+    if (this.bagAnim > 0.4 && this.handleBagClick(mx, my)) return;
+
     const idx = this.cellIndexAtPoint(mx, my);
     if (idx >= 0) {
       const cell = this.cellAt(idx);
@@ -836,6 +988,98 @@ export class GameClient {
       }
       return;
     }
+  }
+
+  /** Handles clicks that land on the bag's own chrome (close/search/biome/scrollbar). */
+  private handleBagClick(mx: number, my: number): boolean {
+    const layout = this.bagLayout();
+    const p = layout.panel;
+    if (!hit(p, mx, my)) return false;
+
+    if (hit(layout.closeRect, mx, my)) {
+      this.bagOpen = false;
+      return true;
+    }
+
+    const barRect: Rect = { x: layout.barX, y: layout.barY, w: layout.barW, h: layout.barH };
+    if (hit(barRect, mx, my)) {
+      this.bagSearchActive = true;
+      this.bagBiomeOpen = false;
+      return true;
+    }
+
+    const dropRect: Rect = { x: layout.dropX, y: layout.barY, w: layout.dropW, h: layout.barH };
+    if (hit(dropRect, mx, my)) {
+      this.bagBiomeOpen = !this.bagBiomeOpen;
+      this.bagSearchActive = false;
+      return true;
+    }
+
+    if (this.bagBiomeOpen) {
+      const optH = layout.barH + 2;
+      const listY = layout.barY + layout.barH + 4;
+      for (let i = 0; i < BIOME_LIST.length; i++) {
+        const rect: Rect = { x: layout.dropX + 3, y: listY + 3 + i * optH, w: layout.dropW - 6, h: optH - 2 };
+        if (hit(rect, mx, my)) {
+          this.bagBiome = BIOME_LIST[i];
+          this.bagBiomeOpen = false;
+          this.bagScrollY = 0;
+          this.clampBagScroll();
+          return true;
+        }
+      }
+      this.bagBiomeOpen = false;
+      return true;
+    }
+
+    if (this.bagMaxScroll() > 0) {
+      const thumb = this.bagScrollThumbRect(layout);
+      if (hit(thumb, mx, my)) {
+        this.bagDraggingThumb = true;
+        this.bagThumbDragStartY = my;
+        this.bagScrollAtDragStart = this.bagScrollY;
+        return true;
+      }
+      if (hit(layout.scrollTrack, mx, my)) {
+        const maxScroll = this.bagMaxScroll();
+        const ratio = (my - layout.scrollTrack.y) / layout.scrollTrack.h;
+        this.bagScrollY = Math.max(0, Math.min(maxScroll, ratio * maxScroll));
+        return true;
+      }
+    }
+
+    this.bagSearchActive = false;
+    return false;
+  }
+
+  private bagScrollThumbRect(layout: ReturnType<GameClient["bagLayout"]>): Rect {
+    const track = layout.scrollTrack;
+    const filtered = this.bagFilteredEntries();
+    const totalRows = Math.max(1, Math.ceil(filtered.length / layout.cols));
+    if (totalRows <= layout.maxVisibleRows) return { x: track.x, y: track.y, w: track.w, h: track.h };
+    const maxScroll = this.bagMaxScroll();
+    const thumbH = Math.max(20, (layout.maxVisibleRows / totalRows) * track.h);
+    const ratio = maxScroll > 0 ? this.bagScrollY / maxScroll : 0;
+    const thumbY = track.y + ratio * (track.h - thumbH);
+    return { x: track.x, y: thumbY, w: track.w, h: thumbH };
+  }
+
+  private dragBagThumb(my: number) {
+    const layout = this.bagLayout();
+    const maxScroll = this.bagMaxScroll();
+    if (maxScroll <= 0) {
+      this.bagDraggingThumb = false;
+      return;
+    }
+    const track = layout.scrollTrack;
+    const filtered = this.bagFilteredEntries();
+    const totalRows = Math.max(1, Math.ceil(filtered.length / layout.cols));
+    const thumbH = Math.max(20, (layout.maxVisibleRows / totalRows) * track.h);
+    const maxDrag = track.h - thumbH;
+    if (maxDrag <= 0) return;
+    const dy = my - this.bagThumbDragStartY;
+    const ratio = dy / maxDrag;
+    this.bagScrollY = Math.max(0, Math.min(maxScroll, this.bagScrollAtDragStart + ratio * maxScroll));
   }
 
   private countOf(item: number, rarity: number) {
@@ -1205,24 +1449,224 @@ export class GameClient {
   private renderBag() {
     if (this.bagAnim < 0.01) return;
     const ctx = this.ctx;
-    const p = this.bagPanelRect();
+    const layout = this.bagLayout();
+    const p = layout.panel;
+    this.clampBagScroll();
+
     ctx.save();
     ctx.globalAlpha = Math.min(1, this.bagAnim * 1.3);
-    panel(ctx, p);
-    text(ctx, "Bag — drag cards onto your petal slots", p.x + p.w / 2, p.y + 22, 16, "#ffe763");
-    const rects = this.bagRects();
-    rects.forEach((r, i) => {
-      const cell = this.bag[i];
-      const hovered = hit(r, this.mx, this.my);
-      drawCard(ctx, r, cell, { hovered, dim: this.drag?.from === SLOT_COUNT + i ? 0.35 : 1 });
+
+    // main panel background, styled like the reference UI (blue card + dark border)
+    roundRect(ctx, p.x, p.y, p.w, p.h, 10);
+    ctx.fillStyle = "#5aa0db";
+    ctx.fill();
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = "#3f7dc2";
+    ctx.stroke();
+
+    text(ctx, "Inventory", p.x + p.w / 2, p.y + 24, 20, "#ffffff");
+
+    // close button
+    button(ctx, layout.closeRect, "x", "#e53232", hit(layout.closeRect, this.mx, this.my), 15);
+
+    // search bar + biome dropdown
+    this.drawBagSearchBar(ctx, layout.barX, layout.barY, layout.barW, layout.barH);
+    this.drawBagBiomeDropdown(ctx, layout.dropX, layout.barY, layout.dropW, layout.barH);
+
+    // clipped, pixel-scrolled item grid
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(p.x + 2, layout.gridTop, p.w - 4, layout.gridH);
+    ctx.clip();
+
+    const filtered = this.bagFilteredEntries();
+    const maxScroll = this.bagMaxScroll();
+    this.bagScrollY = Math.max(0, Math.min(maxScroll, this.bagScrollY));
+
+    const startRow = Math.floor(this.bagScrollY / layout.itemHeight);
+    const yOffset = -(this.bagScrollY % layout.itemHeight);
+    const startIdx = startRow * layout.cols;
+    const visibleSlots = layout.maxVisibleRows + 2;
+    const endIdx = startIdx + visibleSlots * layout.cols;
+    const visible = filtered.slice(startIdx, endIdx);
+
+    let hoveredEntry: { slot: number; cell: Cell } | null = null;
+    let hoveredRect: Rect | null = null;
+
+    visible.forEach((entry, i) => {
+      const row = Math.floor(i / layout.cols);
+      const col = i % layout.cols;
+      const slotX = p.x + layout.pad + col * (layout.slotSize + layout.gap);
+      const slotY = layout.gridTop + row * layout.itemHeight + yOffset;
+      if (slotY + layout.slotSize < layout.gridTop || slotY > layout.gridTop + layout.gridH) return;
+      const r: Rect = { x: slotX, y: slotY, w: layout.slotSize, h: layout.slotSize };
+      const hovered = hit(r, this.mx, this.my) && !this.drag;
+      if (hovered) {
+        hoveredEntry = entry;
+        hoveredRect = r;
+      }
+      drawCard(ctx, r, entry.cell, { hovered, dim: this.drag?.from === SLOT_COUNT + entry.slot ? 0.35 : 1 });
     });
-    // tooltip
-    const idx = this.cellIndexAtPoint(this.mx, this.my);
-    if (idx >= 0 && !this.drag) {
-      const cell = this.cellAt(idx);
-      if (cell) this.tooltip(cell, this.mx + 14, this.my - 10);
+
+    ctx.restore();
+
+    // scrollbar
+    const totalRows = Math.max(1, Math.ceil(filtered.length / layout.cols));
+    if (totalRows > layout.maxVisibleRows) {
+      const track = layout.scrollTrack;
+      roundRect(ctx, track.x, track.y, track.w, track.h, 3);
+      ctx.fillStyle = "rgba(20,30,45,0.25)";
+      ctx.fill();
+      const thumb = this.bagScrollThumbRect(layout);
+      roundRect(ctx, thumb.x, thumb.y, thumb.w, thumb.h, 3);
+      ctx.fillStyle = this.bagDraggingThumb ? "rgba(20,30,45,0.85)" : "rgba(20,30,45,0.6)";
+      ctx.fill();
+    }
+
+    // rarity summary panel
+    this.drawBagRarityStats(ctx, layout);
+
+    // tooltip for hovered card
+    if (hoveredEntry && hoveredRect) {
+      this.tooltip((hoveredEntry as { slot: number; cell: Cell }).cell, this.mx + 14, this.my - 10);
+    }
+
+    if (this.bagBiomeOpen) {
+      this.drawBagBiomeDropdown(ctx, layout.dropX, layout.barY, layout.dropW, layout.barH);
+    }
+
+    ctx.restore();
+  }
+
+  private drawBagSearchBar(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
+    ctx.save();
+    ctx.fillStyle = this.bagSearchActive ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.65)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x, y, w, h);
+
+    const display = this.bagSearchText || "";
+    const showPlaceholder = display === "" && !this.bagSearchActive;
+    ctx.font = `${Math.round(h * 0.46)}px "Trebuchet MS", sans-serif`;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = showPlaceholder ? "#444444" : "#000000";
+    ctx.fillText(showPlaceholder ? "Search..." : display, x + 10, y + h / 2);
+
+    if (this.bagSearchActive && Math.floor(Date.now() / 530) % 2 === 0) {
+      const tw = ctx.measureText(display).width;
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(x + 10 + tw + 1, y + 6, 2, h - 12);
     }
     ctx.restore();
+  }
+
+  private drawBagBiomeDropdown(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number) {
+    ctx.save();
+    ctx.fillStyle = "rgba(255,255,255,0.65)";
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x, y, w, h);
+
+    ctx.font = `${Math.round(h * 0.42)}px "Trebuchet MS", sans-serif`;
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#444444";
+    const label = this.bagBiome.length > 10 ? this.bagBiome.slice(0, 9) + "…" : this.bagBiome;
+    ctx.fillText(label, x + 10, y + h / 2);
+    ctx.textAlign = "right";
+    ctx.fillStyle = "rgba(0,0,0,0.8)";
+    ctx.fillText(this.bagBiomeOpen ? "▲" : "▼", x + w - 10, y + h / 2);
+    ctx.restore();
+
+    if (!this.bagBiomeOpen) return;
+
+    const optH = h + 2;
+    const listY = y + h + 4;
+    const listH = optH * BIOME_LIST.length + 6;
+    ctx.save();
+    ctx.fillStyle = "rgba(16,22,30,0.94)";
+    ctx.fillRect(x, listY, w, listH);
+    ctx.strokeStyle = "rgba(255,255,255,0.1)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x, listY, w, listH);
+    ctx.restore();
+
+    BIOME_LIST.forEach((biome, i) => {
+      const oy = listY + 3 + i * optH;
+      const rect: Rect = { x: x + 3, y: oy, w: w - 6, h: optH - 2 };
+      const hovered = hit(rect, this.mx, this.my);
+      const selected = biome === this.bagBiome;
+      ctx.save();
+      if (selected || hovered) {
+        ctx.fillStyle = selected ? "rgba(85,170,255,0.25)" : "rgba(255,255,255,0.06)";
+        ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+      }
+      ctx.font = `${Math.round(optH * 0.44)}px sans-serif`;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = selected ? "#55aaff" : "rgba(255,255,255,0.85)";
+      ctx.fillText(biome, rect.x + 10, rect.y + rect.h / 2);
+      ctx.restore();
+    });
+  }
+
+  private bagRarityStats(): { count: number; color: string; name: string }[] {
+    const stats = RARITIES.map((r) => ({ count: 0, color: r.color, name: r.name }));
+    for (const cell of this.bag) {
+      if (cell && stats[cell.rarity]) stats[cell.rarity].count += cell.count;
+    }
+    return stats;
+  }
+
+  private drawBagRarityStats(ctx: CanvasRenderingContext2D, layout: ReturnType<GameClient["bagLayout"]>) {
+    const p = layout.panel;
+    const panelH = layout.statsH;
+    const panelY = p.y + p.h - panelH - 4;
+    const panelX = p.x + layout.pad;
+    const panelW = p.w - layout.pad * 2;
+
+    ctx.save();
+    roundRect(ctx, panelX, panelY, panelW, panelH, 6);
+    ctx.fillStyle = "#3f7dc2";
+    ctx.fill();
+
+    const stats = this.bagRarityStats();
+    const total = stats.reduce((sum, s) => sum + s.count, 0);
+    text(ctx, `Summary: ${this.formatBagNumber(total)}`, panelX + 12, panelY + 16, 12, "#ffffff", "left");
+
+    const visible = stats.filter((s) => s.count > 0).reverse();
+    if (visible.length === 0) {
+      text(ctx, "Empty", panelX + panelW / 2, panelY + panelH / 2 + 8, 13, "rgba(255,255,255,0.8)");
+      ctx.restore();
+      return;
+    }
+
+    const cols = 3;
+    const colWidth = (panelW - 16) / cols;
+    const rowHeight = 18;
+    const startX = panelX + 10;
+    const startY = panelY + 40;
+    visible.forEach((s, i) => {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const x = startX + col * colWidth;
+      const y = startY + row * rowHeight;
+      const label = s.name.length > 10 ? s.name.slice(0, 4) + ".." : s.name;
+      text(ctx, label, x, y, 10, "#ffffff", "left");
+      ctx.font = "10px sans-serif";
+      const tw = ctx.measureText(label).width;
+      text(ctx, this.formatBagNumber(s.count), x + tw + 6, y, 10, s.color, "left");
+    });
+    ctx.restore();
+  }
+
+  private formatBagNumber(num: number): string {
+    if (num >= 1_000_000) return (num / 1_000_000).toFixed(2) + "M";
+    if (num >= 1000) return (num / 1000).toFixed(2) + "K";
+    return num.toString();
   }
 
   private tooltip(cell: Cell, x: number, y: number) {
