@@ -2153,14 +2153,19 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     const ctx = this.ctx;
     const rarity = RARITIES[Math.min(e.team, RARITIES.length - 1)] ?? RARITIES[0];
     const bob = Math.sin(this.time * 4 + e.id) * 3;
+    const w = 30;
+    const h = 36;
+    const x = e.x - w / 2;
+    const y = e.y - h / 2 + bob;
     ctx.save();
     ctx.globalAlpha = 0.9;
-    roundRect(ctx, e.x - 15, e.y - 18 + bob, 30, 36, 6);
+    // Flat square drop card: light inner fill + dark rarity border (matches reference Card.draw).
     ctx.fillStyle = rarity.color;
-    ctx.fill();
-    roundRect(ctx, e.x - 12, e.y - 15 + bob, 24, 30, 5);    ctx.fillStyle = shade(rarity.color, -40);
-    ctx.fill();
-drawItemIcon(ctx, e.type, e.x, e.y + bob, 9, this.time * 2, e.team || 0);
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeStyle = rarity.border;
+    ctx.lineWidth = 3;
+    ctx.strokeRect(x, y, w, h);
+    drawItemIcon(ctx, e.type, e.x, e.y + bob, 9, this.time * 2, e.team || 0);
     ctx.restore();
   }
 

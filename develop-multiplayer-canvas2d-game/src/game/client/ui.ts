@@ -324,6 +324,21 @@ export function drawItemIcon(
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(spin);
+
+  // Normalize each item's artwork so every icon occupies roughly the same
+  // visual area and is centered on the cell. `k` scales the shape, while
+  // (ox, oy) (in units of `size`) re-centers shapes whose geometry is offset.
+  const ICON_NORM: Record<number, { k: number; ox: number; oy: number }> = {
+    0: { k: 0.66, ox: 0, oy: 0.5 },      // Basic: shrink a bit + center the petal ring
+    7: { k: 1.25, ox: 0.375, oy: 0 },    // Wing: enlarge + shift right (it sat too far left)
+    9: { k: 1.25, ox: 0.15, oy: 0.28 },  // Stick: enlarge + re-center
+  };
+  const norm = ICON_NORM[def.id];
+  if (norm) {
+    ctx.scale(norm.k, norm.k);
+    ctx.translate(norm.ox * size, norm.oy * size);
+  }
+
   ctx.lineWidth = Math.max(1.5, size * 0.16);
   ctx.strokeStyle = def.outline;
   ctx.fillStyle = def.color;
@@ -365,17 +380,30 @@ export function drawItemIcon(
     }
     case 2: { // Stinger
       const count = getStingerPetalCount(rarity);
-      for(let i=0;i<count;i++){
-        ctx.save();
-        ctx.rotate((i * 2 * Math.PI / count) - Math.PI / 2);
+      if (count === 1) {
+        // A lone stinger triangle should sit in the middle of the icon
+        // (pointing up), not off to the side facing the center.
+        const R = size * 1.15;
         ctx.beginPath();
-        ctx.moveTo(0, size * 0.4);
-        ctx.lineTo(-size * 0.5, size * 1.4);
-        ctx.lineTo(size * 0.5, size * 1.4);
+        ctx.moveTo(0, -R);
+        ctx.lineTo(-R * 0.866, R * 0.5);
+        ctx.lineTo(R * 0.866, R * 0.5);
         ctx.closePath();
         ctx.fill();
         ctx.stroke();
-        ctx.restore();
+      } else {
+        for (let i = 0; i < count; i++) {
+          ctx.save();
+          ctx.rotate((i * 2 * Math.PI / count) - Math.PI / 2);
+          ctx.beginPath();
+          ctx.moveTo(0, size * 0.4);
+          ctx.lineTo(-size * 0.5, size * 1.4);
+          ctx.lineTo(size * 0.5, size * 1.4);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+        }
       }
       break;
     }
@@ -513,7 +541,7 @@ export function drawItemIcon(
 // ============================================
 // src/game/client/ui.ts - 修改 drawCard 函数
 
-/** Inventory / hotbar card - 使用深色边框 + 浅色内部填充 */
+/** Inventory / hotbar card - flat square card: light inner fill + dark border (matches reference Card.draw). */
 export function drawCard(
   ctx: CanvasRenderingContext2D,
   r: Rect,
@@ -524,64 +552,61 @@ export function drawCard(
   const cx = r.x + r.w / 2;
   const cy = r.y + r.h / 2;
   const size = Math.min(r.w, r.h);
-  
+
   ctx.save();
   ctx.globalAlpha = opts.dim ?? 1;
   ctx.translate(cx, cy);
   ctx.scale(scale, scale);
   ctx.translate(-cx, -cy);
-  
+
   if (!cell) {
-    // 空卡槽
-    roundRect(ctx, r.x, r.y, r.w, r.h, 8);
+    // Empty slot - flat square, same style as filled cards.
     ctx.fillStyle = opts.hovered ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.28)";
-    ctx.fill();
-    ctx.lineWidth = 3;
+    ctx.fillRect(r.x, r.y, r.w, r.h);
+    ctx.lineWidth = 4;
     ctx.strokeStyle = "rgba(255,255,255,0.22)";
-    ctx.stroke();
+    ctx.strokeRect(r.x, r.y, r.w, r.h);
     if (opts.empty) text(ctx, opts.empty, cx, cy, 12, "rgba(255,255,255,0.5)");
     ctx.restore();
     return;
   }
-  
+
   const rarity = RARITIES[Math.min(cell.rarity, RARITIES.length - 1)];
   const def = ITEMS[cell.item];
-  
-  // 绘制背景（内部）- 使用 rarity.color（浅色）
-  roundRect(ctx, r.x, r.y, r.w, r.h, 8);
+
+  // Inner fill - light rarity color (RARITY_COLORS).
   ctx.fillStyle = rarity.color;
-  ctx.fill();
-  
-  // 绘制边框 - 使用深色版本（通过 shade 函数变暗）
-  ctx.lineWidth = Math.max(3, size * 0.06);
-  ctx.strokeStyle = shade(rarity.color, -80);
-  ctx.stroke();
-  
-  // 如果有悬停，添加高亮边框
+  ctx.fillRect(r.x, r.y, r.w, r.h);
+
+  // Border - dark rarity color (BORDER_COLORS).
+  ctx.strokeStyle = rarity.border;
+  ctx.lineWidth = 4;
+  ctx.strokeRect(r.x, r.y, r.w, r.h);
+
+  // Hover highlight.
   if (opts.hovered) {
-    ctx.lineWidth = Math.max(2, size * 0.04);
+    ctx.lineWidth = 2;
     ctx.strokeStyle = "rgba(255,255,255,0.6)";
-    roundRect(ctx, r.x + 2, r.y + 2, r.w - 4, r.h - 4, 6);
-    ctx.stroke();
+    ctx.strokeRect(r.x + 2, r.y + 2, r.w - 4, r.h - 4);
   }
-  
-  // 物品图标
-  const iconSize = Math.min(r.w, r.h) * 0.15;
-  drawItemIcon(ctx, cell.item, cx, cy - (opts.showName ? r.h * 0.06 : 0), iconSize, 0, cell.rarity);
-  
-  // 绘制物品名字 (在卡片底部)
-  if (opts.showName !== false && def) {
+
+  // Item icon - centered in the upper area, leaving room for the name band.
+  const showName = opts.showName !== false && !!def;
+  const iconSize = size * 0.28;
+  const iconCy = cy - (showName ? r.h * 0.07 : 0);
+  drawItemIcon(ctx, cell.item, cx, iconCy, iconSize, 0, cell.rarity);
+
+  // Item name (bottom band) with the reference word-wrap logic.
+  if (showName && def) {
     ctx.save();
-    
-    let itemName = def.name;
-    const maxWidth = r.w * 0.92;
+
+    const itemName = def.name;
+    const maxWidth = r.w * 0.95;
     const maxHeight = r.h * 0.22;
-    const fontSizeBase = Math.min(maxHeight * 0.85, 16);
-    
-    // 分行逻辑
+
     let lines: string[] = [];
     const maxCharsPerLine = 10;
-    
+
     if (itemName.length > maxCharsPerLine) {
       const spaceIndex = itemName.indexOf(' ');
       if (spaceIndex !== -1 && spaceIndex <= maxCharsPerLine && spaceIndex < itemName.length - 1) {
@@ -590,45 +615,35 @@ export function drawCard(
         const mid = Math.ceil(itemName.length / 2);
         let splitPoint = mid;
         for (let i = mid; i < itemName.length; i++) {
-          if (itemName[i] === ' ') {
-            splitPoint = i;
-            break;
-          }
+          if (itemName[i] === ' ') { splitPoint = i; break; }
         }
         if (splitPoint === mid) {
           for (let i = mid - 1; i > 0; i--) {
-            if (itemName[i] === ' ') {
-              splitPoint = i;
-              break;
-            }
+            if (itemName[i] === ' ') { splitPoint = i; break; }
           }
         }
-        if (splitPoint === mid) {
-          splitPoint = Math.floor(itemName.length / 2);
-        }
+        if (splitPoint === mid) splitPoint = Math.floor(itemName.length / 2);
         lines = [itemName.substring(0, splitPoint), itemName.substring(splitPoint + 1)];
       }
     } else {
       lines = [itemName];
     }
-    
-    let fontSize = lines.length > 1 ? Math.floor(maxHeight * 0.55) : Math.floor(maxHeight * 0.8);
-    fontSize = Math.min(fontSize, fontSizeBase);
-    
+
+    let fontSize = lines.length > 1 ? Math.floor(maxHeight * 0.6) : Math.floor(maxHeight * 0.9);
     ctx.font = `900 ${fontSize}px "Trebuchet MS", "Segoe UI", sans-serif`;
     let longestLineWidth = Math.max(...lines.map(line => ctx.measureText(line).width));
-    
+
     while (longestLineWidth > maxWidth && fontSize > 7) {
       fontSize--;
       ctx.font = `900 ${fontSize}px "Trebuchet MS", "Segoe UI", sans-serif`;
       longestLineWidth = Math.max(...lines.map(line => ctx.measureText(line).width));
     }
-    
+
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     const textX = cx;
     const spacing = fontSize * 0.85;
-    
+
     lines.forEach((line, index) => {
       let textY: number;
       if (lines.length === 1) {
@@ -637,55 +652,42 @@ export function drawCard(
         const baseY = r.y + r.h - (maxHeight / 2) - 4;
         textY = (index === 0) ? baseY - (spacing / 2) : baseY + (spacing / 2);
       }
-      
-      // 描边（黑色轮廓）
-      ctx.strokeStyle = "rgba(0,0,0,0.7)";
-      ctx.lineWidth = Math.max(2, fontSize * 0.18);
+      ctx.strokeStyle = "black";
+      ctx.lineWidth = fontSize > 12 ? 3 : 2;
       ctx.lineJoin = "round";
       ctx.strokeText(line, textX, textY);
-      
-      // 填充（白色文字）
-      ctx.fillStyle = "#ffffff";
+      ctx.fillStyle = "white";
       ctx.fillText(line, textX, textY);
     });
-    
+
     ctx.restore();
   }
-  
-  // 数量显示
+
+  // Count badge (top-right, rotated) - matches reference.
   if (cell.count > 1) {
     ctx.save();
-    
-    let countStr = "x" + (cell.count >= 1000000 ? (cell.count / 1000000).toFixed(1) + 'M' :
-                          cell.count >= 1000 ? (cell.count / 1000).toFixed(1) + 'K' :
-                          cell.count);
-    
-    const fontSize = Math.max(12, Math.floor(18 * size / 70));
+
+    const countStr = "x" + (cell.count >= 1000000 ? (cell.count / 1000000).toFixed(1) + 'M' :
+                            cell.count >= 1000 ? (cell.count / 1000).toFixed(1) + 'K' :
+                            cell.count);
+
+    const fontSize = Math.max(14, Math.floor(18 * size / 70));
     ctx.font = `900 ${fontSize}px "Trebuchet MS", "Segoe UI", sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    
-    const centerX = r.x + r.w - 10;
-    const centerY = r.y + 8;
-    
-    ctx.save();
-    ctx.translate(centerX, centerY);
+
+    ctx.translate(r.x + r.w - 10, r.y + 5);
     ctx.rotate(0.3);
-    
-    // 数量描边
-    ctx.strokeStyle = "rgba(0,0,0,0.8)";
-    ctx.lineWidth = Math.max(3, fontSize * 0.22);
+    ctx.strokeStyle = "black";
+    ctx.lineWidth = 4;
     ctx.lineJoin = "round";
     ctx.strokeText(countStr, 0, 0);
-    
-    // 数量填充
-    ctx.fillStyle = "#ffffff";
+    ctx.fillStyle = "white";
     ctx.fillText(countStr, 0, 0);
-    
-    ctx.restore();
+
     ctx.restore();
   }
-  
+
   ctx.restore();
 }
 // ============================================
