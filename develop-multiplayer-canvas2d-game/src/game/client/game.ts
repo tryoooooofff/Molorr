@@ -65,6 +65,19 @@ interface Floater {
   vy: number;
 }
 
+/** Burst particle used by the crafting animation (ported from CraftAnimation). */
+interface CraftParticle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  life: number;
+  decay: number;
+  size: number;
+  color: [number, number, number];
+  gravity: boolean;
+}
+
 interface SaveData {
   slots: (Cell | null)[];
   bag: (Cell | null)[];
@@ -72,6 +85,10 @@ interface SaveData {
   mapId: number;
   nextOracleAt?: number;
   nextTradeAt?: number;
+  craftPetals?: number;
+  craftCrafted?: number;
+  craftBurned?: number;
+  craftAttempts?: number;
 }
 
 const SAVE_KEY = "petalia.save";
@@ -173,6 +190,33 @@ export class GameClient {
   private craftMsg = "";
   private craftMsgLife = 0;
 
+  // ── Ported CraftAnimation state (color / arrangement / animation) ──
+  // Rotation phase machine: "none" | "rotating" | "waiting" | "showing"
+  private craftPhase: "none" | "rotating" | "waiting" | "showing" = "none";
+  private craftRotTime = 0; // seconds elapsed while rotating
+  private craftRotDuration = 1.5; // seconds, mirrors startAnimation(1.5)
+  private craftAngle = 0; // degrees, accumulates during rotation
+  private craftRotDir = 1;
+  private craftRotSpeed = 300; // deg/s, accelerates 300 -> 800
+  private craftWaitStart = 0; // performance.now() ms
+  private craftWaitDuration = 0.3; // seconds before revealing result
+  private craftShowTimer = 0; // seconds the result card is shown
+  private craftShowDuration = 1.6; // seconds before auto-clearing the result card
+  private craftPending: { item: number; rarity: number; count: number } | null = null;
+  // Slot-fill animation when a card lands (grow + spin)
+  private craftFillActive = false;
+  private craftFillElapsed = 0; // ms, 0..200
+  private craftFillTotal = 200; // ms
+  // Particle bursts
+  private craftSuccessParticles: CraftParticle[] = [];
+  private craftFailParticles: CraftParticle[] = [];
+  // Craft log stats (mirrors drawCraftLog)
+  private craftLogPetals = 0;
+  private craftLogCrafted = 0;
+  private craftLogBurned = 0;
+  private craftLogAttempts = 0;
+  private craftLogLast = "No Result";
+
   private drag: { from: number; cell: Cell } | null = null;
   private dragX = 0;
   private dragY = 0;
@@ -265,6 +309,10 @@ export class GameClient {
     this.selectedMap = Math.max(0, Math.min(MAPS.length - 1, data.mapId || 0));
     this.nextOracleAt = data.nextOracleAt || 0;
     this.nextTradeAt = data.nextTradeAt || 0;
+    this.craftLogPetals = data.craftPetals || 0;
+    this.craftLogCrafted = data.craftCrafted || 0;
+    this.craftLogBurned = data.craftBurned || 0;
+    this.craftLogAttempts = data.craftAttempts || 0;
   }
 
   private currentSave(): SaveData {
@@ -275,6 +323,10 @@ export class GameClient {
       mapId: this.mapId,
       nextOracleAt: this.nextOracleAt,
       nextTradeAt: this.nextTradeAt,
+      craftPetals: this.craftLogPetals,
+      craftCrafted: this.craftLogCrafted,
+      craftBurned: this.craftLogBurned,
+      craftAttempts: this.craftLogAttempts,
     };
   }
 
@@ -511,22 +563,30 @@ export class GameClient {
           ? `Crafted ${value}x ${RARITIES[rarity].name} ${ITEMS[item].name}!`
           : `Crafted ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
         this.craftMsgLife = 2.6;
-        this.craftSpin = 0;
+        this.craftLogCrafted += value;
+        this.craftLogLast = `${value} ${RARITIES[rarity].name} ${ITEMS[item].name}`;
+        if (this.craftPhase === "rotating" || this.craftPhase === "waiting") {
+          this.craftPending = { item, rarity, count: value };
+        }
         break;
       case EVT.CRAFT_FAIL:
         this.craftMsg = value > 0 ? `Craft failed... ${value} petal${value === 1 ? "" : "s"} lost.` : "Craft failed.";
         this.craftMsgLife = 2.6;
-        this.craftSpin = 0;
+        this.craftLogBurned += value;
+        if (!this.craftPending) this.craftLogLast = `Failed - ${value} lost`;
         break;
       case EVT.ORACLE_OK:
         this.craftMsg = `Oracle success! Created ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
         this.craftMsgLife = 3;
-        this.craftSpin = 0;
+        this.craftLogCrafted += 1;
+        this.craftLogLast = `Oracle ${RARITIES[rarity].name} ${ITEMS[item].name}`;
+        this.craftStartShow({ item, rarity, count: 1 });
         break;
       case EVT.TRADE_OK:
         this.craftMsg = `Traded for ${value}x ${RARITIES[rarity].name} Coin!`;
         this.craftMsgLife = 3;
-        this.craftSpin = 0;
+        this.craftLogLast = `Trade ${value}x ${RARITIES[rarity].name} Coin`;
+        this.craftStartShow({ item, rarity, count: value });
         break;
       case EVT.DEATH:
         this.alive = false;
@@ -563,6 +623,7 @@ export class GameClient {
     this.craftAnim += ((this.craftOpen ? 1 : 0) - this.craftAnim) * Math.min(1, dt * 10);
     if (this.craftSpin > 0) this.craftSpin = Math.max(0, this.craftSpin - dt);
     if (this.craftMsgLife > 0) this.craftMsgLife -= dt;
+    this.craftUpdate(dt);
 
     for (const e of this.ents.values()) {
       const k = Math.min(1, dt * 16);
@@ -755,19 +816,32 @@ export class GameClient {
   }
 
   private craftPanelRect(): Rect {
-    const w = Math.min(340, this.w * 0.42);
-    const h = 460;
+    const w = Math.min(400, this.w * 0.5);
+    const hotbarTop = this.h - Math.min(66, this.w / 12) - 18;
+    const bottom = Math.min(this.h - 6, Math.max(470, hotbarTop - 6));
+    const top = 36;
+    const h = bottom - top;
     const t = ease.outCubic(this.craftAnim);
     const hidden = this.w + 20;
     const shown = this.w - w - 18;
-    return { x: hidden + (shown - hidden) * t, y: Math.max(50, this.h / 2 - h / 2), w, h };
+    return { x: hidden + (shown - hidden) * t, y: top, w, h };
+  }
+
+  /** Shared geometry for the ported craft layout: orbit center + radius + slot size. */
+  private craftLayout() {
+    const panel = this.craftPanelRect();
+    const radius = 78;
+    const slotSize = 52;
+    const cx = panel.x + panel.w / 2;
+    const cy = panel.y + 238;
+    return { panel, cx, cy, radius, slotSize };
   }
 
   private craftModeRects(): { mode: "normal" | "oracle" | "trade"; rect: Rect; label: string }[] {
     const p = this.craftPanelRect();
     const gap = 6;
     const w = (p.w - 24 - gap * 2) / 3;
-    const y = p.y + 40;
+    const y = p.y + 42;
     return [
       { mode: "normal", rect: { x: p.x + 12, y, w, h: 30 }, label: "Craft" },
       { mode: "oracle", rect: { x: p.x + 12 + w + gap, y, w, h: 30 }, label: "Oracle" },
@@ -776,26 +850,216 @@ export class GameClient {
   }
 
   private craftPadRects(): Rect[] {
-    const p = this.craftPanelRect();
-    const size = 54;
-    const cx = p.x + p.w / 2;
-    const cy = p.y + 195;
+    const { cx, cy, radius, slotSize } = this.craftLayout();
     return new Array(5).fill(0).map((_, i) => {
-      const a = (i / 5) * Math.PI * 2 - Math.PI / 2;
-      return { x: cx + Math.cos(a) * 80 - size / 2, y: cy + Math.sin(a) * 72 - size / 2, w: size, h: size };
+      const a = (Math.PI / 180) * (-90 + i * 72);
+      return { x: cx + Math.cos(a) * radius - slotSize / 2, y: cy + Math.sin(a) * radius - slotSize / 2, w: slotSize, h: slotSize };
     });
   }
 
   /** Single centered slot used by Oracle/Trade modes (they only ever hold one item type). */
   private craftSingleSlotRect(): Rect {
-    const p = this.craftPanelRect();
-    const size = 64;
-    return { x: p.x + p.w / 2 - size / 2, y: p.y + 165, w: size, h: size };
+    const { cx, cy } = this.craftLayout();
+    const size = 62;
+    return { x: cx - size / 2, y: cy - size / 2, w: size, h: size };
   }
 
   private craftActionButtonRect(): Rect {
     const p = this.craftPanelRect();
     return { x: p.x + p.w / 2 - 90, y: p.y + p.h - 66, w: 180, h: 48 };
+  }
+
+  // ── Ported CraftAnimation helpers (spin / contraction / particles / fill) ──
+
+  /** Local position of the i-th pentagon slot (before rotation/contraction). */
+  private craftLocalPos(i: number): [number, number] {
+    const { radius } = this.craftLayout();
+    const a = (Math.PI / 180) * (-90 + i * 72);
+    return [Math.cos(a) * radius, Math.sin(a) * radius];
+  }
+
+  /** Contraction curve from CraftAnimation.getContractedPosition (slots suck toward center). */
+  private craftContractedPos(progress: number, ox: number, oy: number): [number, number] {
+    const originalRadius = Math.sqrt(ox * ox + oy * oy);
+    const originalAngle = Math.atan2(oy, ox);
+    const maxContraction = 1.0;
+    const minContraction = 0.2;
+    const currentBase = maxContraction - (maxContraction - minContraction) * progress;
+    const frequency = 4.0 + progress * 7.0;
+    const oscillation = Math.sin(progress * Math.PI * frequency);
+    const factor = currentBase + 0.3 * oscillation;
+    return [Math.cos(originalAngle) * originalRadius * factor, Math.sin(originalAngle) * originalRadius * factor];
+  }
+
+  /** Begin the accelerating spin + contraction animation when a craft is fired. */
+  private craftStartRotation() {
+    this.craftPhase = "rotating";
+    this.craftRotTime = 0;
+    this.craftAngle = 0;
+    this.craftRotDir = 1;
+    this.craftRotSpeed = 300;
+    this.craftPending = null;
+    this.craftSuccessParticles.length = 0;
+    this.craftFailParticles.length = 0;
+  }
+
+  /** Reveal a successful result card immediately + success particles (Oracle/Trade). */
+  private craftStartShow(result: { item: number; rarity: number; count: number }) {
+    this.craftPhase = "showing";
+    this.craftShowTimer = 0;
+    this.craftPending = result;
+    this.craftSel = null;
+    this.craftSpawnSuccessParticles(this.rarityRgb(result.rarity), Math.min(50 * Math.max(1, result.count), 1600));
+  }
+
+  /** Called once the spin finishes: spawn particles and (optionally) reveal the result card. */
+  private craftFinalizeShow() {
+    if (this.craftPending) {
+      this.craftPhase = "showing";
+      this.craftShowTimer = 0;
+      this.craftSpawnSuccessParticles(this.rarityRgb(this.craftPending.rarity), Math.min(50 * Math.max(1, this.craftPending.count), 1600));
+    } else {
+      // Nothing crafted — burst failure particles from each pentagon slot.
+      this.craftSpawnFailParticles();
+      this.craftPhase = "none";
+    }
+    this.craftSel = null;
+  }
+
+  /** Per-frame update for the rotation phase machine, fill animation and particles. */
+  private craftUpdate(dt: number) {
+    if (this.craftPhase === "rotating") {
+      this.craftRotTime += dt;
+      const progress = Math.min(this.craftRotTime / this.craftRotDuration, 1);
+      this.craftRotSpeed = 300 + (800 - 300) * progress;
+      this.craftAngle -= this.craftRotDir * this.craftRotSpeed * dt;
+      if (this.craftRotTime >= this.craftRotDuration) {
+        this.craftAngle = 0;
+        this.craftPhase = "waiting";
+        this.craftWaitStart = performance.now();
+      }
+    } else if (this.craftPhase === "waiting") {
+      if ((performance.now() - this.craftWaitStart) / 1000 >= this.craftWaitDuration) {
+        this.craftFinalizeShow();
+      }
+    } else if (this.craftPhase === "showing") {
+      this.craftShowTimer += dt;
+      if (this.craftShowTimer >= this.craftShowDuration) {
+        this.craftPhase = "none";
+        this.craftPending = null;
+      }
+    }
+
+    if (this.craftFillActive) {
+      this.craftFillElapsed += dt * 1000;
+      if (this.craftFillElapsed >= this.craftFillTotal) {
+        this.craftFillActive = false;
+        this.craftFillElapsed = 0;
+      }
+    }
+
+    // Particles move per-frame (mirrors CraftAnimation.updateParticles).
+    this.craftSuccessParticles = this.craftSuccessParticles.filter((p) => {
+      p.x += p.vx;
+      p.y += p.vy;
+      p.life -= p.decay;
+      return p.life > 0;
+    });
+    this.craftFailParticles = this.craftFailParticles.filter((p) => {
+      p.x += p.vx;
+      p.y += p.vy;
+      if (p.gravity) p.vy += 0.1;
+      p.life -= p.decay;
+      return p.life > 0;
+    });
+  }
+
+  private craftSpawnSuccessParticles(color: [number, number, number], count: number) {
+    const { cx, cy } = this.craftLayout();
+    for (let i = 0; i < count; i++) {
+      const angle = Math.random() * 2 * Math.PI;
+      const speed = 3 + Math.random() * 7;
+      this.craftSuccessParticles.push({
+        x: cx,
+        y: cy,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        life: 1.0,
+        decay: 0.005 + Math.random() * 0.015,
+        size: 4 + Math.floor(Math.random() * 5),
+        color,
+        gravity: false,
+      });
+    }
+  }
+
+  private craftSpawnFailParticles() {
+    const { cx, cy } = this.craftLayout();
+    const color: [number, number, number] = this.craftSel ? this.rarityRgb(this.craftSel.rarity) : [200, 80, 80];
+    for (let i = 0; i < 5; i++) {
+      const [ox, oy] = this.craftLocalPos(i);
+      const rad = (Math.PI / 180) * this.craftAngle;
+      const wx = cx + ox * Math.cos(rad) - oy * Math.sin(rad);
+      const wy = cy + ox * Math.sin(rad) + oy * Math.cos(rad);
+      const count = 10 + Math.floor(Math.random() * 11);
+      for (let j = 0; j < count; j++) {
+        const angle = Math.random() * 2 * Math.PI;
+        const speed = 2 + Math.random() * 5;
+        this.craftFailParticles.push({
+          x: wx,
+          y: wy,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 1.0,
+          decay: 0.01 + Math.random() * 0.02,
+          size: 3 + Math.floor(Math.random() * 5),
+          color,
+          gravity: true,
+        });
+      }
+    }
+  }
+
+  private drawCraftParticles(ctx: CanvasRenderingContext2D) {
+    const draw = (list: CraftParticle[]) => {
+      for (const p of list) {
+        const alpha = Math.max(0, Math.min(1, p.life));
+        const size = Math.max(1, p.size * p.life);
+        ctx.save();
+        ctx.globalAlpha = alpha;
+        ctx.fillStyle = `rgb(${p.color[0]},${p.color[1]},${p.color[2]})`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    };
+    draw(this.craftSuccessParticles);
+    draw(this.craftFailParticles);
+  }
+
+  private rarityRgb(r: number): [number, number, number] {
+    const idx = Math.max(0, Math.min(RARITIES.length - 1, r));
+    const c = RARITIES[idx]?.color ?? "rgb(160,160,160)";
+    const m = c.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
+    if (m) {
+      const out: [number, number, number] = [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)];
+      return out;
+    }
+    return [160, 160, 160];
+  }
+
+  /** Start the slot grow+spin fill animation (when a card lands). */
+  private craftStartFill() {
+    this.craftFillActive = true;
+    this.craftFillElapsed = 0;
+  }
+
+  /** Ease-out fill curve (mirrors drawFillAnimation): scale 0.01 -> 1, spin PI -> 0. */
+  private craftFillTransform(): { scale: number; angle: number } {
+    const t = Math.min(1, this.craftFillElapsed / this.craftFillTotal);
+    const e = 1 - Math.pow(1 - t, 3);
+    return { scale: 0.01 + e * 0.99, angle: (1 - e) * Math.PI };
   }
 
   private formatCooldown(msLeft: number): string {
@@ -1076,56 +1340,63 @@ export class GameClient {
 
     if (this.craftMode === "normal") {
       for (const r of this.craftPadRects()) {
-        if (hit(r, mx, my) && this.craftSel) {
+        if (hit(r, mx, my) && this.craftSel && this.craftPhase === "none") {
           this.craftSel = null;
           return true;
         }
       }
       const btn = this.craftActionButtonRect();
-      if (hit(btn, mx, my) && this.craftSel) {
+      if (hit(btn, mx, my) && this.craftSel && this.craftPhase === "none") {
         const avail = this.countOf(this.craftSel.item, this.craftSel.rarity);
         if (avail >= 5 && this.craftSel.rarity < MAX_CRAFT_RARITY) {
+          const attempts = Math.floor(avail / 5);
+          this.craftLogPetals += attempts * 5;
+          this.craftLogAttempts += attempts;
           const w = new Writer(6);
           w.u8(C2S.CRAFT).u8(this.craftSel.item).u8(this.craftSel.rarity).u16(0);
           this.net?.send(w.bytes());
-          this.craftSpin = 0.8;
+          this.craftStartRotation();
+          this.saveDirty = true;
         }
       }
       return true;
     }
 
     if (this.craftMode === "oracle") {
-      if (hit(this.craftSingleSlotRect(), mx, my) && this.craftSel) {
+      if (hit(this.craftSingleSlotRect(), mx, my) && this.craftSel && this.craftPhase === "none") {
         this.craftSel = null;
         return true;
       }
       const btn = this.craftActionButtonRect();
-      if (hit(btn, mx, my) && this.craftSel) {
+      if (hit(btn, mx, my) && this.craftSel && this.craftPhase === "none") {
         const required = oracleRequiredCount(this.craftSel.rarity);
         const avail = this.countOf(this.craftSel.item, this.craftSel.rarity);
         if (required !== undefined && avail >= required && this.craftCooldownLeft("oracle") <= 0) {
+          this.craftLogPetals += required;
+          this.craftLogAttempts += 1;
           const w = new Writer(4);
           w.u8(C2S.ORACLE).u8(this.craftSel.item).u8(this.craftSel.rarity);
           this.net?.send(w.bytes());
-          this.craftSpin = 0.8;
+          this.craftStartFill();
+          this.saveDirty = true;
         }
       }
       return true;
     }
 
     if (this.craftMode === "trade") {
-      if (hit(this.craftSingleSlotRect(), mx, my) && this.craftSel) {
+      if (hit(this.craftSingleSlotRect(), mx, my) && this.craftSel && this.craftPhase === "none") {
         this.craftSel = null;
         return true;
       }
       const btn = this.craftActionButtonRect();
-      if (hit(btn, mx, my) && this.craftSel) {
+      if (hit(btn, mx, my) && this.craftSel && this.craftPhase === "none") {
         const avail = this.countOf(this.craftSel.item, this.craftSel.rarity);
         if (avail >= 1 && this.craftCooldownLeft("trade") <= 0) {
           const w = new Writer(6);
           w.u8(C2S.TRADE).u8(this.craftSel.item).u8(this.craftSel.rarity).u16(0);
           this.net?.send(w.bytes());
-          this.craftSpin = 0.8;
+          this.craftStartFill();
         }
       }
       return true;
@@ -1238,8 +1509,13 @@ export class GameClient {
     if (!drag) return;
     if (this.craftAnim > 0.4 && hit(this.craftPanelRect(), mx, my)) {
       if (ITEMS[drag.cell.item].kind !== "trinket") {
+        const prev = this.craftSel;
         this.craftSel = { item: drag.cell.item, rarity: drag.cell.rarity };
         this.craftMsg = "";
+        // Play the grow+spin fill animation whenever the staged card changes.
+        if (!prev || prev.item !== this.craftSel.item || prev.rarity !== this.craftSel.rarity) {
+          this.craftStartFill();
+        }
       }
       return;
     }
@@ -1843,133 +2119,243 @@ export class GameClient {
     const p = this.craftPanelRect();
     ctx.save();
     ctx.globalAlpha = Math.min(1, this.craftAnim * 1.3);
-    panel(ctx, p);
 
-    text(ctx, "Crafting", p.x + p.w / 2, p.y + 20, 20, "#ffbe5c");
-    button(ctx, this.craftCloseRect(), "x", "#c0392b", hit(this.craftCloseRect(), this.mx, this.my), 13);
+    // Panel background colored by mode (ported color scheme).
+    const bg = this.craftMode === "oracle" ? "#4A6FA5" : this.craftMode === "trade" ? "#4A8C5E" : "#CDA46E";
+    roundRect(ctx, p.x, p.y, p.w, p.h, 12);
+    ctx.fillStyle = bg;
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "rgba(0,0,0,0.5)";
+    ctx.stroke();
 
+    // Title (mirrors the pasted top-center title).
+    const title = this.craftMode === "oracle" ? "Oracle" : this.craftMode === "trade" ? "Trade" : "Craft";
+    text(ctx, title, p.x + p.w / 2, p.y + 24, 26, "#ffffff");
+
+    // Close button.
+    button(ctx, this.craftCloseRect(), "✕", "#c0392b", hit(this.craftCloseRect(), this.mx, this.my), 14);
+
+    // Mode selectors (ported Cr / Or / Tr look).
     for (const { mode, rect, label } of this.craftModeRects()) {
       const active = this.craftMode === mode;
-      const color = mode === "normal" ? "#c9762b" : mode === "oracle" ? "#6a3fb0" : "#3f8f5a";
-      button(ctx, rect, label, active ? color : "#3a3a3a", hit(rect, this.mx, this.my), 13);
+      const color = mode === "normal" ? "#A0A0A0" : mode === "oracle" ? "#6600FF" : "#FFD700";
+      this.drawCraftModeButton(ctx, rect, label, active ? color : "#3a3a3a", active, hit(rect, this.mx, this.my));
     }
 
+    // Craft log (top-left).
+    this.drawCraftLog(ctx, p);
+
+    // Slots area.
     if (this.craftMode === "normal") this.renderCraftNormal(ctx, p);
     else this.renderCraftOracleOrTrade(ctx, p, this.craftMode);
 
+    // Particle bursts.
+    this.drawCraftParticles(ctx);
+
+    // Result card celebration (showing phase).
+    if (this.craftPhase === "showing" && this.craftPending) {
+      this.drawCraftResultCard(ctx);
+    }
+
+    // Status message.
     if (this.craftMsgLife > 0) {
       ctx.save();
       ctx.globalAlpha = Math.min(1, this.craftMsgLife);
-      const bad = this.craftMsg.toLowerCase().includes("fail") || this.craftMsg.toLowerCase().includes("cooldown");
-      text(ctx, this.craftMsg, p.x + p.w / 2, p.y + p.h - 96, 13, bad ? "#ff9d9d" : "#8fffa8");
+      const bad = /fail|cooldown/i.test(this.craftMsg);
+      text(ctx, this.craftMsg, p.x + p.w / 2, p.y + p.h - 92, 13, bad ? "#ff9d9d" : "#fff0a8");
       ctx.restore();
     }
 
     ctx.restore();
   }
 
-  private renderCraftNormal(ctx: CanvasRenderingContext2D, p: Rect) {
-    text(ctx, "Drag a card here — 5 combine into 1", p.x + p.w / 2, p.y + 82, 12, "rgba(255,255,255,0.75)");
+  /** Mode selector styled like the pasted drawModeSelectors squares. */
+  private drawCraftModeButton(ctx: CanvasRenderingContext2D, r: Rect, label: string, color: string, active: boolean, hovered: boolean) {
+    ctx.save();
+    roundRect(ctx, r.x, r.y, r.w, r.h, 8);
+    ctx.fillStyle = hovered && active ? shade(color, 24) : color;
+    ctx.fill();
+    ctx.lineWidth = active ? 3 : 1;
+    ctx.strokeStyle = active ? "#ffffff" : "rgba(255,255,255,0.25)";
+    ctx.stroke();
+    ctx.font = `900 14px "Trebuchet MS", "Segoe UI", sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.lineWidth = 3;
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "rgba(0,0,0,0.6)";
+    ctx.strokeText(label, r.x + r.w / 2, r.y + r.h / 2);
+    ctx.fillStyle = active ? "#ffffff" : "rgba(255,255,255,0.78)";
+    ctx.fillText(label, r.x + r.w / 2, r.y + r.h / 2);
+    ctx.restore();
+  }
 
-    const pads = this.craftPadRects();
+  /** Compact craft log panel (mirrors drawCraftLog). */
+  private drawCraftLog(ctx: CanvasRenderingContext2D, p: Rect) {
+    const x = p.x + 12;
+    const y0 = p.y + 80;
+    const lines: { t: string; c: string }[] = [
+      { t: "Craft Log:", c: "#ffffff" },
+      { t: `Petals Used: ${this.craftLogPetals}`, c: "#00E5FF" },
+      { t: `Crafted: ${this.craftLogCrafted}`, c: "#FF4444" },
+      { t: `Burned: ${this.craftLogBurned}`, c: "#FFBB33" },
+      { t: `Attempts: ${this.craftLogAttempts}`, c: "#FFBB33" },
+      { t: `Last: ${this.craftLogLast}`, c: "#4488FF" },
+    ];
+    ctx.save();
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.font = `900 11px "Trebuchet MS", "Segoe UI", sans-serif`;
+    ctx.lineJoin = "round";
+    lines.forEach((ln, i) => {
+      const y = y0 + i * 13;
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "rgba(0,0,0,0.55)";
+      ctx.strokeText(ln.t, x, y);
+      ctx.fillStyle = ln.c;
+      ctx.fillText(ln.t, x, y);
+    });
+    ctx.restore();
+  }
+
+  private renderCraftNormal(ctx: CanvasRenderingContext2D, p: Rect) {
+    const { cx, cy, slotSize } = this.craftLayout();
     const sel = this.craftSel;
     const avail = sel ? this.countOf(sel.item, sel.rarity) : 0;
-    const spin = this.craftSpin > 0 ? (0.8 - this.craftSpin) * 14 : 0;
     const attempts = Math.floor(avail / 5);
-    pads.forEach((r, i) => {
-      const filled = sel && avail >= i + 1;
-      ctx.save();
-      if (this.craftSpin > 0) {
-        const cx = p.x + p.w / 2;
-        const cy = p.y + 195;
-        ctx.translate(cx, cy);
-        ctx.rotate(spin);
-        ctx.translate(-cx, -cy);
-      }
-      drawCard(ctx, r, filled && sel ? { item: sel.item, rarity: sel.rarity, count: 1 } : null, {
-        empty: "+",
-        showName: false,
-      });
-      ctx.restore();
-    });
+    const rotating = this.craftPhase === "rotating" || this.craftPhase === "waiting";
+    const progress = this.craftPhase === "rotating" ? Math.min(this.craftRotTime / this.craftRotDuration, 1) : 1;
+    const rad = (Math.PI / 180) * this.craftAngle;
 
-    if (sel) {
-      const def = ITEMS[sel.item];
-      const chance = craftChanceFor(sel.rarity);
-      text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, p.x + p.w / 2, p.y + 295, 17, RARITIES[sel.rarity].color);
-      text(ctx, `You have ${avail} (${attempts} attempt${attempts === 1 ? "" : "s"})`, p.x + p.w / 2, p.y + 317, 13, avail >= 5 ? "#8fffa8" : "#ff9d9d");
-      if (sel.rarity < MAX_CRAFT_RARITY && chance !== undefined) {
-        const next = sel.rarity + 1;
-        text(ctx, `→ ${RARITIES[next].name} (${(chance * 100).toFixed(2)}% each)`, p.x + p.w / 2, p.y + 337, 13, RARITIES[next].color);
-      } else {
-        text(ctx, "Already at max craftable rarity", p.x + p.w / 2, p.y + 337, 13, "rgba(255,255,255,0.6)");
+    // Hint when empty (hidden while the result card is celebrating).
+    if (!sel && this.craftPhase === "none") text(ctx, "Drag a card here — 5 combine into 1", p.x + p.w / 2, p.y + 238, 12, "rgba(255,255,255,0.85)");
+
+    // Pentagon slots: brown background behind every card; slots contract + orbit while crafting.
+    for (let i = 0; i < 5; i++) {
+      let [ox, oy] = this.craftLocalPos(i);
+      if (rotating) [ox, oy] = this.craftContractedPos(progress, ox, oy);
+      const wx = cx + ox * Math.cos(rad) - oy * Math.sin(rad);
+      const wy = cy + ox * Math.sin(rad) + oy * Math.cos(rad);
+      const showCard = rotating ? !!sel : !!sel && avail >= i + 1;
+
+      ctx.save();
+      let scale = 1;
+      let ang = 0;
+      if (this.craftFillActive && showCard && !rotating) {
+        const ft = this.craftFillTransform();
+        scale = ft.scale;
+        ang = ft.angle;
       }
-    } else {
-      text(ctx, "no petal selected", p.x + p.w / 2, p.y + 305, 14, "rgba(255,255,255,0.6)");
+      ctx.translate(wx, wy);
+      ctx.rotate(ang);
+      const s = slotSize * scale;
+      roundRect(ctx, -s / 2, -s / 2, s, s, 8 * scale);
+      ctx.fillStyle = "#A8865A";
+      ctx.fill();
+      if (showCard) {
+        drawCard(ctx, { x: -s / 2, y: -s / 2, w: s, h: s }, { item: sel!.item, rarity: sel!.rarity, count: 1 }, { showName: false });
+      } else if (!rotating) {
+        text(ctx, "+", 0, 0, 18, "rgba(255,255,255,0.5)");
+      }
+      ctx.restore();
     }
 
+    // Selected-item info.
+    if (sel && !rotating) {
+      const def = ITEMS[sel.item];
+      const chance = craftChanceFor(sel.rarity);
+      text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, p.x + p.w / 2, p.y + 352, 16, RARITIES[sel.rarity].color);
+      text(ctx, `You have ${avail} (${attempts} attempt${attempts === 1 ? "" : "s"})`, p.x + p.w / 2, p.y + 372, 12, avail >= 5 ? "#8fffa8" : "#ff9d9d");
+      if (sel.rarity < MAX_CRAFT_RARITY && chance !== undefined) {
+        const next = sel.rarity + 1;
+        text(ctx, `→ ${RARITIES[next].name} (${(chance * 100).toFixed(2)}% each)`, p.x + p.w / 2, p.y + 390, 12, RARITIES[next].color);
+      } else {
+        text(ctx, "Already at max craftable rarity", p.x + p.w / 2, p.y + 390, 12, "rgba(255,255,255,0.6)");
+      }
+    }
+
+    // Craft button colored by the selected rarity (mirrors drawInterfaceButtons).
     const btn = this.craftActionButtonRect();
-    const canCraft = !!sel && avail >= 5 && sel.rarity < MAX_CRAFT_RARITY;
-    button(ctx, btn, attempts > 1 ? `CRAFT x${attempts}` : "CRAFT", "#c9762b", hit(btn, this.mx, this.my), 18, canCraft);
+    const canCraft = !!sel && avail >= 5 && sel.rarity < MAX_CRAFT_RARITY && this.craftPhase === "none";
+    const rgb: [number, number, number] = sel ? this.rarityRgb(sel.rarity) : [168, 134, 90];
+    const btnColor = canCraft ? `rgb(${rgb[0]},${rgb[1]},${rgb[2]})` : "#6b5a3a";
+    button(ctx, btn, attempts > 1 ? `CRAFT x${attempts}` : "CRAFT", btnColor, hit(btn, this.mx, this.my) && canCraft, 18, canCraft);
   }
 
   private renderCraftOracleOrTrade(ctx: CanvasRenderingContext2D, p: Rect, mode: "oracle" | "trade") {
+    const { cx, cy } = this.craftLayout();
     const isOracle = mode === "oracle";
-    text(
-      ctx,
-      isOracle ? "Drag a card here — skip 2 rarities at once" : "Drag a card here — exchange for Coins",
-      p.x + p.w / 2,
-      p.y + 82,
-      12,
-      "rgba(255,255,255,0.75)",
-    );
-
-    const r = this.craftSingleSlotRect();
     const sel = this.craftSel;
     const avail = sel ? this.countOf(sel.item, sel.rarity) : 0;
-    drawCard(ctx, r, sel ? { item: sel.item, rarity: sel.rarity, count: avail } : null, {
-      empty: "+",
-      showName: false,
-    });
+    const size = 62;
+
+    if (!sel && this.craftPhase === "none") {
+      text(ctx, isOracle ? "Drag a card here — skip 2 rarities at once" : "Drag a card here — exchange for Coins", p.x + p.w / 2, p.y + 238, 12, "rgba(255,255,255,0.85)");
+    }
+
+    // Single centered slot: tinted background (oracle/trade) + card, with fill grow+spin.
+    ctx.save();
+    let scale = 1;
+    let ang = 0;
+    if (this.craftFillActive && sel) {
+      const ft = this.craftFillTransform();
+      scale = ft.scale;
+      ang = ft.angle;
+    }
+    ctx.translate(cx, cy);
+    ctx.rotate(ang);
+    const s = size * scale;
+    roundRect(ctx, -s / 2, -s / 2, s, s, 8 * scale);
+    ctx.fillStyle = isOracle ? "#1E3C78" : "#1E6432";
+    ctx.fill();
+    if (sel) {
+      drawCard(ctx, { x: -s / 2, y: -s / 2, w: s, h: s }, { item: sel.item, rarity: sel.rarity, count: avail }, { showName: false });
+    } else {
+      text(ctx, "+", 0, 0, 22, "rgba(255,255,255,0.5)");
+    }
+    ctx.restore();
 
     const cooldownMs = this.craftCooldownLeft(mode);
     const ready = cooldownMs <= 0;
-
     if (sel) {
       const def = ITEMS[sel.item];
-      text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, p.x + p.w / 2, p.y + 250, 16, RARITIES[sel.rarity].color);
-
+      text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, p.x + p.w / 2, p.y + 360, 15, RARITIES[sel.rarity].color);
       if (isOracle) {
         const required = oracleRequiredCount(sel.rarity);
         if (required === undefined) {
-          text(ctx, "Cannot Oracle this rarity", p.x + p.w / 2, p.y + 272, 13, "#ff9d9d");
+          text(ctx, "Cannot Oracle this rarity", p.x + p.w / 2, p.y + 382, 12, "#ff9d9d");
         } else {
-          text(ctx, `Need ${required} — have ${avail}`, p.x + p.w / 2, p.y + 272, 13, avail >= required ? "#8fffa8" : "#ff9d9d");
+          text(ctx, `Need ${required} — have ${avail}`, p.x + p.w / 2, p.y + 382, 12, avail >= required ? "#8fffa8" : "#ff9d9d");
           const target = sel.rarity + 2;
-          if (target < RARITIES.length) {
-            text(ctx, `→ ${RARITIES[target].name} ${def.name} (guaranteed)`, p.x + p.w / 2, p.y + 292, 13, RARITIES[target].color);
-          }
+          if (target < RARITIES.length) text(ctx, `→ ${RARITIES[target].name} (guaranteed)`, p.x + p.w / 2, p.y + 400, 12, RARITIES[target].color);
         }
       } else {
-        text(ctx, `${avail} card${avail === 1 ? "" : "s"} → ${avail} Coin${avail === 1 ? "" : "s"}`, p.x + p.w / 2, p.y + 272, 13, "#ffd54a");
+        text(ctx, `${avail} card${avail === 1 ? "" : "s"} → ${avail} Coin${avail === 1 ? "" : "s"}`, p.x + p.w / 2, p.y + 382, 12, "#ffd54a");
       }
-    } else {
-      text(ctx, "no card selected", p.x + p.w / 2, p.y + 262, 14, "rgba(255,255,255,0.6)");
     }
 
-    text(
-      ctx,
-      `${isOracle ? "Oracle" : "Trade"} cooldown: ${ready ? "Ready" : this.formatCooldown(cooldownMs)}`,
-      p.x + p.w / 2,
-      p.y + p.h - 118,
-      12,
-      ready ? "#8fffa8" : "#ffd54a",
-    );
+    text(ctx, `${isOracle ? "Oracle" : "Trade"}: ${ready ? "Ready" : this.formatCooldown(cooldownMs)}`, p.x + p.w / 2, p.y + p.h - 110, 12, ready ? "#8fffa8" : "#ffd54a");
 
     const btn = this.craftActionButtonRect();
     const required = isOracle ? oracleRequiredCount(sel?.rarity ?? 0) : 1;
-    const canAct = !!sel && ready && required !== undefined && avail >= required;
-    button(ctx, btn, isOracle ? "ORACLE" : "TRADE", isOracle ? "#6a3fb0" : "#3f8f5a", hit(btn, this.mx, this.my), 18, canAct);
+    const canAct = !!sel && ready && required !== undefined && avail >= required && this.craftPhase === "none";
+    button(ctx, btn, isOracle ? "ORACLE" : "TRADE", isOracle ? "#6600FF" : "#FFD700", hit(btn, this.mx, this.my) && canAct, 18, canAct);
+  }
+
+  /** Result card shown at the orbit center while celebrating a craft. */
+  private drawCraftResultCard(ctx: CanvasRenderingContext2D) {
+    const { cx, cy } = this.craftLayout();
+    const res = this.craftPending!;
+    const size = 64;
+    const pop = 1 + Math.sin(this.time * 8) * 0.04;
+    const s = size * pop;
+    ctx.save();
+    roundRect(ctx, cx - s / 2, cy - s / 2, s, s, 8);
+    ctx.fillStyle = "#A8865A";
+    ctx.fill();
+    drawCard(ctx, { x: cx - s / 2, y: cy - s / 2, w: s, h: s }, { item: res.item, rarity: res.rarity, count: res.count }, { showName: false });
+    ctx.restore();
   }
 
   private renderDeath() {
