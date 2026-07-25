@@ -327,52 +327,51 @@ export function drawItemIcon(
   ctx.lineWidth = Math.max(1.5, size * 0.16);
   ctx.strokeStyle = def.outline;
   ctx.fillStyle = def.color;
-  switch (def.shape) {
-    case "circle": {
-      // 检查是否有固定花瓣数量
-      const fixedCount = getFixedPetalCount(itemId);
-      let count: number;
-      if (fixedCount !== -1) {
-        count = fixedCount;
-      } else {
-        count = getLightPetalCount(rarity);
-      }
-      // 轨道半径减小，花瓣更紧凑 (从 1.2 改为 0.9)
-      const orbit = count > 1 ? size * 0.9 : 0;
-      const radius = count > 1 ? size * 0.55 : size;
-      for (let i = 0; i < count; i++) {
-        const a = (i * Math.PI / (count / 2)) - Math.PI / 2;
-        const cx = orbit * Math.cos(a);
-        const cy = orbit * Math.sin(a);
+  switch (def.id) {
+    case 0: { // Basic (Light)
+      const count = getLightPetalCount(rarity);
+      for(let i=0;i<count;i++){
+        const a = (i * 2 * Math.PI / count) - Math.PI / 2;
+        const px = size * 1.0 * Math.cos(a);
+        const py = -size * 0.5 + size * 1.0 * Math.sin(a);
         ctx.beginPath();
-        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+        ctx.arc(px, py, size * 0.8, 0, Math.PI * 2);
         ctx.fill();
         ctx.stroke();
       }
       break;
     }
-    case "square": {
-      roundRect(ctx, -size, -size, size * 2, size * 2, size * 0.3);
+    case 1: { // Leaf
+      ctx.beginPath();
+      ctx.moveTo(0, size);
+      ctx.quadraticCurveTo(-size, 0, 0, -size);
+      ctx.quadraticCurveTo(size, 0, 0, size);
+      ctx.closePath();
       ctx.fill();
+      ctx.lineWidth = size * 0.1;
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(0, size * 0.7);
+      ctx.quadraticCurveTo(size * 0.2, size * 0.4, 0, -size * 0.7);
+      ctx.lineCap = 'round';
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(0, size);
+      ctx.lineTo(0, size * 1.3);
       ctx.stroke();
       break;
     }
-    case "triangle": {
-      // Stinger - 根据稀有度决定三角形数量
+    case 2: { // Stinger
       const count = getStingerPetalCount(rarity);
-      const triSize = count > 1 ? size * 0.8 : size;
-      const orbit = count > 1 ? size * 0.9 : 0;
-      for (let i = 0; i < count; i++) {
-        const a = (i * 2 * Math.PI / count) - Math.PI / 2;
-        const cx = orbit * Math.cos(a);
-        const cy = orbit * Math.sin(a);
+      for(let i=0;i<count;i++){
         ctx.save();
-        ctx.translate(cx, cy);
-        ctx.rotate(a);
+        ctx.rotate((i * 2 * Math.PI / count) - Math.PI / 2);
         ctx.beginPath();
-        ctx.moveTo(0, -triSize * 1.2);
-        ctx.lineTo(triSize, triSize * 0.9);
-        ctx.lineTo(-triSize, triSize * 0.9);
+        ctx.moveTo(0, size * 0.4);
+        ctx.lineTo(-size * 0.5, size * 1.4);
+        ctx.lineTo(size * 0.5, size * 1.4);
         ctx.closePath();
         ctx.fill();
         ctx.stroke();
@@ -380,51 +379,129 @@ export function drawItemIcon(
       }
       break;
     }
-    case "leaf": {
+    case 3: { // Rock
       ctx.beginPath();
-      ctx.ellipse(0, 0, size * 1.25, size * 0.75, Math.PI / 5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(-size, size * 0.5);
-      ctx.lineTo(size, -size * 0.5);
-      ctx.lineWidth = Math.max(1, size * 0.14);
-      ctx.strokeStyle = "rgba(0,0,0,0.25)";
-      ctx.stroke();
-      break;
-    }
-    case "egg": {
-      ctx.beginPath();
-      ctx.ellipse(0, 0, size * 0.85, size * 1.15, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-      break;
-    }
-    case "stick": {
-      ctx.lineCap = "round";
-      ctx.strokeStyle = def.color;
-      ctx.lineWidth = size * 0.5;
-      ctx.beginPath();
-      ctx.moveTo(-size * 0.9, size * 0.9);
-      ctx.lineTo(size * 0.7, -size * 0.9);
-      ctx.stroke();
-      ctx.lineWidth = size * 0.34;
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(size * 0.9, size * 0.3);
-      ctx.stroke();
-      break;
-    }
-    case "star": {
-      ctx.beginPath();
-      for (let i = 0; i < 10; i++) {
-        const a = (i / 10) * Math.PI * 2 - Math.PI / 2;
-        const rr = i % 2 === 0 ? size * 1.25 : size * 0.55;
-        ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+      for(let i=0;i<5;i++){
+        const a = (i * 2 * Math.PI / 5) - Math.PI / 2;
+        const r = size * 0.9;
+        const px = r * Math.cos(a);
+        const py = r * Math.sin(a);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
       }
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
+      break;
+    }
+    case 4: { // Sand
+      const drawHex = (hx: number, hy: number, hr: number, rot: boolean) => {
+        ctx.save();
+        ctx.translate(hx, hy);
+        if (rot) ctx.rotate(Math.PI / 6);
+        ctx.beginPath();
+        for (let i = 0; i < 6; i++) {
+            let a = i * Math.PI / 3;
+            let px = hr * Math.cos(a);
+            let py = hr * Math.sin(a);
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      };
+      drawHex(-size * 0.75, 0, size * 0.5, false);
+      drawHex(size * 0.75, 0, size * 0.5, false);
+      drawHex(0, -size * 0.75, size * 0.5, true);
+      drawHex(0, size * 0.75, size * 0.5, true);
+      break;
+    }
+    case 7: { // Wing
+      ctx.beginPath();
+      ctx.moveTo(-size * 0.75, -size * 1.0);
+      ctx.quadraticCurveTo(-size * 0.25, 0, -size * 0.75, size * 1.0);
+      ctx.quadraticCurveTo(size * 0.75, 0, -size * 0.75, -size * 1.0);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      break;
+    }
+    case 9: { // Stick
+      ctx.save();
+      ctx.translate(0, -size * 0.25);
+      ctx.rotate(-Math.PI / 12);
+      ctx.lineJoin = 'round';
+      const drawSticks = () => {
+          const sr = (x: number, y: number, w: number, h: number) => {
+              const sc = size / 75;
+              ctx.roundRect(x * sc, y * sc, w * sc, h * sc, 10 * sc);
+          };
+          ctx.save(); sr(-14, -5, 16, 80); ctx.restore();
+          ctx.save(); ctx.rotate(Math.PI / 6); sr(-15, -70, 16, 70); ctx.restore();
+          ctx.save(); ctx.rotate(-Math.PI / 5); sr(-15, -55, 16, 55); ctx.restore();
+      };
+      ctx.beginPath();
+      drawSticks();
+      ctx.fillStyle = def.outline;
+      ctx.strokeStyle = def.outline;
+      ctx.lineWidth = size * 0.2;
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.beginPath();
+      drawSticks();
+      ctx.fillStyle = def.color;
+      ctx.strokeStyle = def.color;
+      ctx.lineWidth = size * 0.05;
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+      break;
+    }
+    default: {
+      switch (def.shape) {
+        case "circle": {
+          ctx.beginPath();
+          ctx.arc(0, 0, size, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+          break;
+        }
+        case "square": {
+          roundRect(ctx, -size, -size, size * 2, size * 2, size * 0.3);
+          ctx.fill();
+          ctx.stroke();
+          break;
+        }
+        case "egg": {
+          ctx.beginPath();
+          ctx.ellipse(0, 0, size * 0.85, size * 1.15, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+          break;
+        }
+        case "star": {
+          ctx.beginPath();
+          for (let i = 0; i < 10; i++) {
+            const a = (i / 10) * Math.PI * 2 - Math.PI / 2;
+            const rr = i % 2 === 0 ? size * 1.25 : size * 0.55;
+            ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+          }
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+          break;
+        }
+        default: {
+          ctx.beginPath();
+          ctx.arc(0, 0, size, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+          break;
+        }
+      }
       break;
     }
   }
