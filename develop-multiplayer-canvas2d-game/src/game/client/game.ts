@@ -941,11 +941,14 @@ export class GameClient {
     const slotSizeSmall = 40; // SMALLER inventory slots as requested
     const gapSmall = 6;
     const itemHeightSmall = slotSizeSmall + gapSmall;
-    const availableW = p.w - pad * 2 - 10; // minus scrollbar
-    const cols = Math.max(6, Math.floor(availableW / (slotSizeSmall + gapSmall)));
+    // One column per rarity (matrix layout: one item per row, one rarity per column),
+    // centered horizontally like the reference's `bagStartX = PX + PW/2 - totalGridWidth/2`.
+    const cols = RARITIES.length;
+    const totalGridWidth = cols * (slotSizeSmall + gapSmall) - gapSmall;
+    const gridStartX = p.x + p.w / 2 - totalGridWidth / 2;
     const gridH = Math.max(itemHeightSmall, gridBottom - gridTop);
     const maxVisibleRows = Math.max(1, Math.floor(gridH / itemHeightSmall));
-    const scrollTrack: Rect = { x: p.x + p.w - pad - 2, y: gridTop, w: 6, h: gridH };
+    const scrollTrack: Rect = { x: gridStartX + totalGridWidth + 10, y: gridTop, w: 6, h: gridH };
 
     return {
       panel: p,
@@ -960,6 +963,8 @@ export class GameClient {
       barRect: { x: barX, y: barY, w: barW, h: barH } as Rect,
       dropRect: { x: dropX, y: barY, w: dropW, h: barH } as Rect,
       gridTop,
+      gridStartX,
+      totalGridWidth,
       gridH,
       maxVisibleRows,
       bigSlots,
@@ -1010,33 +1015,40 @@ export class GameClient {
     return this.craftLayout().actionRect;
   }
 
-  /** Bag stacks that can go into the crafting panel, filtered by search text + biome,
-   *  sorted by type (alphabetical) then rarity — mirrors the reference UI's
-   *  sorted type-rows / rarity-columns bag grid.
+  /** Distinct item types the player owns that pass search + biome filters, sorted
+   *  alphabetically. Each id is one ROW in the matrix grid; rarity is the COLUMN
+   *  (fixed at RARITIES.length) — mirrors the reference UI's sorted type-rows /
+   *  rarity-columns bag grid exactly.
    */
-  private craftFilteredEntries(): { slot: number; cell: Cell }[] {
+  private craftMatrixRows(): number[] {
     const query = this.craftSearchText.trim().toLowerCase();
     const biome = this.craftBiome;
-    return this.bagEntries()
-      .filter(({ cell }) => {
-        const def = ITEMS[cell.item];
-        if (!def) return false;
-        if (this.craftMode !== "trade" && def.kind === "trinket") return false;
-        if (query && !def.name.toLowerCase().includes(query)) return false;
-        if (biome !== "All" && !this.itemBiomes(cell.item).has(biome)) return false;
-        return true;
-      })
-      .sort((a, b) => {
-        const nameA = ITEMS[a.cell.item]?.name ?? "";
-        const nameB = ITEMS[b.cell.item]?.name ?? "";
-        if (nameA !== nameB) return nameA < nameB ? -1 : 1;
-        return a.cell.rarity - b.cell.rarity;
-      });
+    const seen = new Set<number>();
+    for (const { cell } of this.bagEntries()) {
+      const def = ITEMS[cell.item];
+      if (!def) continue;
+      if (this.craftMode !== "trade" && def.kind === "trinket") continue;
+      if (query && !def.name.toLowerCase().includes(query)) continue;
+      if (biome !== "All" && !this.itemBiomes(cell.item).has(biome)) continue;
+      seen.add(cell.item);
+    }
+    return [...seen].sort((a, b) => {
+      const nameA = ITEMS[a]?.name ?? "";
+      const nameB = ITEMS[b]?.name ?? "";
+      return nameA < nameB ? -1 : nameA > nameB ? 1 : 0;
+    });
+  }
+
+  /** Cell for a given matrix row/column (item/rarity), or null if the player has none. */
+  private craftMatrixCell(item: number, rarity: number): Cell | null {
+    const count = this.countOf(item, rarity);
+    if (count <= 0) return null;
+    return { item, rarity, count };
   }
 
   private craftMaxScroll(): number {
     const layout = this.craftLayout();
-    const totalRows = Math.ceil(this.craftFilteredEntries().length / layout.cols);
+    const totalRows = this.craftMatrixRows().length;
     const totalHeight = totalRows * layout.itemHeight;
     const visibleHeight = layout.maxVisibleRows * layout.itemHeight;
     return Math.max(0, totalHeight - visibleHeight);
@@ -1048,7 +1060,7 @@ export class GameClient {
 
   private craftScrollThumbRect(layout: ReturnType<GameClient["craftLayout"]>): Rect {
     const track = layout.scrollTrack;
-    const totalRows = Math.max(1, Math.ceil(this.craftFilteredEntries().length / layout.cols));
+    const totalRows = Math.max(1, this.craftMatrixRows().length);
     if (totalRows <= layout.maxVisibleRows) return { x: track.x, y: track.y, w: track.w, h: track.h };
     const maxScroll = this.craftMaxScroll();
     const thumbH = Math.max(20, (layout.maxVisibleRows / totalRows) * track.h);
@@ -1064,7 +1076,7 @@ export class GameClient {
       return;
     }
     const track = layout.scrollTrack;
-    const totalRows = Math.max(1, Math.ceil(this.craftFilteredEntries().length / layout.cols));
+    const totalRows = Math.max(1, this.craftMatrixRows().length);
     const thumbH = Math.max(20, (layout.maxVisibleRows / totalRows) * track.h);
     const maxDrag = track.h - thumbH;
     if (maxDrag <= 0) return;
@@ -1072,27 +1084,31 @@ export class GameClient {
     this.craftScrollY = Math.max(0, Math.min(maxScroll, this.craftScrollAtDragStart + ratio * maxScroll));
   }
 
-  /** Card the pointer is over inside the crafting browser grid, or null. */
+  /** Card the pointer is over inside the crafting browser matrix (one item per row,
+   *  one rarity per column), or null if the pointer isn't over a filled cell.
+   */
   private craftGridEntryAtPoint(x: number, y: number): { slot: number; cell: Cell } | null {
     const layout = this.craftLayout();
     const p = layout.panel;
     if (x < p.x || x > p.x + p.w || y < layout.gridTop || y > layout.gridTop + layout.gridH) return null;
     this.clampCraftScroll();
-    const filtered = this.craftFilteredEntries();
+    const rows = this.craftMatrixRows();
     const startRow = Math.floor(this.craftScrollY / layout.itemHeight);
     const yOffset = -(this.craftScrollY % layout.itemHeight);
-    const relX = x - (p.x + layout.pad);
+    const relX = x - layout.gridStartX;
     const relY = y - layout.gridTop - yOffset;
     if (relX < 0 || relY < 0) return null;
     const col = Math.floor(relX / (layout.slotSize + layout.gap));
-    const row = Math.floor(relY / (layout.slotSize + layout.gap));
-    if (col < 0 || col >= layout.cols || row < 0) return null;
-    const entry = filtered[startRow * layout.cols + row * layout.cols + col];
-    if (!entry) return null;
-    const slotX = p.x + layout.pad + col * (layout.slotSize + layout.gap);
-    const slotY = layout.gridTop + row * layout.itemHeight + yOffset;
+    const rowOffset = Math.floor(relY / (layout.slotSize + layout.gap));
+    if (col < 0 || col >= layout.cols || rowOffset < 0) return null;
+    const item = rows[startRow + rowOffset];
+    if (item === undefined) return null;
+    const cell = this.craftMatrixCell(item, col);
+    if (!cell) return null;
+    const slotX = layout.gridStartX + col * (layout.slotSize + layout.gap);
+    const slotY = layout.gridTop + rowOffset * layout.itemHeight + yOffset;
     if (x < slotX || x > slotX + layout.slotSize || y < slotY || y > slotY + layout.slotSize) return null;
-    return entry;
+    return { slot: -1, cell };
   }
 
   // ── Ported CraftAnimation helpers (spin / contraction / particles / fill) ──
@@ -2576,75 +2592,85 @@ export class GameClient {
     }
   }
 
-  /** Draws the clipped, pixel-scrolled card browser — SMALLER slots now */
+  /** Draws the clipped, pixel-scrolled matrix card browser — one item per row,
+   *  one rarity per column (mirrors the reference bag grid exactly).
+   */
   private renderCraftGrid(
     ctx: CanvasRenderingContext2D,
     layout: ReturnType<GameClient["craftLayout"]>,
   ): { slot: number; cell: Cell } | null {
     const p = layout.panel;
-    const filtered = this.craftFilteredEntries();
+    const rows = this.craftMatrixRows();
 
     // background for grid area
     ctx.save();
-    roundRect(ctx, p.x + layout.pad - 4, layout.gridTop - 4, p.w - layout.pad * 2 + 8, layout.gridH + 8, 8);
+    roundRect(ctx, layout.gridStartX - 4, layout.gridTop - 4, layout.totalGridWidth + 8, layout.gridH + 8, 8);
     ctx.fillStyle = "rgba(0,0,0,0.10)";
     ctx.fill();
     ctx.restore();
 
     ctx.save();
     ctx.beginPath();
-    ctx.rect(p.x + 2, layout.gridTop, p.w - 4, layout.gridH);
+    ctx.rect(layout.gridStartX - 4, layout.gridTop, layout.totalGridWidth + 8, layout.gridH);
     ctx.clip();
 
     const startRow = Math.floor(this.craftScrollY / layout.itemHeight);
     const yOffset = -(this.craftScrollY % layout.itemHeight);
-    const startIdx = startRow * layout.cols;
-    const visible = filtered.slice(startIdx, startIdx + (layout.maxVisibleRows + 2) * layout.cols);
+    const visibleRows = rows.slice(startRow, startRow + layout.maxVisibleRows + 2);
 
     let hoveredEntry: { slot: number; cell: Cell } | null = null;
     const sel = this.craftSel;
 
-    // draw empty placeholders first (small)
+    // empty placeholders first (small) — every row/column combo gets a slot bg
     for (let ri = 0; ri < layout.maxVisibleRows + 1; ri++) {
+      const ry = layout.gridTop + ri * layout.itemHeight + yOffset;
+      if (ry + layout.slotSize < layout.gridTop || ry > layout.gridTop + layout.gridH) continue;
       for (let ci = 0; ci < layout.cols; ci++) {
-        const rx = p.x + layout.pad + ci * (layout.slotSize + layout.gap);
-        const ry = layout.gridTop + ri * layout.itemHeight + yOffset;
-        if (ry + layout.slotSize < layout.gridTop || ry > layout.gridTop + layout.gridH) continue;
+        const rx = layout.gridStartX + ci * (layout.slotSize + layout.gap);
         roundRect(ctx, rx, ry, layout.slotSize, layout.slotSize, 6);
         ctx.fillStyle = "rgba(0,0,0,0.14)";
         ctx.fill();
       }
     }
 
-    visible.forEach((entry, i) => {
-      const row = Math.floor(i / layout.cols);
-      const col = i % layout.cols;
-      const r: Rect = {
-        x: p.x + layout.pad + col * (layout.slotSize + layout.gap),
-        y: layout.gridTop + row * layout.itemHeight + yOffset,
-        w: layout.slotSize,
-        h: layout.slotSize,
-      };
-      if (r.y + r.h < layout.gridTop || r.y > layout.gridTop + layout.gridH) return;
-      const isHovered = hit(r, this.mx, this.my) && !this.drag;
-      if (isHovered) hoveredEntry = entry;
-      const picked = !!sel && sel.item === entry.cell.item && sel.rarity === entry.cell.rarity;
-      const scale = isHovered ? 1.08 : picked ? 1.04 : 1;
-      drawCard(ctx, r, entry.cell, { hovered: isHovered || picked, scale, dim: picked ? 1 : 0.92, showName: false });
-      if (picked) {
-        ctx.save();
-        ctx.globalAlpha = 0.65 + Math.sin(this.time * 6) * 0.25;
-        roundRect(ctx, r.x - 1, r.y - 1, r.w + 2, r.h + 2, 7);
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = "#ffe763";
-        ctx.stroke();
-        ctx.restore();
+    visibleRows.forEach((item, ri) => {
+      const ry = layout.gridTop + ri * layout.itemHeight + yOffset;
+      if (ry + layout.slotSize < layout.gridTop || ry > layout.gridTop + layout.gridH) return;
+      for (let col = 0; col < layout.cols; col++) {
+        const cell = this.craftMatrixCell(item, col);
+        if (!cell) continue; // this item doesn't have this rarity — leave the empty slot
+        const r: Rect = {
+          x: layout.gridStartX + col * (layout.slotSize + layout.gap),
+          y: ry,
+          w: layout.slotSize,
+          h: layout.slotSize,
+        };
+        const isHovered = hit(r, this.mx, this.my) && !this.drag;
+        if (isHovered) hoveredEntry = { slot: -1, cell };
+        const picked = !!sel && sel.item === cell.item && sel.rarity === cell.rarity;
+        const scale = isHovered ? 1.08 : picked ? 1.04 : 1;
+        drawCard(ctx, r, cell, { hovered: isHovered || picked, scale, dim: picked ? 1 : 0.92, showName: false });
+        if (picked) {
+          ctx.save();
+          ctx.globalAlpha = 0.65 + Math.sin(this.time * 6) * 0.25;
+          roundRect(ctx, r.x - 1, r.y - 1, r.w + 2, r.h + 2, 7);
+          ctx.lineWidth = 2;
+          ctx.strokeStyle = "#ffe763";
+          ctx.stroke();
+          ctx.restore();
+        }
       }
     });
 
     ctx.restore();
 
-    if (filtered.length === 0) {
+    // Rarity column headers (small color ticks above the grid) so columns read at a glance
+    for (let col = 0; col < layout.cols; col++) {
+      const cx = layout.gridStartX + col * (layout.slotSize + layout.gap) + layout.slotSize / 2;
+      text(ctx, RARITIES[col]?.name ?? "", cx, layout.gridTop - 10, 9, RARITIES[col]?.color ?? "rgba(255,255,255,0.6)");
+    }
+
+    if (rows.length === 0) {
       text(
         ctx,
         this.craftSearchText || this.craftBiome !== "All" ? "No cards match filter" : "Bag empty",
@@ -2655,8 +2681,7 @@ export class GameClient {
       );
     }
 
-    const totalRows = Math.max(1, Math.ceil(filtered.length / layout.cols));
-    if (totalRows > layout.maxVisibleRows) {
+    if (rows.length > layout.maxVisibleRows) {
       scrollbar(ctx, layout.scrollTrack, this.craftScrollThumbRect(layout), this.craftDraggingThumb);
     }
 
