@@ -176,7 +176,7 @@ export const MOBS: MobDef[] = [
   // brand new mob added to the Garden biome (id 10 below).
   { id: 3, name: "Soldier Ant", color: "#5b452c", outline: "#3a2b19", shape: "ant", radius: 17, health: 46, damage: 18, speed: 60, xp: 9, drops: [{ item: 7, chance: 0.28 }, { item: 11, chance: 0.3 }, { item: 12, chance: 0.07 }] },
   { id: 4, name: "Cactus", color: "#4caf50", outline: "#357a38", shape: "cactus", radius: 25, health: 110, damage: 26, speed: 0, xp: 18, drops: [{ item: 9, chance: 0.12 }, { item: 3, chance: 0.25 }, { item: 4, chance: 0.3 }] },
-  { id: 5, name: "Scorpion", color: "#c76b2a", outline: "#8c4718", shape: "crab", radius: 21, health: 90, damage: 36, speed: 70, xp: 24, drops: [{ item: 36, chance: 0.32 }, { item: 37, chance: 0.28 }, { item: 38, chance: 0.07 }] },
+  { id: 5, name: "Scorpion", color: "#c76b2a", outline: "#8c4718", shape: "crab", radius: 21, health: 90, damage: 36, speed: 70, xp: 24, drops: [{ item: 36, chance: 0.32 }, { item: 37, chance: 0.28 }, { item: 35, chance: 0.07 }] },
   { id: 6, name: "Beetle", color: "#d1a054", outline: "#9c7532", shape: "bug", radius: 23, health: 100, damage: 24, speed: 48, xp: 20, drops: [{ item: 33, chance: 0.32 }, { item: 35, chance: 0.28 }, { item: 36, chance: 0.1 }] },
   { id: 7, name: "Jellyfish", color: "#b06be0", outline: "#7d40a8", shape: "jelly", radius: 22, health: 78, damage: 28, speed: 38, xp: 20, drops: [{ item: 24, chance: 0.32 }, { item: 25, chance: 0.26 }, { item: 26, chance: 0.07 }] },
   { id: 8, name: "Crab", color: "#ef7d3b", outline: "#b2541f", shape: "crab", radius: 24, health: 120, damage: 32, speed: 44, xp: 26, drops: [{ item: 27, chance: 0.3 }, { item: 28, chance: 0.28 }, { item: 29, chance: 0.07 }, { item: 4, chance: 0.2 }] },
@@ -451,6 +451,26 @@ export function getDropRarityByItem(itemType: number, mobRarity: string): string
     }
   }
   return fallbackRarity;
+}
+
+/**
+ * Returns the number of pets summoned by a summon item.
+ */
+export function getSummonCount(itemId: number): number {
+  switch (itemId) {
+    case 8:  return 1; // Ladybug Egg (described as cactus egg:1 in prompt?)
+    case 9:  return 2; // Stick (summons 2 sandstorms)
+    case 12: return 3; // Soldier Ant Egg
+    case 14: return 4; // Worker Ant Egg
+    case 15: return 1; // Rock Egg
+    case 20: return 1; // Bee Egg
+    case 23: return 3; // Starfish Egg
+    case 26: return 2; // Jellyfish Egg
+    case 29: return 1; // Crab Egg
+    case 34: return 1; // Beetle Egg
+    case 37: return 2; // Scorpion Egg
+    default: return 1;
+  }
 }
 
 export const EMPTY_ITEM = 255;
