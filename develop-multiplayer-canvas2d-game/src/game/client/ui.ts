@@ -333,6 +333,9 @@ export function drawItemIcon(
     0: { k: 0.66, ox: 0, oy: 0.5 },      // Basic: shrink a bit + center the petal ring
     7: { k: 1.25, ox: 0.375, oy: 0 },    // Wing: enlarge + shift right (it sat too far left)
     9: { k: 1.25, ox: 0.15, oy: 0.28 },  // Stick: enlarge + re-center
+    // Starfish is intentionally oversized at the item's requested 3x scale.
+    // This applies consistently to its world petal, card, and drag artwork.
+    21: { k: 3, ox: 0, oy: 0 },
   };
   const norm = ICON_NORM[def.id];
   if (norm) {

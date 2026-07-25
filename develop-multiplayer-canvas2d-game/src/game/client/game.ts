@@ -726,13 +726,30 @@ export class GameClient {
 
   private sendInput() {
     if (!this.net || !this.connected) return;
+
+    // Mouse movement is measured from the camera/screen centre (where the
+    // player is rendered). The server remains authoritative for acceleration,
+    // wall collision, and map bounds; this is only the desired direction.
+    // Close to the player, reduce the input so it eases to a stop instead of
+    // continuously overshooting the cursor.
     let dx = 0;
     let dy = 0;
-    if (this.keys.has("KeyA") || this.keys.has("ArrowLeft")) dx -= 1;
-    if (this.keys.has("KeyD") || this.keys.has("ArrowRight")) dx += 1;
-    if (this.keys.has("KeyW") || this.keys.has("ArrowUp")) dy -= 1;
-    if (this.keys.has("KeyS") || this.keys.has("ArrowDown")) dy += 1;
-    const uiBusy = this.drag !== null;
+    const uiBusy = this.drag !== null || this.bagAnim > 0.4 || this.craftAnim > 0.4;
+    const mouseDx = this.mx - this.w / 2;
+    const mouseDy = this.my - this.h / 2;
+    const mouseDistance = Math.hypot(mouseDx, mouseDy);
+    if (!uiBusy && mouseDistance > 6) {
+      const distanceFactor = Math.min(1, mouseDistance / 100);
+      dx = (mouseDx / mouseDistance) * distanceFactor;
+      dy = (mouseDy / mouseDistance) * distanceFactor;
+    } else {
+      // Retain WASD/arrow support when the pointer is centred or a panel is
+      // open, without letting UI interaction make the player walk.
+      if (this.keys.has("KeyA") || this.keys.has("ArrowLeft")) dx -= 1;
+      if (this.keys.has("KeyD") || this.keys.has("ArrowRight")) dx += 1;
+      if (this.keys.has("KeyW") || this.keys.has("ArrowUp")) dy -= 1;
+      if (this.keys.has("KeyS") || this.keys.has("ArrowDown")) dy += 1;
+    }
     let flags = 0;
     if (this.mouseDown && !uiBusy) flags |= 1;
     if (this.rightDown || this.keys.has("Space")) flags |= 2;
@@ -1619,7 +1636,9 @@ export class GameClient {
     if (idx >= 0) {
       const cell = this.cellAt(idx);
       if (cell) {
-        this.drag = { from: idx, cell };
+        // Bag cells are stacks. A drag from the inventory always represents
+        // exactly one physical item, never the whole item-type stack.
+        this.drag = { from: idx, cell: idx >= SLOT_COUNT ? { ...cell, count: 1 } : cell };
         this.dragX = mx;
         this.dragY = my;
       }
@@ -2037,7 +2056,13 @@ export class GameClient {
     const w = new Writer(4);
     w.u8(C2S.SWAP).u8(drag.from).u8(target);
     this.net?.send(w.bytes());
-    // optimistic local swap for snappy feel
+
+    // The server transfers one item when the source is a bag cell. Do not do
+    // a full-stack optimistic swap here: wait for its inventory snapshot so
+    // the stack count and an equipped replacement cannot briefly desync.
+    if (drag.from >= SLOT_COUNT) return;
+
+    // Hotbar-to-hotbar (or hotbar-to-bag) remains a normal card swap.
     const a = this.cellAt(drag.from);
     const b = this.cellAt(target);
     this.setCellLocal(drag.from, b);
@@ -2137,7 +2162,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
 
     text(
       ctx,
-      "WASD / arrows move · hold left mouse to attack · right mouse to defend · E bag · C craft",
+      "Move mouse away from center to move · WASD / arrows also work · hold left mouse to attack · right mouse to defend · E bag · C craft",
       this.w / 2,
       this.h - 24,
       14,
