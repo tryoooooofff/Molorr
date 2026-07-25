@@ -4,6 +4,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:static:netlify": "node scripts/build-static-netlify.mjs",
     "start": "next start",
     "server:start": "tsx server/index.ts",
     "lint": "eslint .",
