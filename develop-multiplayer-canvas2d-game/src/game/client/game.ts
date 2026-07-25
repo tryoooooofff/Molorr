@@ -1462,7 +1462,7 @@ export class GameClient {
     }
     this.mouseDown = true;
     if (this.scene === "menu") this.menuClick(p.x, p.y);
-    else this.gameClick(p.x, p.y);
+    else this.gameClick(p.x, p.y, e.shiftKey);
   };
 
   private onPointerUp = (e: PointerEvent) => {
@@ -1567,7 +1567,7 @@ export class GameClient {
   }
 
   // ------------------------------------------------------------ game input
-  private gameClick(mx: number, my: number) {
+  private gameClick(mx: number, my: number, shiftKey = false) {
     if (!this.alive) {
       const bw = 180;
       const cx = this.w / 2;      if (hit({ x: cx - bw - 10, y: this.h / 2 + 40, w: bw, h: 52 }, mx, my)) {
@@ -1599,7 +1599,7 @@ export class GameClient {
       return;
     }
 
-    if (this.craftAnim > 0.4 && this.handleCraftClick(mx, my)) return;
+    if (this.craftAnim > 0.4 && this.handleCraftClick(mx, my, shiftKey)) return;
 
     if (this.bagAnim > 0.4 && this.handleBagClick(mx, my)) return;
 
@@ -1646,7 +1646,7 @@ export class GameClient {
   }
 
   /** Handles clicks that land on the crafting panel (tabs/search/grid/slots/action button). */
-  private handleCraftClick(mx: number, my: number): boolean {
+  private handleCraftClick(mx: number, my: number, shiftKey = false): boolean {
     const layout = this.craftLayout();
     const p = layout.panel;
     if (!hit(p, mx, my)) return false;
@@ -1730,10 +1730,11 @@ export class GameClient {
 
     this.craftSearchActive = false;
 
-    // click a card in the browser grid to load it into the craft slots (drag still works too)
+    // click a card in the browser grid to load it into the craft slots (drag still works too).
+    // Shift+click instantly loads as many slots as possible in one action.
     const entry = this.craftGridEntryAtPoint(mx, my);
     if (entry) {
-      this.selectCraftCell(entry.cell);
+      this.selectCraftCell(entry.cell, shiftKey);
       return true;
     }
 
@@ -1758,15 +1759,22 @@ export class GameClient {
   }
 
   /** Puts a bag cell into the craft slots, with a little pop of feedback.
-   *  In normal (pentagon) mode, each click moves exactly one card from the
-   *  bag into the next empty craft slot; clicking the same card again keeps
-   *  adding cards one at a time until all five slots are loaded.
+   *  In normal (pentagon) mode, a plain click moves exactly one card from
+   *  the bag into the next empty craft slot — clicking the same card again
+   *  keeps adding cards one at a time until all five slots are loaded.
+   *  Shift+click skips the one-at-a-time clicking and instantly loads as
+   *  many slots as possible in a single action (see autoFillCraftSlots).
    */
-  private selectCraftCell(cell: Cell) {
+  private selectCraftCell(cell: Cell, shiftKey = false) {
     if (this.craftPhase !== "none") return;
     if (this.craftMode !== "trade" && ITEMS[cell.item]?.kind === "trinket") {
       this.craftMsg = "Coins can only be traded.";
       this.craftMsgLife = 2;
+      return;
+    }
+
+    if (this.craftMode === "normal" && shiftKey) {
+      this.autoFillCraftSlots(cell.item, cell.rarity);
       return;
     }
 
@@ -1795,6 +1803,30 @@ export class GameClient {
     }
 
     this.craftMsg = "";
+    this.craftGlow = 1;
+    this.craftStartFill();
+  }
+
+  /** Shift+click convenience: instantly loads as many of the five pentagon
+   *  slots as the player's inventory allows (capped at CRAFT_CARD_COUNT),
+   *  in one action — no need to click the card five separate times.
+   */
+  private autoFillCraftSlots(item: number, rarity: number) {
+    const avail = this.countOf(item, rarity);
+    if (avail <= 0) {
+      this.craftMsg = "No cards of this type.";
+      this.craftMsgLife = 1.4;
+      return;
+    }
+    this.craftSel = { item, rarity };
+    this.craftFilledCount = Math.min(CRAFT_CARD_COUNT, avail);
+    if (this.craftFilledCount >= CRAFT_CARD_COUNT) {
+      this.craftMsg = "";
+      this.craftMsgLife = 0;
+    } else {
+      this.craftMsg = `Loaded ${this.craftFilledCount}/${CRAFT_CARD_COUNT} — need more cards.`;
+      this.craftMsgLife = 1.8;
+    }
     this.craftGlow = 1;
     this.craftStartFill();
   }
@@ -2796,6 +2828,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     const spin = this.craftSpin > 0 ? ease.inOutCubic(1 - this.craftSpin / 0.8) * Math.PI * 2 : 0;
 
     text(ctx, `Combine ${CRAFT_CARD_COUNT} identical to upgrade`, p.x + p.w * 0.38, (layout as any).craftBottom - 46, 11, "rgba(255,255,255,0.85)");
+    text(ctx, "Shift+click a card to fill instantly", p.x + p.w * 0.38, (layout as any).craftBottom - 34, 9, "rgba(255,255,255,0.55)");
 
     // Draw animated slots (pentagon with rotation/contraction)
     layout.bigSlots.forEach((baseRect, i) => {
