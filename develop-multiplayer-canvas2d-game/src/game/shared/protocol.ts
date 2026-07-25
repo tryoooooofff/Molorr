@@ -8,6 +8,8 @@ export const C2S = {
   CHANGE_MAP: 5,
   RESPAWN: 6,
   PING: 7,
+  ORACLE: 8,
+  TRADE: 9,
 } as const;
 
 export const S2C = {
@@ -40,7 +42,12 @@ export const EVT = {
   DEATH: 4,
   KILL: 5,
   HIT: 6,
+  ORACLE_OK: 7,
+  ORACLE_FAIL: 8,
+  TRADE_OK: 9,
+  TRADE_FAIL: 10,
 } as const;
+
 
 export class Writer {
   private buf: Uint8Array;
