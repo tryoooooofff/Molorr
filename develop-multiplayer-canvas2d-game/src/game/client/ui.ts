@@ -489,7 +489,7 @@ export function drawCard(
   }
   
   // 物品图标
-  const iconSize = Math.min(r.w, r.h) * 0.35;
+  const iconSize = Math.min(r.w, r.h) * 0.15;
   drawItemIcon(ctx, cell.item, cx, cy - (opts.showName ? r.h * 0.06 : 0), iconSize, 0, cell.rarity);
   
   // 绘制物品名字 (在卡片底部)
