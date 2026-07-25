@@ -216,7 +216,7 @@ export class GameClient {
   // animation time for more juice.
   private craftPhase: "none" | "rotating" | "waiting" | "showing" = "none";
   private craftRotTime = 0; // seconds elapsed while rotating
-  private craftRotDuration = 2.8; // seconds, increased from 1.5 (animation time increase)
+  private craftRotDuration = 2.5; // seconds — matches CraftAnimation.startAnimation(duration=2.5)
   private craftAngle = 0; // degrees, accumulates during rotation
   private craftRotDir = 1;
   private craftRotSpeed = 300; // deg/s, accelerates 300 -> 800
@@ -884,25 +884,21 @@ export class GameClient {
     const p = this.craftPanelRect();
     const pad = 14;
     const headerH = 42;
-    const tabsH = 28;
+    const tabsH = 32; // mode selector button size (drawModeSelectors uses square ~44px buttons)
     const barH = 26;
 
-    // Craft log area (top-left small box) — computed early so the mode
-    // tabs can be placed beside it and never get drawn over.
+    // Craft log area (top-left small box), mirrors drawCraftLog(ctx): startX/startY = PX+10, PY+10
     const logRect: Rect = { x: p.x + pad, y: p.y + 10, w: 150, h: 82 };
 
-    // Compact mode tabs live in the same row as the log, just to its right,
-    // so they can never be covered by it.
-    const tabsY = logRect.y + (logRect.h - tabsH) / 2;
+    // Mode selector row — matches drawModeSelectors(): startY = PY + 10, sits in the
+    // top row to the left of the close button (never touches the log, which is top-left).
+    const tabsY = p.y + 10;
 
-    // --- Craft pentagon config (mirrors CraftAnimation) ---
-    const bigSize = 64; // slotSize for the 5 craft slots (bigger than inventory)
-    const radius = 92; // distance from center to each slot (matches CraftAnimation.radius ~80)
+    // --- Craft pentagon config — matches CraftAnimation exactly (radius 80, slotSize 70) ---
+    const bigSize = 70; // CraftAnimation slotSize
+    const radius = 80; // CraftAnimation.radius
     // Center placed slightly left of panel center so right side is free for button/log
     const cx = p.x + p.w * 0.38;
-    // No dedicated row is reserved above the pentagon for the search bar anymore
-    // (it now sits lower, right above the inventory grid), so the pentagon
-    // can sit higher in the panel.
     const cy = p.y + 148;
 
     // Build pentagon positions (static base, will be rotated/contracted during animation)
@@ -919,23 +915,25 @@ export class GameClient {
     const resultSize = 88;
     const resultRect: Rect = { x: cx - resultSize / 2, y: cy - resultSize / 2, w: resultSize, h: resultSize };
 
-    // Craft button on RIGHT-UP position as requested
-    // top-right area, just below the close button, fully visible
-    const actionRect: Rect = { x: p.x + p.w - 124, y: p.y + 14, w: 110, h: 36 };
+    // Craft button stays pinned to the right edge, but is now vertically
+    // centered against the 5 craft slots (pentagon) rather than the header.
+    const actionW = 110;
+    const actionH = 36;
+    const actionRect: Rect = { x: p.x + p.w - 124, y: cy - actionH / 2, w: actionW, h: actionH };
     const closeRect: Rect = { x: p.x + p.w - 34, y: p.y + 10, w: 24, h: 24 };
 
     // --- Inventory browser (below the pentagon, small slots, never covers craft) ---
     const craftBottom = cy + radius + bigSize / 2 + 24;
 
-    // Search + biome row now sits directly ABOVE the "Pick a card from
-    // inventory below" prompt (i.e. right above the info text + grid),
-    // instead of above the pentagon.
+    // Filter row now sits directly ABOVE the "Pick a card from inventory below"
+    // prompt (right above the info text + grid). Order matches draw(): dropdown
+    // first (left), then the search box — not above the pentagon.
     const barGap = 8;
     const dropW = 110;
     const barW = Math.min(210, p.w * 0.34);
-    const barX = p.x + pad;
+    const dropX = p.x + pad;
     const barY = craftBottom + 4;
-    const dropX = barX + barW + barGap;
+    const barX = dropX + dropW + barGap;
 
     const infoY = barY + barH + 10;
     const gridTop = infoY + 38;
@@ -985,14 +983,16 @@ export class GameClient {
     const p = layout.panel;
     const gap = 6;
     const h = layout.tabsH;
-    const w = h + 10; // compact tab: just 10px wider than it is tall
+    const w = h; // square buttons, matching drawModeSelectors()
     const y = layout.tabsY;
-    // Start right after the log panel so the tabs are never drawn under it.
-    const x0 = layout.logRect.x + layout.logRect.w + 14;
+    const modeCount = 3;
+    // Mirrors drawModeSelectors(): startX = PX + PW - 54 - (btnSize+spacing)*count,
+    // i.e. right-aligned in a row ending just before the close button.
+    const x0 = layout.closeRect.x - 10 - (w + gap) * modeCount;
     return [
-      { mode: "normal", rect: { x: x0, y, w, h }, label: "Craft", color: "#c9762b" },
-      { mode: "oracle", rect: { x: x0 + w + gap, y, w, h }, label: "Oracle", color: "#6a3fb0" },
-      { mode: "trade", rect: { x: x0 + (w + gap) * 2, y, w, h }, label: "Trade", color: "#3f8f5a" },
+      { mode: "normal", rect: { x: x0, y, w, h }, label: "Cr", color: "#c9762b" },
+      { mode: "oracle", rect: { x: x0 + w + gap, y, w, h }, label: "Or", color: "#6a3fb0" },
+      { mode: "trade", rect: { x: x0 + (w + gap) * 2, y, w, h }, label: "Tr", color: "#3f8f5a" },
     ];
   }
 
@@ -1010,18 +1010,28 @@ export class GameClient {
     return this.craftLayout().actionRect;
   }
 
-  /** Bag stacks that can go into the crafting panel, filtered by search text + biome. */
+  /** Bag stacks that can go into the crafting panel, filtered by search text + biome,
+   *  sorted by type (alphabetical) then rarity — mirrors the reference UI's
+   *  sorted type-rows / rarity-columns bag grid.
+   */
   private craftFilteredEntries(): { slot: number; cell: Cell }[] {
     const query = this.craftSearchText.trim().toLowerCase();
     const biome = this.craftBiome;
-    return this.bagEntries().filter(({ cell }) => {
-      const def = ITEMS[cell.item];
-      if (!def) return false;
-      if (this.craftMode !== "trade" && def.kind === "trinket") return false;
-      if (query && !def.name.toLowerCase().includes(query)) return false;
-      if (biome !== "All" && !this.itemBiomes(cell.item).has(biome)) return false;
-      return true;
-    });
+    return this.bagEntries()
+      .filter(({ cell }) => {
+        const def = ITEMS[cell.item];
+        if (!def) return false;
+        if (this.craftMode !== "trade" && def.kind === "trinket") return false;
+        if (query && !def.name.toLowerCase().includes(query)) return false;
+        if (biome !== "All" && !this.itemBiomes(cell.item).has(biome)) return false;
+        return true;
+      })
+      .sort((a, b) => {
+        const nameA = ITEMS[a.cell.item]?.name ?? "";
+        const nameB = ITEMS[b.cell.item]?.name ?? "";
+        if (nameA !== nameB) return nameA < nameB ? -1 : 1;
+        return a.cell.rarity - b.cell.rarity;
+      });
   }
 
   private craftMaxScroll(): number {
@@ -2450,10 +2460,10 @@ export class GameClient {
       }
     }
 
-    // mode tabs (compact, beside the log)
+    // mode selectors — top-right row, left of the close button (mirrors drawModeSelectors)
     for (const { mode, rect, label: lab, color } of this.craftModeRects()) {
       const active = this.craftMode === mode;
-      button(ctx, rect, lab, active ? color : "#3f7dc2", hit(rect, this.mx, this.my), 9);
+      button(ctx, rect, lab, active ? color : "#3f7dc2", hit(rect, this.mx, this.my), 12);
     }
 
     // search + biome filter (below tabs, above craft pentagon)
