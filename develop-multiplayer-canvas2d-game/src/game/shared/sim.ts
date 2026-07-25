@@ -3,18 +3,29 @@
 
 import {
   BAG_COUNT,
+  craftChanceFor,
   EMPTY_ITEM,
   ITEMS,
   MAPS,
-  MOBS,
+  MAX_CRAFT_RARITY,
   MAX_RARITY,
+  MAX_WILD_DROP_RARITY,
+  MOBS,
+  ORACLE_COOLDOWN_HOURS,
+  ORACLE_SKIP,
+  oracleRequiredCount,
   SLOT_COUNT,
   TOTAL_CELLS,
+  TRADE_COOLDOWN_HOURS,
+  TRINKET_ITEM,
   Wall,
+  enemyRarityMult,
   levelFromXp,
   rarityMult,
 } from "./defs";
+
 import { C2S, ENT, EVT, Reader, S2C, TEAM, Writer } from "./protocol";
+
 
 export interface Cell {
   item: number;
@@ -38,6 +49,10 @@ export interface PlayerSave {
   bag: (Cell | null)[];
   xp: number;
   mapId: number;
+  /** Epoch ms timestamp of the next allowed Oracle use (0 = ready now). */
+  nextOracleAt?: number;
+  /** Epoch ms timestamp of the next allowed Trade use (0 = ready now). */
+  nextTradeAt?: number;
 }
 
 export class Player {
@@ -59,6 +74,9 @@ export class Player {
   flags = 0;
   baseAngle = 0;
   orbit = 62;
+  nextOracleAt = 0;
+  nextTradeAt = 0;
+
   slots: (Cell | null)[] = new Array(SLOT_COUNT).fill(null);
   bag: (Cell | null)[] = new Array(BAG_COUNT).fill(null);
   petals: PetalState[] = [];
@@ -98,7 +116,8 @@ export class Mob {
 
   constructor(id: number, type: number, mapId: number, x: number, y: number, rarity: number, friendly = false) {
     const def = MOBS[type];
-    const m = rarityMult(rarity);
+    // Player-owned summons scale like petals (rarityMult); wild mobs scale on the steeper enemy curve.
+    const m = friendly ? rarityMult(rarity) : enemyRarityMult(rarity);
     this.id = id;
     this.type = type;
     this.mapId = mapId;
@@ -213,7 +232,14 @@ export class GameServer {
   getSave(id: number): PlayerSave | null {
     const p = this.clients.get(id)?.player;
     if (!p) return null;
-    return { slots: p.slots, bag: p.bag, xp: p.xp, mapId: p.mapId };
+    return {
+      slots: p.slots,
+      bag: p.bag,
+      xp: p.xp,
+      mapId: p.mapId,
+      nextOracleAt: p.nextOracleAt,
+      nextTradeAt: p.nextTradeAt,
+    };
   }
 
   // ------------------------------------------------------------- networking
@@ -234,6 +260,13 @@ export class GameServer {
         for (let i = 0; i < SLOT_COUNT; i++) p.slots[i] = readCell(r);
         const bagCount = r.u8();
         for (let i = 0; i < bagCount && i < BAG_COUNT; i++) p.bag[i] = readCell(r);
+        // Cooldowns are stored client-side (same trust model as xp above) as
+        // "seconds remaining" so they survive reconnects without clock-sync issues.
+        const oracleSecLeft = r.u32();
+        const tradeSecLeft = r.u32();
+        const now = Date.now();
+        p.nextOracleAt = oracleSecLeft > 0 ? now + oracleSecLeft * 1000 : 0;
+        p.nextTradeAt = tradeSecLeft > 0 ? now + tradeSecLeft * 1000 : 0;
         if (!p.slots.some(Boolean) && !p.bag.some(Boolean)) {
           p.slots[0] = { item: 0, rarity: 0, count: 1 };
           p.slots[1] = { item: 0, rarity: 0, count: 1 };
@@ -261,14 +294,34 @@ export class GameServer {
         const p = c.player;
         if (!p) return;
         this.swapCells(p, r.u8(), r.u8());
+
         break;
       }
       case C2S.CRAFT: {
         const p = c.player;
         if (!p) return;
-        this.craft(c, p, r.u8(), r.u8());
+        const item = r.u8();
+        const rarity = r.u8();
+        const count = r.u16();
+        this.craft(c, p, item, rarity, count);
         break;
       }
+      case C2S.ORACLE: {
+        const p = c.player;
+        if (!p) return;
+        this.oracle(c, p, r.u8(), r.u8());
+        break;
+      }
+      case C2S.TRADE: {
+        const p = c.player;
+        if (!p) return;
+        const item = r.u8();
+        const rarity = r.u8();
+        const count = r.u16();
+        this.trade(c, p, item, rarity, count);
+        break;
+      }
+
       case C2S.CHANGE_MAP: {
         const p = c.player;
         if (!p) return;
@@ -351,17 +404,18 @@ export class GameServer {
     p.dirty = true;
   }
 
-  addItem(p: Player, item: number, rarity: number): boolean {
+  addItem(p: Player, item: number, rarity: number, count = 1): boolean {
+    if (count <= 0) return true;
     for (const cell of p.bag) {
       if (cell && cell.item === item && cell.rarity === rarity && cell.count < 999) {
-        cell.count++;
+        cell.count = Math.min(999, cell.count + count);
         p.dirty = true;
         return true;
       }
     }
     for (let i = 0; i < BAG_COUNT; i++) {
       if (!p.bag[i]) {
-        p.bag[i] = { item, rarity, count: 1 };
+        p.bag[i] = { item, rarity, count: Math.min(999, count) };
         p.dirty = true;
         return true;
       }
@@ -369,12 +423,9 @@ export class GameServer {
     return false;
   }
 
-  private craft(c: ClientState, p: Player, item: number, rarity: number) {
-    if (item >= ITEMS.length || rarity >= MAX_RARITY) return;
-    let have = 0;
-    for (const cell of p.bag) if (cell && cell.item === item && cell.rarity === rarity) have += cell.count;
-    if (have < 5) return;
-    let need = 5;
+  /** Removes up to `count` cards of item+rarity from a player's bag. Returns how many were actually removed. */
+  private takeFromBag(p: Player, item: number, rarity: number, count: number): number {
+    let need = count;
     for (let i = 0; i < BAG_COUNT && need > 0; i++) {
       const cell = p.bag[i];
       if (!cell || cell.item !== item || cell.rarity !== rarity) continue;
@@ -383,15 +434,92 @@ export class GameServer {
       need -= take;
       if (cell.count <= 0) p.bag[i] = null;
     }
-    const chance = [0.9, 0.7, 0.48, 0.3, 0.16][rarity] ?? 0.1;
-    if (Math.random() < chance) {
-      this.addItem(p, item, rarity + 1);
-      this.pushEvent(c, EVT.CRAFT_OK, p.x, p.y, 0, item, rarity + 1);
-    } else {
-      for (let i = 0; i < 3; i++) this.addItem(p, item, rarity);
-      this.pushEvent(c, EVT.CRAFT_FAIL, p.x, p.y, 0, item, rarity);
+    return count - need;
+  }
+
+  private countOf(p: Player, item: number, rarity: number): number {
+    let have = 0;
+    for (const cell of p.bag) if (cell && cell.item === item && cell.rarity === rarity) have += cell.count;
+    return have;
+  }
+
+  /**
+   * Combine 5 cards of `item`+`rarity` into 1 of the next rarity. `requestedCount` lets the
+   * client batch multiple attempts at once (rounded down to a multiple of 5).
+   */
+  private craft(c: ClientState, p: Player, item: number, rarity: number, requestedCount: number) {
+    if (item >= ITEMS.length || ITEMS[item].kind === "trinket") return;
+    const successRate = craftChanceFor(rarity);
+    if (rarity >= MAX_CRAFT_RARITY || successRate === undefined) return;
+
+    const have = this.countOf(p, item, rarity);
+    const want = requestedCount > 0 ? Math.min(requestedCount, have) : have;
+    const attempts = Math.floor(want / 5);
+    if (attempts <= 0) return;
+
+    const used = this.takeFromBag(p, item, rarity, attempts * 5);
+    const actualAttempts = Math.floor(used / 5);
+    if (actualAttempts <= 0) return;
+
+    let successCount = 0;
+    let cardsLost = 0;
+    let cardsReturned = 0;
+    for (let i = 0; i < actualAttempts; i++) {
+      if (Math.random() < successRate) {
+        successCount++;
+      } else {
+        // Failing an attempt destroys 1-4 of the 5 cards; the rest are returned to the bag.
+        const destroyed = 1 + Math.floor(Math.random() * 4);
+        cardsLost += destroyed;
+        cardsReturned += 5 - destroyed;
+      }
+    }
+
+    if (successCount > 0) this.addItem(p, item, rarity + 1, successCount);
+    if (cardsReturned > 0) this.addItem(p, item, rarity, cardsReturned);
+
+    if (successCount > 0) {
+      this.pushEvent(c, EVT.CRAFT_OK, p.x, p.y, successCount, item, rarity + 1);
+    }
+    if (successCount < actualAttempts) {
+      this.pushEvent(c, EVT.CRAFT_FAIL, p.x, p.y, cardsLost, item, rarity);
     }
     p.dirty = true;
+  }
+
+  /** Guaranteed rarity skip (no RNG) at the cost of many cards and a long cooldown. */
+  private oracle(c: ClientState, p: Player, item: number, rarity: number) {
+    if (item >= ITEMS.length || ITEMS[item].kind === "trinket") return;
+    const required = oracleRequiredCount(rarity);
+    if (required === undefined) return;
+    if (Date.now() < p.nextOracleAt) return;
+    const have = this.countOf(p, item, rarity);
+    if (have < required) return;
+
+    this.takeFromBag(p, item, rarity, required);
+    const targetRarity = rarity + ORACLE_SKIP;
+    this.addItem(p, item, targetRarity, 1);
+    p.nextOracleAt = Date.now() + ORACLE_COOLDOWN_HOURS * 3600 * 1000;
+    this.pushEvent(c, EVT.ORACLE_OK, p.x, p.y, 0, item, targetRarity);
+    p.dirty = true;
+    p.statsDirty = true;
+  }
+
+  /** Converts cards into Coin trinkets (1:1) on a cooldown — a way to cash out unwanted rarities. */
+  private trade(c: ClientState, p: Player, item: number, rarity: number, requestedCount: number) {
+    if (item >= ITEMS.length || ITEMS[item].kind === "trinket") return;
+    if (Date.now() < p.nextTradeAt) return;
+    const have = this.countOf(p, item, rarity);
+    const want = requestedCount > 0 ? Math.min(requestedCount, have) : have;
+    if (want <= 0) return;
+
+    const used = this.takeFromBag(p, item, rarity, want);
+    if (used <= 0) return;
+    this.addItem(p, TRINKET_ITEM, rarity, used);
+    p.nextTradeAt = Date.now() + TRADE_COOLDOWN_HOURS * 3600 * 1000;
+    this.pushEvent(c, EVT.TRADE_OK, p.x, p.y, used, TRINKET_ITEM, rarity);
+    p.dirty = true;
+    p.statsDirty = true;
   }
 
   // --------------------------------------------------------------- spawning
@@ -791,7 +919,7 @@ export class GameServer {
     for (const drop of def.drops) {
       if (Math.random() > drop.chance) continue;
       let rarity = mob.rarity;
-      while (rarity < MAX_RARITY - 1 && Math.random() < 0.14 + map.rarityBias) rarity++;
+      while (rarity < MAX_WILD_DROP_RARITY && Math.random() < 0.14 + map.rarityBias) rarity++;
       if (Math.random() < 0.35 && rarity > 0) rarity--;
       const d = new Drop(
         this.nextId++,
@@ -926,6 +1054,9 @@ export class GameServer {
     }
     if (p.statsDirty || this.tickCount % 10 === 0) {
       p.statsDirty = false;
+      const now = Date.now();
+      const oracleSecLeft = Math.max(0, Math.ceil((p.nextOracleAt - now) / 1000));
+      const tradeSecLeft = Math.max(0, Math.ceil((p.nextTradeAt - now) / 1000));
       const sw = new Writer(24);
       sw
         .u8(S2C.STATS)
@@ -934,7 +1065,9 @@ export class GameServer {
         .u16(Math.max(0, Math.round(p.hp)))
         .u16(Math.round(p.maxHp))
         .u8(p.mapId)
-        .u8(p.alive ? 1 : 0);
+        .u8(p.alive ? 1 : 0)
+        .u32(oracleSecLeft)
+        .u32(tradeSecLeft);
       c.send(sw.bytes());
     }
     for (const e of c.events) c.send(e);
