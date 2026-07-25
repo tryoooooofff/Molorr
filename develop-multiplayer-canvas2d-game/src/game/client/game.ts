@@ -1994,7 +1994,7 @@ export class GameClient {
       const py = (((i * 251) % this.h) + t * (12 + (i % 5) * 6)) % (this.h + 60);
       ctx.save();
       ctx.globalAlpha = 0.25;
-      drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 + (i % 3) * 0.2));
+drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 + (i % 3) * 0.2), 0);
       ctx.restore();
     }
 
@@ -2144,7 +2144,7 @@ export class GameClient {
       if (e.kind === ENT.DROP) this.drawDrop(e);
     }
     for (const e of list) {
-      if (e.kind === ENT.PETAL) drawItemIcon(ctx, e.type, e.x, e.y, e.radius, this.time * 3 + e.id);
+      if (e.kind === ENT.PETAL) drawItemIcon(ctx, e.type, e.x, e.y, e.radius, this.time * 3 + e.id, 0);
       else if (e.kind === ENT.MOB) this.drawMobEnt(e);
       else if (e.kind === ENT.PLAYER) this.drawPlayerEnt(e);
     }
@@ -2195,7 +2195,7 @@ export class GameClient {
     ctx.fill();
     roundRect(ctx, e.x - 12, e.y - 15 + bob, 24, 30, 5);    ctx.fillStyle = shade(rarity.color, -40);
     ctx.fill();
-    drawItemIcon(ctx, e.type, e.x, e.y + bob, 9, this.time * 2);
+drawItemIcon(ctx, e.type, e.x, e.y + bob, 9, this.time * 2, e.team || 0);
     ctx.restore();
   }
 
