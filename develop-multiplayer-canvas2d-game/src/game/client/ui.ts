@@ -249,53 +249,157 @@ export function craftBurst(ctx: CanvasRenderingContext2D, x: number, y: number, 
   ctx.restore();
 }
 
-/** Draw the artwork of an item (petal or summon). */
+/** 绘制物品图标（支持 Light, Stick, Wing, Sand, Stinger, Rock, Leaf 等） */
 export function drawItemIcon(ctx: CanvasRenderingContext2D, itemId: number, x: number, y: number, size: number, spin = 0) {
   const def = ITEMS[itemId];
   if (!def) return;
+
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(spin);
-  ctx.lineWidth = Math.max(1.5, size * 0.16);
+
+  // 基础样式
+  ctx.lineWidth = Math.max(1.5, size * 0.15);
   ctx.strokeStyle = def.outline;
   ctx.fillStyle = def.color;
+  ctx.lineJoin = "round";
+
   switch (def.shape) {
-    case "circle": {
+    case "leaf": {
+      // 树叶轮廓
       ctx.beginPath();
-      ctx.arc(0, 0, size, 0, Math.PI * 2);
+      ctx.moveTo(0, size * 1.2);
+      ctx.quadraticCurveTo(-size * 1.2, 0, 0, -size * 1.2);
+      ctx.quadraticCurveTo(size * 1.2, 0, 0, size * 1.2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      // 叶脉与叶柄
+      ctx.beginPath();
+      ctx.moveTo(0, size * 0.9);
+      ctx.quadraticCurveTo(size * 0.2, 0, 0, -size * 0.8);
+      ctx.lineCap = "round";
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(0, size * 1.2);
+      ctx.lineTo(0, size * 1.5);
+      ctx.stroke();
+      break;
+    }
+
+    case "stick": {
+      ctx.rotate(-Math.PI / 12);
+      const drawBranch = () => {
+        const r = (bx: number, by: number, bw: number, bh: number) => {
+          roundRect(ctx, bx, by, bw, bh, size * 0.15);
+        };
+        
+        ctx.save();
+        r(-size * 0.2, -size * 0.1, size * 0.4, size * 1.8);
+        ctx.restore();
+
+        ctx.save();
+        ctx.rotate(Math.PI / 6);
+        r(-size * 0.2, -size * 1.5, size * 0.4, size * 1.5);
+        ctx.restore();
+
+        ctx.save();
+        ctx.rotate(-Math.PI / 5);
+        r(-size * 0.2, -size * 1.2, size * 0.4, size * 1.2);
+        ctx.restore();
+      };
+
+      // 描边底层
+      ctx.beginPath();
+      drawBranch();
+      ctx.fillStyle = ctx.strokeStyle = def.outline;
+      ctx.lineWidth = size * 0.3;
+      ctx.fill();
+      ctx.stroke();
+
+      // 填充顶层
+      ctx.beginPath();
+      drawBranch();
+      ctx.fillStyle = ctx.strokeStyle = def.color;
+      ctx.lineWidth = size * 0.05;
       ctx.fill();
       ctx.stroke();
       break;
     }
-    case "square": {
-      roundRect(ctx, -size, -size, size * 2, size * 2, size * 0.3);
-      ctx.fill();
-      ctx.stroke();
-      break;
-    }
+
     case "triangle": {
+      // Stinger / 三角针刺
+      const count = 1; // 可根据 rarity 动态增加数量
+      for (let i = 0; i < count; i++) {
+        ctx.save();
+        ctx.rotate((i * 2 * Math.PI) / count - Math.PI / 2);
+        ctx.beginPath();
+        ctx.moveTo(0, -size * 0.3);
+        ctx.lineTo(-size * 0.5, size * 0.9);
+        ctx.lineTo(size * 0.5, size * 0.9);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+      break;
+    }
+
+    case "square": {
+      // Rock 五边形/多边形块
       ctx.beginPath();
-      ctx.moveTo(0, -size * 1.2);
-      ctx.lineTo(size, size * 0.9);
-      ctx.lineTo(-size, size * 0.9);
+      for (let i = 0; i < 5; i++) {
+        const a = (i * 2 * Math.PI) / 5 - Math.PI / 2;
+        const rx = Math.cos(a) * size;
+        const ry = Math.sin(a) * size;
+        if (i === 0) ctx.moveTo(rx, ry);
+        else ctx.lineTo(rx, ry);
+      }
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
       break;
     }
-    case "leaf": {
-      ctx.beginPath();
-      ctx.ellipse(0, 0, size * 1.25, size * 0.75, Math.PI / 5, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(-size, size * 0.5);
-      ctx.lineTo(size, -size * 0.5);
-      ctx.lineWidth = Math.max(1, size * 0.14);
-      ctx.strokeStyle = "rgba(0,0,0,0.25)";
-      ctx.stroke();
+
+    case "circle": {
+      if (def.name === "Sand") {
+        // Sand 六边形组合
+        const drawHexagon = (hx: number, hy: number, hr: number, rotateHex: boolean) => {
+          ctx.save();
+          ctx.translate(hx, hy);
+          if (rotateHex) ctx.rotate(Math.PI / 6);
+          ctx.beginPath();
+          for (let i = 0; i < 6; i++) {
+            const a = (i * Math.PI) / 3;
+            const px = hr * Math.cos(a);
+            const py = hr * Math.sin(a);
+            if (i === 0) ctx.moveTo(px, py);
+            else ctx.lineTo(px, py);
+          }
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+        };
+
+        const hexR = size * 0.45;
+        const offset = size * 0.65;
+        drawHexagon(-offset, 0, hexR, false);
+        drawHexagon(offset, 0, hexR, false);
+        drawHexagon(0, -offset, hexR, true);
+        drawHexagon(0, offset, hexR, true);
+      } else {
+        // 普通圆形 (Basic, Pearl 等)
+        ctx.beginPath();
+        ctx.arc(0, 0, size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
       break;
     }
+
     case "egg": {
       ctx.beginPath();
       ctx.ellipse(0, 0, size * 0.85, size * 1.15, 0, 0, Math.PI * 2);
@@ -303,21 +407,7 @@ export function drawItemIcon(ctx: CanvasRenderingContext2D, itemId: number, x: n
       ctx.stroke();
       break;
     }
-    case "stick": {
-      ctx.lineCap = "round";
-      ctx.strokeStyle = def.color;
-      ctx.lineWidth = size * 0.5;
-      ctx.beginPath();
-      ctx.moveTo(-size * 0.9, size * 0.9);
-      ctx.lineTo(size * 0.7, -size * 0.9);
-      ctx.stroke();
-      ctx.lineWidth = size * 0.34;
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(size * 0.9, size * 0.3);
-      ctx.stroke();
-      break;
-    }
+
     case "star": {
       ctx.beginPath();
       for (let i = 0; i < 10; i++) {
@@ -331,53 +421,75 @@ export function drawItemIcon(ctx: CanvasRenderingContext2D, itemId: number, x: n
       break;
     }
   }
+
   ctx.restore();
 }
+// ui.ts
 
-/** Inventory / hotbar card. */
 export function drawCard(
   ctx: CanvasRenderingContext2D,
-  r: Rect,
+  rect: Rect,
   cell: Cell | null,
-  opts: { hovered?: boolean; empty?: string; scale?: number; showName?: boolean; dim?: number } = {},
+  active = false,
+  hover = false,
 ) {
-  const scale = opts.scale ?? 1;
-  const cx = r.x + r.w / 2;
-  const cy = r.y + r.h / 2;
+  const r = 10;
   ctx.save();
-  ctx.globalAlpha = opts.dim ?? 1;
-  ctx.translate(cx, cy);
-  ctx.scale(scale, scale);
-  ctx.translate(-cx, -cy);
-  if (!cell) {
-    roundRect(ctx, r.x, r.y, r.w, r.h, 8);
-    ctx.fillStyle = opts.hovered ? "rgba(255,255,255,0.18)" : "rgba(0,0,0,0.28)";
+
+  if (!cell || cell.item === 0) {
+    // 空槽位：保持较暗的虚线框
+    roundRect(ctx, rect.x, rect.y, rect.w, rect.h, r);
+    ctx.fillStyle = "rgba(0, 0, 0, 0.25)";
     ctx.fill();
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = "rgba(255,255,255,0.22)";
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.15)";
     ctx.stroke();
-    if (opts.empty) text(ctx, opts.empty, cx, cy, 12, "rgba(255,255,255,0.5)");
     ctx.restore();
     return;
   }
-  const rarity = RARITIES[cell.rarity];
-  roundRect(ctx, r.x, r.y, r.w, r.h, 8);
+
+  const rarity = RARITIES[cell.rarity] || RARITIES[0];
+
+  // 1. 绘制外边框（稀有度主色）
+  roundRect(ctx, rect.x, rect.y, rect.w, rect.h, r);
   ctx.fillStyle = rarity.color;
   ctx.fill();
-  roundRect(ctx, r.x + 3, r.y + 3, r.w - 6, r.h - 6, 6);
-  ctx.fillStyle = shade(rarity.color, -34);
+
+  // 2. 绘制卡片内底色（将原来的负数 -34 改为更亮的值，或适当加亮）
+  // 提高此处的亮度：由原先较暗的颜色提升为更亮、更鲜艳的色调
+  const innerBg = shade(rarity.color, 15); // 调整为正值以提高底色亮度
+
+  const pad = 4;
+  roundRect(ctx, rect.x + pad, rect.y + pad, rect.w - pad * 2, rect.h - pad * 2, r - 2);
+  ctx.fillStyle = innerBg;
   ctx.fill();
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = opts.hovered ? "#ffffff" : "rgba(0,0,0,0.35)";
-  roundRect(ctx, r.x, r.y, r.w, r.h, 8);
-  ctx.stroke();
-  drawItemIcon(ctx, cell.item, cx, cy - (opts.showName ? r.h * 0.08 : 0), Math.min(r.w, r.h) * 0.26);
-  if (opts.showName !== false) {
-    text(ctx, ITEMS[cell.item].name, cx, r.y + r.h - 11, Math.max(9, r.h * 0.16), "#ffffff");
+
+  // 可选：添加一层顶部微光（高光效果），让底色看起来更有质感且更亮
+  ctx.save();
+  roundRect(ctx, rect.x + pad, rect.y + pad, rect.w - pad * 2, (rect.h - pad * 2) * 0.45, r - 2);
+  ctx.fillStyle = "rgba(255, 255, 255, 0.15)";
+  ctx.fill();
+  ctx.restore();
+
+  // 3. 绘制 Hover 或选中高光
+  if (hover || active) {
+    roundRect(ctx, rect.x, rect.y, rect.w, rect.h, r);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = active ? "#ffffff" : "rgba(255, 255, 255, 0.7)";
+    ctx.stroke();
   }
+
+  // 4. 绘制物品图标与数量/名称
+  const cx = rect.x + rect.w / 2;
+  const cy = rect.y + rect.h / 2 - (rect.h > 60 ? 6 : 0);
+  const iconSize = Math.min(rect.w, rect.h) * 0.28;
+
+  drawItemIcon(ctx, cell.item, cx, cy, iconSize);
+
   if (cell.count > 1) {
-    text(ctx, "x" + cell.count, r.x + r.w - 6, r.y + 11, Math.max(9, r.h * 0.16), "#ffffff", "right");
+    text(ctx, `x${cell.count}`, rect.x + rect.w - 6, rect.y + rect.h - 8, 12, "#ffffff", "right");
   }
+
   ctx.restore();
 }
 
