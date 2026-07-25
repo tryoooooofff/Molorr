@@ -324,6 +324,7 @@ export function drawItemIcon(
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(spin);
+  ctx.scale(0.8, 0.8);
 
   // Normalize each item's artwork so every icon occupies roughly the same
   // visual area and is centered on the cell. `k` scales the shape, while
