@@ -202,9 +202,10 @@ export class GameClient {
   private craftAnim = 0;
   private craftMode: "normal" | "oracle" | "trade" = "normal";
   private craftSel: { item: number; rarity: number } | null = null;
-  // Number of pentagon slots the player has manually clicked cards into (normal mode).
-  // Slots fill one card per click instead of jumping straight to the full owned count.
-  private craftFilledCount = 0;
+  // How many cards are loaded into each of the 5 pentagon slots for the
+  // current selection (normal mode only). A plain click distributes 5 cards
+  // evenly (1 per slot); shift+click distributes every owned card evenly.
+  private craftSlotCounts: number[] = [0, 0, 0, 0, 0];
   private craftSpin = 0;
   private craftMsg = "";
   private craftMsgLife = 0;
@@ -1044,7 +1045,7 @@ export class GameClient {
   private craftMatrixCell(item: number, rarity: number): Cell | null {
     let count = this.countOf(item, rarity);
     if (this.craftMode === "normal" && this.craftSel && this.craftSel.item === item && this.craftSel.rarity === rarity) {
-      count -= this.craftFilledCount;
+      count -= this.craftTotalLoaded();
     }
     return count > 0 ? { item, rarity, count } : null;
   }
@@ -1145,7 +1146,7 @@ export class GameClient {
     this.craftRotSpeed = 300;
     this.craftPending = null;
     this.craftResultPulse = 0;
-    this.craftFilledCount = 0;
+    this.craftSlotCounts = [0, 0, 0, 0, 0];
     this.craftSuccessParticles.length = 0;
     this.craftFailParticles.length = 0;
   }
@@ -1190,7 +1191,7 @@ export class GameClient {
       this.craftPhase = "none";
     }
     this.craftSel = null;
-    this.craftFilledCount = 0;
+    this.craftSlotCounts = [0, 0, 0, 0, 0];
   }
 
   /** Per-frame update for the rotation phase machine, fill animation and particles.
@@ -1675,7 +1676,7 @@ export class GameClient {
       if (this.craftMode !== mode) {
         this.craftMode = mode;
         this.craftSel = null;
-        this.craftFilledCount = 0;
+        this.craftSlotCounts = [0, 0, 0, 0, 0];
         this.craftMsg = "";
         this.craftScrollY = 0;
         this.clampCraftScroll();
@@ -1738,20 +1739,20 @@ export class GameClient {
       return true;
     }
 
-    // clicking the big slots removes cards back into the bag
-    const slots = this.craftMode === "normal" ? this.craftPadRects() : [this.craftSingleSlotRect()];
-    for (const r of slots) {
-      if (hit(r, mx, my) && this.craftSel) {
-        if (this.craftMode === "normal" && this.craftFilledCount > 0) {
-          this.craftFilledCount--;
-          if (this.craftFilledCount === 0) this.craftSel = null;
-        } else {
-          this.craftSel = null;
-          this.craftFilledCount = 0;
+    // Clicking a big slot clears just that slot's cards back to the bag.
+    if (this.craftMode === "normal") {
+      const padRects = this.craftPadRects();
+      for (let i = 0; i < padRects.length; i++) {
+        if (hit(padRects[i], mx, my) && this.craftSel && this.craftSlotCounts[i] > 0) {
+          this.craftSlotCounts[i] = 0;
+          if (this.craftTotalLoaded() === 0) this.craftSel = null;
+          this.craftMsg = "";
+          return true;
         }
-        this.craftMsg = "";
-        return true;
       }
+    } else if (hit(this.craftSingleSlotRect(), mx, my) && this.craftSel) {
+      this.craftSel = null;
+      return true;
     }
 
     if (hit(layout.actionRect, mx, my)) this.submitCraft();
@@ -1759,11 +1760,10 @@ export class GameClient {
   }
 
   /** Puts a bag cell into the craft slots, with a little pop of feedback.
-   *  In normal (pentagon) mode, a plain click moves exactly one card from
-   *  the bag into the next empty craft slot — clicking the same card again
-   *  keeps adding cards one at a time until all five slots are loaded.
-   *  Shift+click skips the one-at-a-time clicking and instantly loads as
-   *  many slots as possible in a single action (see autoFillCraftSlots).
+   *  In normal (pentagon) mode, a plain click loads 5 cards distributed
+   *  evenly across the 5 slots (1 each). Shift+click instead distributes
+   *  every owned card of this type evenly across the 5 slots in one go
+   *  (see autoFillCraftSlots).
    */
   private selectCraftCell(cell: Cell, shiftKey = false) {
     if (this.craftPhase !== "none") return;
@@ -1773,43 +1773,37 @@ export class GameClient {
       return;
     }
 
-    if (this.craftMode === "normal" && shiftKey) {
-      this.autoFillCraftSlots(cell.item, cell.rarity);
-      return;
-    }
-
-    const sameSel = !!this.craftSel && this.craftSel.item === cell.item && this.craftSel.rarity === cell.rarity;
-
     if (this.craftMode === "normal") {
+      if (shiftKey) {
+        this.autoFillCraftSlots(cell.item, cell.rarity);
+        return;
+      }
       const avail = this.countOf(cell.item, cell.rarity);
-      if (sameSel) {
-        if (this.craftFilledCount >= CRAFT_CARD_COUNT) {
-          this.craftMsg = "Slots full.";
-          this.craftMsgLife = 1.4;
-          return;
-        }
-        if (this.craftFilledCount >= avail) {
-          this.craftMsg = "No more of this card.";
-          this.craftMsgLife = 1.4;
-          return;
-        }
-        this.craftFilledCount++;
+      if (avail <= 0) {
+        this.craftMsg = "No cards of this type.";
+        this.craftMsgLife = 1.4;
+        return;
+      }
+      this.craftSel = { item: cell.item, rarity: cell.rarity };
+      this.craftSlotCounts = this.craftDistributeEvenly(Math.min(CRAFT_CARD_COUNT, avail));
+      if (avail < CRAFT_CARD_COUNT) {
+        this.craftMsg = `Loaded ${avail}/${CRAFT_CARD_COUNT} — need more cards.`;
+        this.craftMsgLife = 1.8;
       } else {
-        this.craftSel = { item: cell.item, rarity: cell.rarity };
-        this.craftFilledCount = Math.min(1, avail);
+        this.craftMsg = "";
       }
     } else {
       this.craftSel = { item: cell.item, rarity: cell.rarity };
+      this.craftMsg = "";
     }
 
-    this.craftMsg = "";
     this.craftGlow = 1;
     this.craftStartFill();
   }
 
-  /** Shift+click convenience: instantly loads as many of the five pentagon
-   *  slots as the player's inventory allows (capped at CRAFT_CARD_COUNT),
-   *  in one action — no need to click the card five separate times.
+  /** Shift+click convenience: distributes every owned card of this type
+   *  evenly across the 5 pentagon slots in one action (e.g. 12 cards ->
+   *  [3, 3, 2, 2, 2]) instead of the plain-click 5-card load.
    */
   private autoFillCraftSlots(item: number, rarity: number) {
     const avail = this.countOf(item, rarity);
@@ -1819,13 +1813,13 @@ export class GameClient {
       return;
     }
     this.craftSel = { item, rarity };
-    this.craftFilledCount = Math.min(CRAFT_CARD_COUNT, avail);
-    if (this.craftFilledCount >= CRAFT_CARD_COUNT) {
+    this.craftSlotCounts = this.craftDistributeEvenly(avail);
+    if (avail < CRAFT_CARD_COUNT) {
+      this.craftMsg = `Loaded ${avail}/${CRAFT_CARD_COUNT} — need more cards.`;
+      this.craftMsgLife = 1.8;
+    } else {
       this.craftMsg = "";
       this.craftMsgLife = 0;
-    } else {
-      this.craftMsg = `Loaded ${this.craftFilledCount}/${CRAFT_CARD_COUNT} — need more cards.`;
-      this.craftMsgLife = 1.8;
     }
     this.craftGlow = 1;
     this.craftStartFill();
@@ -1844,9 +1838,10 @@ export class GameClient {
     const avail = this.countOf(sel.item, sel.rarity);
 
     if (this.craftMode === "normal") {
-      if (this.craftFilledCount < CRAFT_CARD_COUNT || avail < CRAFT_CARD_COUNT || sel.rarity >= MAX_CRAFT_RARITY) {
-        this.craftMsg = this.craftFilledCount < CRAFT_CARD_COUNT
-          ? `Click ${CRAFT_CARD_COUNT - this.craftFilledCount} more card${CRAFT_CARD_COUNT - this.craftFilledCount === 1 ? "" : "s"} to load.`
+      const loaded = this.craftTotalLoaded();
+      if (loaded < CRAFT_CARD_COUNT || avail < CRAFT_CARD_COUNT || sel.rarity >= MAX_CRAFT_RARITY) {
+        this.craftMsg = loaded < CRAFT_CARD_COUNT
+          ? `Load ${CRAFT_CARD_COUNT} identical cards first.`
           : avail < CRAFT_CARD_COUNT
             ? `Need ${CRAFT_CARD_COUNT} identical cards.`
             : "Already at max craftable rarity.";
@@ -1995,6 +1990,22 @@ export class GameClient {
     let n = 0;
     for (const c of this.bag) if (c && c.item === item && c.rarity === rarity) n += c.count;
     return n;
+  }
+
+  /** Sum of cards currently loaded across the 5 pentagon slots (normal mode). */
+  private craftTotalLoaded(): number {
+    return this.craftSlotCounts.reduce((a, b) => a + b, 0);
+  }
+
+  /** Splits `total` cards evenly across the 5 pentagon slots (remainder
+   *  going to the earliest slots first), mirroring an even-distribution
+   *  fill: e.g. 12 cards -> [3, 3, 2, 2, 2].
+   */
+  private craftDistributeEvenly(total: number): number[] {
+    const n = CRAFT_CARD_COUNT;
+    const base = Math.floor(total / n);
+    const remainder = total % n;
+    return Array.from({ length: n }, (_, i) => base + (i < remainder ? 1 : 0));
   }
 
   private dropDrag(mx: number, my: number) {
@@ -2828,7 +2839,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     const spin = this.craftSpin > 0 ? ease.inOutCubic(1 - this.craftSpin / 0.8) * Math.PI * 2 : 0;
 
     text(ctx, `Combine ${CRAFT_CARD_COUNT} identical to upgrade`, p.x + p.w * 0.38, (layout as any).craftBottom - 46, 11, "rgba(255,255,255,0.85)");
-    text(ctx, "Shift+click a card to fill instantly", p.x + p.w * 0.38, (layout as any).craftBottom - 34, 9, "rgba(255,255,255,0.55)");
+    text(ctx, `Click: load ${CRAFT_CARD_COUNT} cards · Shift+click: load all`, p.x + p.w * 0.38, (layout as any).craftBottom - 34, 9, "rgba(255,255,255,0.55)");
 
     // Draw animated slots (pentagon with rotation/contraction)
     layout.bigSlots.forEach((baseRect, i) => {
@@ -2842,8 +2853,9 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
 
       // Once submitted, keep all five input cards visible even after the
       // authoritative inventory update removes them from the bag. Otherwise
-      // a slot is filled only once the player has clicked a card into it.
-      const filled = !!sel && (submitting || i < this.craftFilledCount) && this.craftPhase !== "showing";
+      // a slot is filled only once cards have been loaded into it.
+      const slotCount = this.craftSlotCounts[i] ?? 0;
+      const filled = !!sel && (submitting || slotCount > 0) && this.craftPhase !== "showing";
       // Slot background always drawn (CraftAnimation drawSlots behavior)
       ctx.save();
       roundRect(ctx, r.x, r.y, r.w, r.h, 8);
@@ -2868,7 +2880,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
         ctx.scale(fill.scale, fill.scale);
         ctx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2));
       }
-      drawCard(ctx, { ...r, y: r.y + bob }, { item: sel!.item, rarity: sel!.rarity, count: 1 }, {
+      drawCard(ctx, { ...r, y: r.y + bob }, { item: sel!.item, rarity: sel!.rarity, count: Math.max(1, slotCount) }, {
         showName: false,
         scale: this.craftSpin > 0 ? 1.06 : 1,
       });
@@ -2884,14 +2896,15 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     const def = ITEMS[sel.item];
     const chance = craftChanceFor(sel.rarity);
     text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, layout.cx, y, 14, RARITIES[sel.rarity].color);
-    const ready = this.craftFilledCount >= CRAFT_CARD_COUNT;
+    const loaded = this.craftTotalLoaded();
+    const ready = loaded >= CRAFT_CARD_COUNT;
     const status = submitting
       ? `Using ${CRAFT_CARD_COUNT} cards...`
       : avail < CRAFT_CARD_COUNT
         ? `Have ${avail} · Need ${CRAFT_CARD_COUNT - avail} more`
         : ready
-          ? `Loaded ${CRAFT_CARD_COUNT}/${CRAFT_CARD_COUNT} · Ready`
-          : `Loaded ${this.craftFilledCount}/${CRAFT_CARD_COUNT} · Click cards below`;
+          ? `Loaded ${loaded} · Ready`
+          : `Loaded ${loaded}/${CRAFT_CARD_COUNT}`;
     text(
       ctx,
       status,
@@ -3004,7 +3017,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     const avail = sel ? this.countOf(sel.item, sel.rarity) : 0;
     if (this.craftMode === "normal") {
       const enabled = !!sel
-        && this.craftFilledCount >= CRAFT_CARD_COUNT
+        && this.craftTotalLoaded() >= CRAFT_CARD_COUNT
         && sel.rarity < MAX_CRAFT_RARITY
         && this.craftPhase === "none";
       return { text: "CRAFT", enabled };
