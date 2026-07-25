@@ -500,20 +500,21 @@ export const DNA_UPGRADE_BASE_CHANCE = 0.01;
 
 /**
  * Absolute DNA-upgrade chance added by ONE equipped clover, indexed by the
- * clover's rarity (Common .. Unique). Eternal clovers are worth +12%.
+ * clover's rarity (Common .. Unique). A Common clover is worth +0.1% and an
+ * Eternal one +1.2%, so clover luck tops out just above the 1% DNA base rate.
  */
 export const CLOVER_DNA_UPGRADE_BONUS: number[] = [
-  0.01, // Common
-  0.02, // Unusual
-  0.03, // Rare
-  0.04, // Epic
-  0.05, // Legendary
-  0.06, // Mythic
-  0.07, // Ultra
-  0.08, // Super
-  0.10, // Omega
-  0.12, // Eternal
-  0.12, // Unique (sits outside the craft ladder; matches Eternal)
+  0.001, // Common    +0.1%
+  0.002, // Unusual   +0.2%
+  0.003, // Rare      +0.3%
+  0.004, // Epic      +0.4%
+  0.005, // Legendary +0.5%
+  0.006, // Mythic    +0.6%
+  0.007, // Ultra     +0.7%
+  0.008, // Super     +0.8%
+  0.010, // Omega     +1.0%
+  0.012, // Eternal   +1.2%
+  0.012, // Unique (sits outside the craft ladder; matches Eternal)
 ];
 
 /**
