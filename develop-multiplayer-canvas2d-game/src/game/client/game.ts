@@ -582,11 +582,17 @@ export class GameClient {
         this.craftLogLast = `Oracle ${RARITIES[rarity].name} ${ITEMS[item].name}`;
         this.craftStartShow({ item, rarity, count: 1 });
         break;
+      case EVT.ORACLE_FAIL:
+        this.craftRefused("Oracle refused — check the requirement and cooldown.");
+        break;
       case EVT.TRADE_OK:
         this.craftMsg = `Traded for ${value}x ${RARITIES[rarity].name} Coin!`;
         this.craftMsgLife = 3;
         this.craftLogLast = `Trade ${value}x ${RARITIES[rarity].name} Coin`;
         this.craftStartShow({ item, rarity, count: value });
+        break;
+      case EVT.TRADE_FAIL:
+        this.craftRefused("Trade refused — check the cooldown.");
         break;
       case EVT.DEATH:
         this.alive = false;
@@ -1053,6 +1059,13 @@ export class GameClient {
   private craftStartFill() {
     this.craftFillActive = true;
     this.craftFillElapsed = 0;
+  }
+
+  /** A craft/oracle/trade was refused by the server (cooldown / requirement): show why and cancel feedback. */
+  private craftRefused(msg: string) {
+    this.craftMsg = msg;
+    this.craftMsgLife = 2.6;
+    this.craftFillActive = false;
   }
 
   /** Ease-out fill curve (mirrors drawFillAnimation): scale 0.01 -> 1, spin PI -> 0. */
