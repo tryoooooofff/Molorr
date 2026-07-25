@@ -1,0 +1,7 @@
+[build]
+  base = "develop-multiplayer-canvas2d-game"
+  command = "npm ci && npm run build:static:netlify"
+  publish = "out"
+
+[build.environment]
+  NODE_VERSION = "20"

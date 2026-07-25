@@ -167,16 +167,33 @@ function collideWalls(walls: Wall[], x: number, y: number, r: number): [number, 
   return [x, y];
 }
 
+interface GameServerOptions {
+  mobCapScale?: number;
+}
+
 export class GameServer {
   private nextId = 1;
   private clients = new Map<number, ClientState>();
   private worlds: World[] = MAPS.map(() => ({ mobs: [], drops: [] }));
   private tickCount = 0;
+  private mobCapScale: number;
 
-  constructor() {
+  constructor(options: GameServerOptions = {}) {
+    this.mobCapScale =
+      Number.isFinite(options.mobCapScale) && (options.mobCapScale ?? 1) > 0 ? options.mobCapScale ?? 1 : 1;
     for (const map of MAPS) {
-      for (let i = 0; i < map.mobCap; i++) this.spawnMob(map.id);
+      for (let i = 0; i < this.mobCapForMap(map.id); i++) this.spawnMob(map.id);
     }
+  }
+
+  playerCount() {
+    let count = 0;
+    for (const c of this.clients.values()) if (c.player) count++;
+    return count;
+  }
+
+  private mobCapForMap(mapId: number) {
+    return Math.max(0, Math.round(MAPS[mapId].mobCap * this.mobCapScale));
   }
 
   // ---------------------------------------------------------------- clients
@@ -752,7 +769,7 @@ export class GameServer {
 
     // respawn mobs
     const hostiles = world.mobs.filter((m) => !m.friendly).length;
-    if (hostiles < map.mobCap && Math.random() < 0.5) this.spawnMob(mapId);
+    if (hostiles < this.mobCapForMap(mapId) && Math.random() < 0.5) this.spawnMob(mapId);
   }
 
   private onMobKilled(mob: Mob, mapId: number) {
