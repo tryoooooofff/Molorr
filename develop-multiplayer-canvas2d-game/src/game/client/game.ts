@@ -57,6 +57,7 @@ interface Ent {
   angle: number;
   radius: number;
   hp: number;
+  rarity: number;
   name: string;
   seen: number;
   hurt: number;
@@ -484,12 +485,12 @@ export class GameClient {
           const hp = r.u8() / 255;
           let name = "";
           if (kind === ENT.PLAYER) name = r.str();
-          if (kind === ENT.MOB) r.u8();
+          const rarity = kind === ENT.MOB ? r.u8() : 0;
           let e = this.ents.get(id);
           if (!e) {
             e = {
               id, kind, type: etype, team, x, y, tx: x, ty: y, angle,
-              radius, hp, name, seen: this.time, hurt: 0, spawn: 0,
+              radius, hp, rarity, name, seen: this.time, hurt: 0, spawn: 0,
             };
             this.ents.set(id, e);
           }
@@ -502,6 +503,7 @@ export class GameClient {
           e.angle = angle;
           e.radius = radius;
           e.hp = hp;
+          e.rarity = rarity;
           if (name) e.name = name;
           e.seen = this.time;
           if (e.spawn < 1) e.spawn = Math.min(1, e.spawn + 0.12);
@@ -2173,7 +2175,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     const ctx = this.ctx;
     const def = MOBS[e.type];
     if (!def) return;
-    drawMob(ctx, e.type, e.x, e.y, e.radius, e.angle, this.time, e.team !== TEAM.HOSTILE);
+    drawMob(ctx, e.type, e.x, e.y, e.radius, e.angle, this.time, e.team !== TEAM.HOSTILE, e.rarity, this.level);
     if (e.hurt > 0) {
       ctx.save();
       ctx.globalAlpha = e.hurt * 3;
