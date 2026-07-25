@@ -105,6 +105,150 @@ export function panel(ctx: CanvasRenderingContext2D, r: Rect, fill = "rgba(28,36
   ctx.restore();
 }
 
+/**
+ * Flat white input box used by every searchable panel (inventory + crafting).
+ * Draws the placeholder, the typed text and a blinking caret while focused.
+ */
+export function searchField(
+  ctx: CanvasRenderingContext2D,
+  r: Rect,
+  value: string,
+  active: boolean,
+  placeholder = "Search...",
+) {
+  ctx.save();
+  ctx.fillStyle = active ? "rgba(255,255,255,0.95)" : "rgba(255,255,255,0.65)";
+  ctx.fillRect(r.x, r.y, r.w, r.h);
+  ctx.strokeStyle = "#000000";
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(r.x, r.y, r.w, r.h);
+
+  const showPlaceholder = value === "" && !active;
+  ctx.font = `${Math.round(r.h * 0.46)}px "Trebuchet MS", sans-serif`;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = showPlaceholder ? "#444444" : "#000000";
+  ctx.fillText(showPlaceholder ? placeholder : value, r.x + 10, r.y + r.h / 2);
+
+  if (active && Math.floor(Date.now() / 530) % 2 === 0) {
+    const tw = ctx.measureText(value).width;
+    ctx.fillStyle = "#000000";
+    ctx.fillRect(r.x + 10 + tw + 1, r.y + 6, 2, r.h - 12);
+  }
+  ctx.restore();
+}
+
+/** Closed state of the biome picker that sits next to a search field. */
+export function dropdownField(ctx: CanvasRenderingContext2D, r: Rect, label: string, open: boolean) {
+  ctx.save();
+  ctx.fillStyle = "rgba(255,255,255,0.65)";
+  ctx.fillRect(r.x, r.y, r.w, r.h);
+  ctx.strokeStyle = "#000000";
+  ctx.lineWidth = 1.5;
+  ctx.strokeRect(r.x, r.y, r.w, r.h);
+  ctx.font = `${Math.round(r.h * 0.42)}px "Trebuchet MS", sans-serif`;
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#444444";
+  ctx.fillText(label.length > 10 ? label.slice(0, 9) + "…" : label, r.x + 10, r.y + r.h / 2);
+  ctx.textAlign = "right";
+  ctx.fillStyle = "rgba(0,0,0,0.8)";
+  ctx.fillText(open ? "▲" : "▼", r.x + r.w - 10, r.y + r.h / 2);
+  ctx.restore();
+}
+
+/** Open option list of a dropdown. `optionRect` must match the click hit-test in game.ts. */
+export function dropdownList(
+  ctx: CanvasRenderingContext2D,
+  r: Rect,
+  options: string[],
+  selected: string,
+  mx: number,
+  my: number,
+) {
+  const optH = r.h + 2;
+  const listY = r.y + r.h + 4;
+  const listH = optH * options.length + 6;
+  ctx.save();
+  ctx.fillStyle = "rgba(16,22,30,0.94)";
+  ctx.fillRect(r.x, listY, r.w, listH);
+  ctx.strokeStyle = "rgba(255,255,255,0.1)";
+  ctx.lineWidth = 1;
+  ctx.strokeRect(r.x, listY, r.w, listH);
+  ctx.restore();
+
+  options.forEach((option, i) => {
+    const rect: Rect = { x: r.x + 3, y: listY + 3 + i * optH, w: r.w - 6, h: optH - 2 };
+    const hovered = hit(rect, mx, my);
+    const isSelected = option === selected;
+    ctx.save();
+    if (isSelected || hovered) {
+      ctx.fillStyle = isSelected ? "rgba(85,170,255,0.25)" : "rgba(255,255,255,0.06)";
+      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+    }
+    ctx.font = `${Math.round(optH * 0.44)}px sans-serif`;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = isSelected ? "#55aaff" : "rgba(255,255,255,0.85)";
+    ctx.fillText(option, rect.x + 10, rect.y + rect.h / 2);
+    ctx.restore();
+  });
+}
+
+/** Vertical scrollbar shared by the inventory grid and the crafting grid. */
+export function scrollbar(ctx: CanvasRenderingContext2D, track: Rect, thumb: Rect, dragging: boolean) {
+  roundRect(ctx, track.x, track.y, track.w, track.h, 3);
+  ctx.fillStyle = "rgba(20,30,45,0.25)";
+  ctx.fill();
+  roundRect(ctx, thumb.x, thumb.y, thumb.w, thumb.h, 3);
+  ctx.fillStyle = dragging ? "rgba(20,30,45,0.85)" : "rgba(20,30,45,0.6)";
+  ctx.fill();
+}
+
+/** Big empty crafting pad: dashed socket with a soft glow when it is filled/ready. */
+export function craftPad(ctx: CanvasRenderingContext2D, r: Rect, glow: number, pulse: number) {
+  ctx.save();
+  roundRect(ctx, r.x, r.y, r.w, r.h, 10);
+  ctx.fillStyle = "rgba(18,40,64,0.35)";
+  ctx.fill();
+  ctx.setLineDash([6, 5]);
+  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = `rgba(255,255,255,${0.22 + glow * 0.5})`;
+  ctx.stroke();
+  ctx.setLineDash([]);
+  if (glow > 0.01) {
+    ctx.globalAlpha = glow * (0.35 + Math.sin(pulse * 4) * 0.15);
+    roundRect(ctx, r.x - 3, r.y - 3, r.w + 6, r.h + 6, 12);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#ffe763";
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** One-shot success burst drawn over the craft slots. `t` goes 1 -> 0. */
+export function craftBurst(ctx: CanvasRenderingContext2D, x: number, y: number, t: number, color: string) {
+  if (t <= 0) return;
+  const p = 1 - t;
+  ctx.save();
+  ctx.globalAlpha = t;
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 4 * t + 1;
+  ctx.beginPath();
+  ctx.arc(x, y, 20 + ease.outCubic(p) * 90, 0, Math.PI * 2);
+  ctx.stroke();
+  for (let i = 0; i < 10; i++) {
+    const a = (i / 10) * Math.PI * 2 + p * 1.2;
+    const d = 24 + ease.outCubic(p) * 74;
+    ctx.globalAlpha = t * 0.9;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(x + Math.cos(a) * d, y + Math.sin(a) * d, 4 * t + 1, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
 /** Draw the artwork of an item (petal or summon). */
 export function drawItemIcon(ctx: CanvasRenderingContext2D, itemId: number, x: number, y: number, size: number, spin = 0) {
   const def = ITEMS[itemId];
