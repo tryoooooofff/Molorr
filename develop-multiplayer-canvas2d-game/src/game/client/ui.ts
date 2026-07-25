@@ -1503,6 +1503,10 @@ export function drawMob(
     case 7: drawJellyfish(); break;
     case 8: drawCrab(); break;
     case 9: drawStarfish(); break;
+    // New mob placeholders. The user is still drawing the detailed art, so
+    // these reuse existing shapes as a sensible stand-in.
+    case 10: drawWorkerAnt(); break; // Worker Ant — same ant shape as Soldier Ant
+    case 11: drawCactus(); break;    // Sandstorm — placeholder; refine later
     default: drawRock(); break;
   }
 

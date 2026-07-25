@@ -15,12 +15,14 @@ import {
   ORACLE_COOLDOWN_HOURS,
   ORACLE_SKIP,
   oracleRequiredCount,
+  RARITIES,
   SLOT_COUNT,
   TOTAL_CELLS,
   TRADE_COOLDOWN_HOURS,
   TRINKET_ITEM,
   Wall,
   enemyRarityMult,
+  getDropRarityByItem,
   levelFromXp,
   rarityMult,
 } from "./defs";
@@ -895,18 +897,31 @@ export class GameServer {
       this.pushEvent(killerClient!, EVT.KILL, mob.x, mob.y, mob.type);
     }
 
+    // The map's rarity bias still nudges the mob's rarity a bit before we hand
+    // it to the per-item drop table, matching the old "rarer map = better drops"
+    // feel. We just don't bake the roll into a single number anymore.
+    const biasedRarityIndex = (() => {
+      let r = mob.rarity;
+      while (r < MAX_WILD_DROP_RARITY && Math.random() < 0.14 + map.rarityBias) r++;
+      if (Math.random() < 0.35 && r > 0) r--;
+      return Math.max(0, Math.min(MAX_RARITY, r));
+    })();
+    const mobRarityName = RARITIES[biasedRarityIndex].name;
+
     for (const drop of def.drops) {
       if (Math.random() > drop.chance) continue;
-      let rarity = mob.rarity;
-      while (rarity < MAX_WILD_DROP_RARITY && Math.random() < 0.14 + map.rarityBias) rarity++;
-      if (Math.random() < 0.35 && rarity > 0) rarity--;
+      const rarityName = getDropRarityByItem(drop.item, mobRarityName);
+      const rarityIndex = Math.max(
+        0,
+        Math.min(MAX_RARITY, RARITIES.findIndex((r) => r.name === rarityName)),
+      );
       const d = new Drop(
         this.nextId++,
         mapId,
         mob.x + (Math.random() - 0.5) * 40,
         mob.y + (Math.random() - 0.5) * 40,
         drop.item,
-        rarity,
+        rarityIndex,
         killer ? killer.id : 0,
       );
       world.drops.push(d);
