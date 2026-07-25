@@ -887,23 +887,23 @@ export class GameClient {
     const tabsH = 28;
     const barH = 26;
 
-    // tabs just below header
-    const tabsY = p.y + headerH + 2;
+    // Craft log area (top-left small box) — computed early so the mode
+    // tabs can be placed beside it and never get drawn over.
+    const logRect: Rect = { x: p.x + pad, y: p.y + 10, w: 150, h: 82 };
 
-    // search + biome row
-    const barY = tabsY + tabsH + 8;
-    const barGap = 8;
-    const dropW = 110;
-    const barW = Math.min(210, p.w * 0.34);
-    const barX = p.x + pad;
-    const dropX = barX + barW + barGap;
+    // Compact mode tabs live in the same row as the log, just to its right,
+    // so they can never be covered by it.
+    const tabsY = logRect.y + (logRect.h - tabsH) / 2;
 
     // --- Craft pentagon config (mirrors CraftAnimation) ---
     const bigSize = 64; // slotSize for the 5 craft slots (bigger than inventory)
     const radius = 92; // distance from center to each slot (matches CraftAnimation.radius ~80)
     // Center placed slightly left of panel center so right side is free for button/log
     const cx = p.x + p.w * 0.38;
-    const cy = p.y + 182; // fixed from top, ensures space for search bar above
+    // No dedicated row is reserved above the pentagon for the search bar anymore
+    // (it now sits lower, right above the inventory grid), so the pentagon
+    // can sit higher in the panel.
+    const cy = p.y + 148;
 
     // Build pentagon positions (static base, will be rotated/contracted during animation)
     const bigSlots: Rect[] = [];
@@ -926,7 +926,18 @@ export class GameClient {
 
     // --- Inventory browser (below the pentagon, small slots, never covers craft) ---
     const craftBottom = cy + radius + bigSize / 2 + 24;
-    const infoY = craftBottom + 4;
+
+    // Search + biome row now sits directly ABOVE the "Pick a card from
+    // inventory below" prompt (i.e. right above the info text + grid),
+    // instead of above the pentagon.
+    const barGap = 8;
+    const dropW = 110;
+    const barW = Math.min(210, p.w * 0.34);
+    const barX = p.x + pad;
+    const barY = craftBottom + 4;
+    const dropX = barX + barW + barGap;
+
+    const infoY = barY + barH + 10;
     const gridTop = infoY + 38;
     const gridBottom = p.y + p.h - 10;
     const slotSizeSmall = 40; // SMALLER inventory slots as requested
@@ -937,9 +948,6 @@ export class GameClient {
     const gridH = Math.max(itemHeightSmall, gridBottom - gridTop);
     const maxVisibleRows = Math.max(1, Math.floor(gridH / itemHeightSmall));
     const scrollTrack: Rect = { x: p.x + p.w - pad - 2, y: gridTop, w: 6, h: gridH };
-
-    // Craft log area (top-left small box)
-    const logRect: Rect = { x: p.x + pad, y: p.y + 10, w: 150, h: 82 };
 
     return {
       panel: p,
@@ -976,13 +984,15 @@ export class GameClient {
     const layout = this.craftLayout();
     const p = layout.panel;
     const gap = 6;
-    const w = (p.w - layout.pad * 2 - gap * 2) / 3;
-    const y = layout.tabsY;
     const h = layout.tabsH;
+    const w = h + 10; // compact tab: just 10px wider than it is tall
+    const y = layout.tabsY;
+    // Start right after the log panel so the tabs are never drawn under it.
+    const x0 = layout.logRect.x + layout.logRect.w + 14;
     return [
-      { mode: "normal", rect: { x: p.x + layout.pad, y, w, h }, label: "Craft", color: "#c9762b" },
-      { mode: "oracle", rect: { x: p.x + layout.pad + w + gap, y, w, h }, label: "Oracle", color: "#6a3fb0" },
-      { mode: "trade", rect: { x: p.x + layout.pad + (w + gap) * 2, y, w, h }, label: "Trade", color: "#3f8f5a" },
+      { mode: "normal", rect: { x: x0, y, w, h }, label: "Craft", color: "#c9762b" },
+      { mode: "oracle", rect: { x: x0 + w + gap, y, w, h }, label: "Oracle", color: "#6a3fb0" },
+      { mode: "trade", rect: { x: x0 + (w + gap) * 2, y, w, h }, label: "Trade", color: "#3f8f5a" },
     ];
   }
 
@@ -2440,10 +2450,10 @@ export class GameClient {
       }
     }
 
-    // mode tabs
+    // mode tabs (compact, beside the log)
     for (const { mode, rect, label: lab, color } of this.craftModeRects()) {
       const active = this.craftMode === mode;
-      button(ctx, rect, lab, active ? color : "#3f7dc2", hit(rect, this.mx, this.my), 13);
+      button(ctx, rect, lab, active ? color : "#3f7dc2", hit(rect, this.mx, this.my), 9);
     }
 
     // search + biome filter (below tabs, above craft pentagon)
