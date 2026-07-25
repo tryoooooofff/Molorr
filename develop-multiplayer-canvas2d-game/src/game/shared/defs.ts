@@ -81,7 +81,21 @@ export function oracleRequiredCount(rarity: number): number | undefined {
 }
 
 
-export type ItemKind = "petal" | "summon" | "trinket";
+/**
+ * "dna" is reserved: no DNA item ships in ITEMS yet, but the summon rarity
+ * roll (see `getSummonRarityWithDna` in sim.ts) already understands them, so
+ * adding one here is all that's needed to turn the mechanic on.
+ */
+export type ItemKind = "petal" | "summon" | "trinket" | "dna";
+
+/**
+ * Kinds that orbit the player in a hotbar slot and can be broken/reloaded.
+ * Trinkets are inert cargo; everything else spins around the flower — summons
+ * included, since they sit in the ring whenever they aren't reloading.
+ */
+export function orbitsAsPetal(kind: ItemKind): boolean {
+  return kind !== "trinket";
+}
 
 export interface ItemDef {
   id: number;
@@ -104,6 +118,11 @@ export interface ItemDef {
    * 0.002 because it should be effectively impossible at any non-Omega mob.
    */
   dropFactor?: number;
+  /**
+   * Summons only. When true the hatched mob keeps the egg's own rarity instead
+   * of being mapped one tier down by `mapRarityToSummonRarity`.
+   */
+  noDowngrade?: boolean;
   desc: string;
 }
 
@@ -463,6 +482,45 @@ export function getDropRarityByItem(itemType: number, mobRarity: string): string
     }
   }
   return fallbackRarity;
+}
+
+// ------------------------------------------------------------------ summons
+
+/**
+ * Item id of the Clover petal. Clovers boost the DNA upgrade chance when a
+ * summon rolls its hatch rarity.
+ */
+export const CLOVER_ITEM = 11;
+
+/**
+ * Base chance that a summon backed by a valid DNA petal hatches one rarity
+ * tier above its mapped rarity.
+ */
+export const DNA_UPGRADE_BASE_CHANCE = 0.01;
+
+/** Extra DNA upgrade chance granted by a single Common clover. */
+export const CLOVER_DNA_BONUS_PER_TIER = 0.01;
+
+/**
+ * A summon's hatched mob is normally one rarity tier *below* the egg itself
+ * (Common eggs still hatch Common). Eggs flagged `noDowngrade` skip this.
+ */
+export function mapRarityToSummonRarity(rarity: number): number {
+  return Math.max(0, Math.min(MAX_RARITY, rarity) - 1);
+}
+
+/**
+ * Total DNA-upgrade chance contributed by clover petals. Each equipped clover
+ * adds `CLOVER_DNA_BONUS_PER_TIER` scaled by its rarity multiplier tier, so a
+ * higher-tier clover is worth meaningfully more luck.
+ */
+export function cloverDnaBonus(cloverRarities: number[]): number {
+  let bonus = 0;
+  for (const rarity of cloverRarities) {
+    const tier = Math.max(0, Math.min(MAX_RARITY, rarity));
+    bonus += CLOVER_DNA_BONUS_PER_TIER * (1 + tier);
+  }
+  return bonus;
 }
 
 /**

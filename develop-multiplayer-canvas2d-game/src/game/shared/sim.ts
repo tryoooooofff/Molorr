@@ -13,6 +13,11 @@ import {
   MAX_RARITY,
   MAX_WILD_DROP_RARITY,
   MOBS,
+  CLOVER_ITEM,
+  orbitsAsPetal,
+  DNA_UPGRADE_BASE_CHANCE,
+  cloverDnaBonus,
+  mapRarityToSummonRarity,
   ORACLE_COOLDOWN_HOURS,
   ORACLE_SKIP,
   oracleRequiredCount,
@@ -89,7 +94,6 @@ export class Player {
   bag: (Cell | null)[] = new Array(BAG_COUNT).fill(null);
   petals: PetalState[] = [];
   pets: Mob[][] = Array.from({ length: SLOT_COUNT }, () => []);
-  petTimer: number[] = new Array(SLOT_COUNT).fill(0);
   hurtCd = 0;
   dirty = true;
   statsDirty = true;
@@ -631,10 +635,13 @@ export class GameServer {
       const old = p.petals[i];
       const cell = p.slots[i];
       const def = cell ? ITEMS[cell.item] : null;
-      const maxHp = def && def.kind === "petal" ? def.health * rarityMult(cell!.rarity) : 1;
+      // Summons orbit as normal petals too — they only vanish while reloading
+      // right after they hatch a mob.
+      const orbits = !!def && orbitsAsPetal(def.kind);
+      const maxHp = orbits ? def!.health * rarityMult(cell!.rarity) : 1;
       petals.push({
         id: old?.id ?? this.nextId++,
-        alive: !!def && def.kind === "petal",
+        alive: orbits,
         hp: maxHp,
         maxHp,
         timer: 0,
@@ -650,7 +657,6 @@ export class GameServer {
           world.mobs = world.mobs.filter((m) => m !== pet);
         }
         p.pets[i] = [];
-        p.petTimer[i] = 0;
       }
     }
     p.petals = petals;
@@ -679,7 +685,9 @@ export class GameServer {
       const cell = p.slots[i];
       if (!cell) continue;
       const def = ITEMS[cell.item];
-      const alive = def.kind === "petal" ? p.petals[i]?.alive : true;
+      // Summons orbit like petals, so a reloading one stops granting its
+      // passive stats exactly like a broken petal does.
+      const alive = orbitsAsPetal(def.kind) ? p.petals[i]?.alive : true;
       if (!alive) continue;
       if (def.speed) speedBonus += def.speed * (1 + cell.rarity * 0.12);
       if (def.heal) heal += def.heal * rarityMult(cell.rarity) * 0.5;
@@ -729,17 +737,21 @@ export class GameServer {
     if (!p.alive) return;
     const world = this.worlds[p.mapId];
     let liveCount = 0;
-    for (let i = 0; i < SLOT_COUNT; i++) if (p.slots[i] && ITEMS[p.slots[i]!.item].kind === "petal") liveCount++;
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const cell = p.slots[i];
+      if (!cell) continue;
+      if (orbitsAsPetal(ITEMS[cell.item].kind)) liveCount++;
+    }
     let index = 0;
     for (let i = 0; i < SLOT_COUNT; i++) {
       const cell = p.slots[i];
       const st = p.petals[i];
       if (!cell || !st) continue;
       const def = ITEMS[cell.item];
-      if (def.kind === "summon") {
-        this.updatePet(p, i, cell.item, cell.rarity, dt);
-        continue;
-      }
+      const isSummon = def.kind === "summon";
+      if (!orbitsAsPetal(def.kind)) continue;
+      // Drop pets that died / left the map before deciding whether to hatch.
+      if (isSummon) this.cleanupPets(p, i);
       const slotAngle = p.baseAngle + (index / Math.max(1, liveCount)) * Math.PI * 2;
       index++;
       st.hitCd = Math.max(0, st.hitCd - dt);
@@ -750,6 +762,16 @@ export class GameServer {
           st.maxHp = def.health * rarityMult(cell.rarity);
           st.hp = st.maxHp;
         }
+        continue;
+      }
+      // A summon that is orbiting (i.e. finished reloading) immediately hatches
+      // the next missing pet, then goes back into reload. It only shows up as a
+      // normal petal while its pets are out fighting.
+      if (isSummon && (p.pets[i]?.length ?? 0) < getSummonCount(cell.item)) {
+        this.hatchPet(p, i, cell);
+        st.alive = false;
+        st.hp = 0;
+        st.timer = def.reload;
         continue;
       }
       const tx = p.x + Math.cos(slotAngle) * p.orbit;
@@ -781,42 +803,77 @@ export class GameServer {
     }
   }
 
-  private updatePet(p: Player, slot: number, item: number, rarity: number, dt: number) {
-    const def = ITEMS[item];
-    if (def.petMob === undefined) return;
-    let pets = p.pets[slot] || [];
-
-    // Filter alive and correct map pets, clean up others
+  /** Drops dead / off-map pets from a summon slot's live list. */
+  private cleanupPets(p: Player, slot: number) {
+    const pets = p.pets[slot] || [];
     const activePets: Mob[] = [];
     for (const pet of pets) {
       if (pet && pet.hp > 0 && pet.mapId === p.mapId) {
         activePets.push(pet);
       } else if (pet) {
         const w = this.worlds[pet.mapId];
-        if (w) {
-          w.mobs = w.mobs.filter((m) => m !== pet);
-        }
+        if (w) w.mobs = w.mobs.filter((m) => m !== pet);
       }
     }
     p.pets[slot] = activePets;
+  }
 
-    const maxCount = getSummonCount(item);
-    if (activePets.length < maxCount) {
-      p.petTimer[slot] -= dt;
-      if (p.petTimer[slot] <= 0) {
-        const m = new Mob(this.nextId++, def.petMob, p.mapId, p.x + 40, p.y + 40, rarity, true);
-        m.ownerId = p.id;
-        m.ownerSlot = slot;
-        m.maxHp = Math.round(m.maxHp * 1.4);
-        m.hp = m.maxHp;
-        m.damage *= 1.3;
-        m.speed = Math.max(70, m.speed * 1.5);
-        this.worlds[p.mapId].mobs.push(m);
-        activePets.push(m);
-        p.pets[slot] = activePets;
-        p.petTimer[slot] = def.reload;
-      }
+  /** Spawns one pet for `slot`. The caller puts the summon petal into reload. */
+  private hatchPet(p: Player, slot: number, cell: Cell) {
+    const def = ITEMS[cell.item];
+    if (def.petMob === undefined) return;
+    const rarity = this.getSummonRarityWithDna(p, cell);
+    const m = new Mob(this.nextId++, def.petMob, p.mapId, p.x + 40, p.y + 40, rarity, true);
+    m.ownerId = p.id;
+    m.ownerSlot = slot;
+    m.maxHp = Math.round(m.maxHp * 1.4);
+    m.hp = m.maxHp;
+    m.damage *= 1.3;
+    m.speed = Math.max(70, m.speed * 1.5);
+    this.worlds[p.mapId].mobs.push(m);
+    const pets = p.pets[slot] || [];
+    pets.push(m);
+    p.pets[slot] = pets;
+  }
+
+  /**
+   * Rarity of the mob a summon hatches.
+   *
+   * The egg's own rarity is normally mapped one tier down
+   * (`mapRarityToSummonRarity`); eggs flagged `noDowngrade` hatch at their own
+   * rarity. If the player has an equipped, unbroken DNA petal of at least the
+   * egg's rarity, the hatch gets a small chance (base 1%, plus the clover
+   * bonus) to come out one tier *above* the mapped rarity.
+   *
+   * No DNA item exists in ITEMS yet — the lookup below is intentionally kept so
+   * that adding one (`kind: "dna"`) enables the mechanic with no further work.
+   */
+  private getSummonRarityWithDna(p: Player, cell: Cell): number {
+    const def = ITEMS[cell.item];
+    if (!def || def.kind !== "summon") return 0;
+
+    const summonRarity = Math.max(0, Math.min(MAX_RARITY, cell.rarity));
+    const mappedRarity = def.noDowngrade ? summonRarity : mapRarityToSummonRarity(summonRarity);
+
+    // Look for an equipped, unbroken DNA petal at least as rare as the egg.
+    let hasValidDna = false;
+    const cloverRarities: number[] = [];
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const other = p.slots[i];
+      if (!other) continue;
+      const otherDef = ITEMS[other.item];
+      const st = p.petals[i];
+      const broken = st ? !st.alive : false;
+      if (broken) continue;
+      if (otherDef.kind === "dna" && other.rarity >= summonRarity) hasValidDna = true;
+      if (other.item === CLOVER_ITEM) cloverRarities.push(other.rarity);
     }
+
+    if (!hasValidDna) return mappedRarity;
+
+    const totalChance = Math.min(1, DNA_UPGRADE_BASE_CHANCE + cloverDnaBonus(cloverRarities));
+    if (Math.random() < totalChance && mappedRarity < MAX_RARITY) return mappedRarity + 1;
+    return mappedRarity;
   }
 
   private updateWorld(mapId: number, dt: number, players: Player[]) {
@@ -944,8 +1001,9 @@ export class GameServer {
         if (mob.friendly) {
           const owner = here.find((p) => p.id === mob.ownerId);
           if (owner && mob.ownerSlot >= 0) {
+            // The slot's summon petal re-hatches (and re-enters reload) on the
+            // next tick, as soon as it is done orbiting.
             owner.pets[mob.ownerSlot] = (owner.pets[mob.ownerSlot] || []).filter((m) => m !== mob);
-            owner.petTimer[mob.ownerSlot] = ITEMS[owner.slots[mob.ownerSlot]?.item ?? 0]?.reload ?? 4;
           }
           continue;
         }
@@ -1088,11 +1146,13 @@ export class GameServer {
         .u8(Math.round((op.hp / op.maxHp) * 255))
         .str(op.name);
       count++;
-      // petals belonging to this player
+      // petals belonging to this player (summons orbit as petals too, and are
+      // simply absent from the snapshot while reloading)
       for (let i = 0; i < SLOT_COUNT; i++) {
         const cell = op.slots[i];
         const st = op.petals[i];
-        if (!cell || !st || !st.alive || ITEMS[cell.item].kind !== "petal") continue;
+        if (!cell || !st || !st.alive) continue;
+        if (!orbitsAsPetal(ITEMS[cell.item].kind)) continue;
         body
           .u8(ENT.PETAL)
           .u16(st.id)

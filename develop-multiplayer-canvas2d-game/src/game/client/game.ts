@@ -18,6 +18,8 @@ import {
   SLOT_COUNT,
   Wall,
   craftChanceFor,
+  getSummonCount,
+  mapRarityToSummonRarity,
   oracleRequiredCount,
   xpForLevel,
 } from "../shared/defs";
@@ -2594,8 +2596,18 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
       text(ctx, `Damage ${(def.damage * mult).toFixed(0)}`, px + 12, py + 62, 13, "#ffffff", "left");
       text(ctx, `Health ${(def.health * mult).toFixed(0)}`, px + 12, py + 80, 13, "#ffffff", "left");
     } else if (def.kind === "summon") {
-      text(ctx, `Summons ${MOBS[def.petMob ?? 0].name}`, px + 12, py + 62, 13, "#8fffa8", "left");
-      text(ctx, `Respawn ${def.reload}s`, px + 12, py + 80, 13, "#ffffff", "left");
+      const count = getSummonCount(def.id);
+      const petRarity = def.noDowngrade ? cell.rarity : mapRarityToSummonRarity(cell.rarity);
+      text(
+        ctx,
+        `Summons ${count > 1 ? `${count}x ` : ""}${RARITIES[petRarity].name} ${MOBS[def.petMob ?? 0].name}`,
+        px + 12,
+        py + 62,
+        13,
+        "#8fffa8",
+        "left",
+      );
+      text(ctx, `Reload ${def.reload}s after each summon`, px + 12, py + 80, 13, "#ffffff", "left");
     } else {
       text(ctx, "Trade fodder — no combat use", px + 12, py + 62, 13, "#ffd54a", "left");
     }
