@@ -107,7 +107,7 @@ export const ITEMS: ItemDef[] = [
   // Generic "Egg" replaced by the specific Ladybug Egg; same id so the new
   // player's starting kit (`p.bag[0] = { item: 8, ... }`) keeps working.
   { id: 8, name: "Ladybug Egg", kind: "summon", color: "#fff1cf", outline: "#e0c48a", shape: "egg", radius: 10, damage: 4, health: 20, reload: 3.0, petMob: 0, dropFactor: 0.6, desc: "Hatches a friendly ladybug." },
-  { id: 9, name: "Stick", kind: "summon", color: "#a97442", outline: "#7d5228", shape: "stick", radius: 10, damage: 6, health: 22, reload: 4.0, petMob: 1, dropFactor: 0.6, desc: "Calls a loyal bee to fight." },
+  { id: 9, name: "Stick", kind: "summon", color: "#a97442", outline: "#7d5228", shape: "stick", radius: 10, damage: 6, health: 22, reload: 4.0, petMob: 11, dropFactor: 0.6, desc: "Summons a swirling sandstorm to fight for you." },
   { id: 10, name: "Coin", kind: "trinket", color: "#ffd54a", outline: "#c79a1e", shape: "circle", radius: 7, damage: 0, health: 0, reload: 0, dropFactor: 1.0, desc: "A shiny coin. Worth trading, worth nothing in a fight." },
   // ── Soldier Ant drops ────────────────────────────────────────────────────
   { id: 11, name: "Clover", kind: "petal", color: "#5fbf4a", outline: "#3d8a30", shape: "circle", radius: 8, damage: 6, health: 10, reload: 1.0, dropFactor: 0.55, desc: "A lucky four-leaf clover." },

@@ -838,77 +838,40 @@ export function drawMob(
     ctx: CanvasRenderingContext2D,
     headX: number,
     headY: number,
-    angleToPlayer: number,
-    scale = 1.0,
-    animationTimer = 0,
-    antennaColor: readonly number[] | string = [50, 50, 50],
-    antennaLen = 20,
-    antennaWidth = 2,
-    antennaWaveAmp = 0.2,
-    antennaWaveFreq = 10,
-    bendFactor = 0.9,
-    startOffset = 0,
-    endGap = -4,
+    scale: number,
+    animationTimer: number,
+    antennaColor: readonly number[] | string,
   ) => {
-    const len = antennaLen * scale;
-    const width = Math.max(1, antennaWidth * scale);
-    const startOffsetScaled = startOffset * scale;
-    const endGapScaled = endGap * scale;
-
-    const waveAngle = Math.sin(animationTimer * antennaWaveFreq) * (antennaWaveAmp * 0.3);
+    // Simple two-curve ant antennae: one quadratic curve to the right of the
+    // head, one mirrored to the left. A small `jawRotation` opens and closes
+    // them like mandibles; the `t` animation makes them wave gently.
+    const baseRotation = Math.PI / 5; // ~36° half-spread when idle
+    const swing = Math.sin(animationTimer * 8) * 0.08; // tiny breathing motion
+    const jawRotation = baseRotation + swing;
 
     ctx.strokeStyle = css(antennaColor);
-    ctx.lineWidth = width;
+    ctx.lineWidth = Math.max(1.5, 2.2 * scale);
     ctx.lineCap = "round";
 
-    const getPerpOffset = (ang: number, gap: number) => ({
-      x: -Math.sin(ang) * gap,
-      y: Math.cos(ang) * gap,
-    });
-
-    // 左触角
-    const leftBaseAngle = angleToPlayer - Math.PI / 6 + waveAngle;
-    const leftStartX = headX + Math.cos(leftBaseAngle) * startOffsetScaled;
-    const leftStartY = headY + Math.sin(leftBaseAngle) * startOffsetScaled;
-    const leftEndBaseX = headX + Math.cos(leftBaseAngle) * len;
-    const leftEndBaseY = headY + Math.sin(leftBaseAngle) * len;
-    const leftShrink = -Math.min(endGapScaled, len * 0.3);
-    const leftPerp = getPerpOffset(leftBaseAngle, leftShrink);
-    const leftEndX = leftEndBaseX + leftPerp.x;
-    const leftEndY = leftEndBaseY + leftPerp.y;
-    const leftMidAngle = leftBaseAngle - bendFactor;
-    const leftMidDist = len * 0.5;
-    const leftMidShrink = -Math.min(endGapScaled * 0.5, len * 0.15);
-    const leftMidPerp = getPerpOffset(leftMidAngle, leftMidShrink);
-    const leftMidX = headX + Math.cos(leftMidAngle) * leftMidDist + leftMidPerp.x;
-    const leftMidY = headY + Math.sin(leftMidAngle) * leftMidDist + leftMidPerp.y;
-
+    // 1. Right antenna (rotated +jawRotation around the head).
+    ctx.save();
+    ctx.translate(headX, headY);
+    ctx.rotate(jawRotation);
     ctx.beginPath();
-    ctx.moveTo(leftStartX, leftStartY);
-    ctx.quadraticCurveTo(leftMidX, leftMidY, leftEndX, leftEndY);
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(25 * scale, 15 * scale, 55 * scale, 8 * scale);
     ctx.stroke();
+    ctx.restore();
 
-    // 右触角
-    const rightBaseAngle = angleToPlayer + Math.PI / 6 - waveAngle;
-    const rightStartX = headX + Math.cos(rightBaseAngle) * startOffsetScaled;
-    const rightStartY = headY + Math.sin(rightBaseAngle) * startOffsetScaled;
-    const rightEndBaseX = headX + Math.cos(rightBaseAngle) * len;
-    const rightEndBaseY = headY + Math.sin(rightBaseAngle) * len;
-    const rightShrink = Math.min(endGapScaled, len * 0.3);
-    const rightPerp = getPerpOffset(rightBaseAngle, rightShrink);
-    const rightEndX = rightEndBaseX + rightPerp.x;
-    const rightEndY = rightEndBaseY + rightPerp.y;
-    const rightMidAngle = rightBaseAngle + bendFactor;
-    const rightMidDist = len * 0.5;
-    const rightMidShrink = Math.min(endGapScaled * 0.5, len * 0.15);
-    const rightMidPerp = getPerpOffset(rightMidAngle, rightMidShrink);
-    const rightMidX = headX + Math.cos(rightMidAngle) * rightMidDist + rightMidPerp.x;
-    const rightMidY = headY + Math.sin(rightMidAngle) * rightMidDist + rightMidPerp.y;
-
+    // 2. Left antenna (mirrored).
+    ctx.save();
+    ctx.translate(headX, headY);
+    ctx.rotate(-jawRotation);
     ctx.beginPath();
-    ctx.moveTo(rightStartX, rightStartY);
-    ctx.quadraticCurveTo(rightMidX, rightMidY, rightEndX, rightEndY);
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(25 * scale, -15 * scale, 55 * scale, -8 * scale);
     ctx.stroke();
+    ctx.restore();
   };
 
   const drawJellyfish = () => {
@@ -1202,7 +1165,7 @@ export function drawMob(
     const headY = Math.sin(angle) * headRadius * 0.3;
     ctx.save();
     ctx.translate(x, y);
-    drawAntAntenna(ctx, headX, headY, angle, scaledSize / 22, t, antennaColor, 20, 2, 0.2, 10, 0.9, 0, -4);
+    drawAntAntenna(ctx, headX, headY, scaledSize / 22, t, antennaColor);
     drawCircle(-Math.cos(angle) * bodyRadius * 0.8, -Math.sin(angle) * bodyRadius * 0.8, bodyRadius, bodyColor);
     drawCircle(-Math.cos(angle) * bodyRadius * 0.8, -Math.sin(angle) * bodyRadius * 0.8, bodyRadius * 0.7, innerBodyColor);
     drawCircle(headX, headY, headRadius, bodyColor);
