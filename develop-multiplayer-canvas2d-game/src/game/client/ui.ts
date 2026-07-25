@@ -33,6 +33,23 @@ export function getStingerPetalCount(rarity: number): number {
   return 1;
 }
 
+/**
+ * 获取物品的固定花瓣数量（覆盖稀有度规则）
+ * 返回 -1 表示使用稀有度规则
+ */
+export function getFixedPetalCount(itemId: number): number {
+  // Basic (id: 0) - 永远 1 个
+  if (itemId === 0) return 1;
+  // Pearl (id: 6) - 永远 1 个
+  if (itemId === 6) return 1;
+  // Bubble (id: 5) - 永远 1 个
+  if (itemId === 5) return 1;
+  // Sand (id: 4) - 永远 4 个
+  if (itemId === 4) return 4;
+  // 其他物品使用稀有度规则
+  return -1;
+}
+
 // ============================================
 // 基础绘图工具
 // ============================================
@@ -312,10 +329,17 @@ export function drawItemIcon(
   ctx.fillStyle = def.color;
   switch (def.shape) {
     case "circle": {
-      // Light - 根据稀有度决定花瓣数量
-      const count = getLightPetalCount(rarity);
-      const orbit = count > 1 ? size * 1.2 : 0;
-      const radius = count > 1 ? size * 0.5 : size;
+      // 检查是否有固定花瓣数量
+      const fixedCount = getFixedPetalCount(itemId);
+      let count: number;
+      if (fixedCount !== -1) {
+        count = fixedCount;
+      } else {
+        count = getLightPetalCount(rarity);
+      }
+      // 轨道半径减小，花瓣更紧凑 (从 1.2 改为 0.9)
+      const orbit = count > 1 ? size * 0.9 : 0;
+      const radius = count > 1 ? size * 0.55 : size;
       for (let i = 0; i < count; i++) {
         const a = (i * Math.PI / (count / 2)) - Math.PI / 2;
         const cx = orbit * Math.cos(a);
@@ -337,7 +361,7 @@ export function drawItemIcon(
       // Stinger - 根据稀有度决定三角形数量
       const count = getStingerPetalCount(rarity);
       const triSize = count > 1 ? size * 0.8 : size;
-      const orbit = count > 1 ? size * 1.1 : 0;
+      const orbit = count > 1 ? size * 0.9 : 0;
       for (let i = 0; i < count; i++) {
         const a = (i * 2 * Math.PI / count) - Math.PI / 2;
         const cx = orbit * Math.cos(a);
