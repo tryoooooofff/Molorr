@@ -2,6 +2,41 @@
 import { ITEMS, MOBS, RARITIES } from "../shared/defs";
 import type { Cell } from "../shared/sim";
 
+// ============================================
+// 根据稀有度获取花瓣数量
+// ============================================
+
+/**
+ * 根据稀有度获取 Light 花瓣数量
+ * rarity: 0=Common, 1=Unusual, 2=Rare, 3=Epic, 4=Legendary, 5=Mythic, 6=Ultra, 7=Super, 8=Omega/Eternal
+ */
+export function getLightPetalCount(rarity: number): number {
+  if (rarity <= 3) return 3;      // Common-Epic: 3
+  if (rarity === 4) return 4;     // Legendary: 4
+  if (rarity === 5) return 5;     // Mythic: 5
+  if (rarity === 6) return 6;     // Ultra: 6
+  if (rarity === 7) return 6;     // Super: 6
+  if (rarity >= 8) return 8;      // Omega-Eternal: 8
+  return 3;
+}
+
+/**
+ * 根据稀有度获取 Stinger 三角形数量
+ */
+export function getStingerPetalCount(rarity: number): number {
+  if (rarity <= 3) return 1;      // Common-Epic: 1
+  if (rarity === 4) return 3;     // Legendary: 3
+  if (rarity === 5) return 4;     // Mythic: 4
+  if (rarity === 6) return 5;     // Ultra: 5
+  if (rarity === 7) return 6;     // Super: 6
+  if (rarity >= 8) return 7;      // Omega-Eternal: 7
+  return 1;
+}
+
+// ============================================
+// 基础绘图工具
+// ============================================
+
 export function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
   const rad = Math.min(r, w / 2, h / 2);
   ctx.beginPath();
@@ -104,6 +139,10 @@ export function panel(ctx: CanvasRenderingContext2D, r: Rect, fill = "rgba(28,36
   ctx.stroke();
   ctx.restore();
 }
+
+// ============================================
+// UI 组件
+// ============================================
 
 /**
  * Flat white input box used by every searchable panel (inventory + crafting).
@@ -249,8 +288,20 @@ export function craftBurst(ctx: CanvasRenderingContext2D, x: number, y: number, 
   ctx.restore();
 }
 
+// ============================================
+// 核心绘制函数 - drawItemIcon (支持稀有度)
+// ============================================
+
 /** Draw the artwork of an item (petal or summon). */
-export function drawItemIcon(ctx: CanvasRenderingContext2D, itemId: number, x: number, y: number, size: number, spin = 0) {
+export function drawItemIcon(
+  ctx: CanvasRenderingContext2D,
+  itemId: number,
+  x: number,
+  y: number,
+  size: number,
+  spin = 0,
+  rarity: number = 0,
+) {
   const def = ITEMS[itemId];
   if (!def) return;
   ctx.save();
@@ -261,10 +312,19 @@ export function drawItemIcon(ctx: CanvasRenderingContext2D, itemId: number, x: n
   ctx.fillStyle = def.color;
   switch (def.shape) {
     case "circle": {
-      ctx.beginPath();
-      ctx.arc(0, 0, size, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
+      // Light - 根据稀有度决定花瓣数量
+      const count = getLightPetalCount(rarity);
+      const orbit = count > 1 ? size * 1.2 : 0;
+      const radius = count > 1 ? size * 0.5 : size;
+      for (let i = 0; i < count; i++) {
+        const a = (i * Math.PI / (count / 2)) - Math.PI / 2;
+        const cx = orbit * Math.cos(a);
+        const cy = orbit * Math.sin(a);
+        ctx.beginPath();
+        ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
       break;
     }
     case "square": {
@@ -274,13 +334,26 @@ export function drawItemIcon(ctx: CanvasRenderingContext2D, itemId: number, x: n
       break;
     }
     case "triangle": {
-      ctx.beginPath();
-      ctx.moveTo(0, -size * 1.2);
-      ctx.lineTo(size, size * 0.9);
-      ctx.lineTo(-size, size * 0.9);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
+      // Stinger - 根据稀有度决定三角形数量
+      const count = getStingerPetalCount(rarity);
+      const triSize = count > 1 ? size * 0.8 : size;
+      const orbit = count > 1 ? size * 1.1 : 0;
+      for (let i = 0; i < count; i++) {
+        const a = (i * 2 * Math.PI / count) - Math.PI / 2;
+        const cx = orbit * Math.cos(a);
+        const cy = orbit * Math.sin(a);
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(a);
+        ctx.beginPath();
+        ctx.moveTo(0, -triSize * 1.2);
+        ctx.lineTo(triSize, triSize * 0.9);
+        ctx.lineTo(-triSize, triSize * 0.9);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
       break;
     }
     case "leaf": {
@@ -334,6 +407,10 @@ export function drawItemIcon(ctx: CanvasRenderingContext2D, itemId: number, x: n
   ctx.restore();
 }
 
+// ============================================
+// 卡片绘制
+// ============================================
+
 /** Inventory / hotbar card. */
 export function drawCard(
   ctx: CanvasRenderingContext2D,
@@ -371,7 +448,8 @@ export function drawCard(
   ctx.strokeStyle = opts.hovered ? "#ffffff" : "rgba(0,0,0,0.35)";
   roundRect(ctx, r.x, r.y, r.w, r.h, 8);
   ctx.stroke();
-  drawItemIcon(ctx, cell.item, cx, cy - (opts.showName ? r.h * 0.08 : 0), Math.min(r.w, r.h) * 0.26);
+  // 传入 rarity
+  drawItemIcon(ctx, cell.item, cx, cy - (opts.showName ? r.h * 0.08 : 0), Math.min(r.w, r.h) * 0.26, 0, cell.rarity);
   if (opts.showName !== false) {
     text(ctx, ITEMS[cell.item].name, cx, r.y + r.h - 11, Math.max(9, r.h * 0.16), "#ffffff");
   }
@@ -380,6 +458,10 @@ export function drawCard(
   }
   ctx.restore();
 }
+
+// ============================================
+// 怪物绘制
+// ============================================
 
 /** Mobs are drawn procedurally, no images. */
 export function drawMob(
@@ -585,6 +667,10 @@ export function drawMob(
   }
 }
 
+// ============================================
+// 花朵绘制
+// ============================================
+
 export function drawFlower(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -615,6 +701,10 @@ export function drawFlower(
   ctx.restore();
 }
 
+// ============================================
+// 血条
+// ============================================
+
 export function healthBar(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -633,6 +723,10 @@ export function healthBar(
     ctx.fill();
   }
 }
+
+// ============================================
+// 缓动函数
+// ============================================
 
 export const ease = {
   outCubic: (t: number) => 1 - Math.pow(1 - t, 3),
