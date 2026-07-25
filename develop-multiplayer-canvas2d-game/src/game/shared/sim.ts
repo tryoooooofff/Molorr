@@ -16,6 +16,12 @@ import {
   CLOVER_ITEM,
   orbitsAsPetal,
   DNA_UPGRADE_BASE_CHANCE,
+  DROP_STACK_MAX,
+  DROP_STACK_RADIUS,
+  DROP_TRIM_COUNT,
+  MAGIC_CORE_ITEM,
+  MAGIC_ITEM_MAP,
+  MAX_DROPPED_CARDS,
   cloverDnaBonus,
   mapRarityToSummonRarity,
   ORACLE_COOLDOWN_HOURS,
@@ -29,6 +35,8 @@ import {
   Wall,
   enemyRarityMult,
   getDropRarityByItem,
+  getSpawnProtection,
+  getSummonBatch,
   getSummonCount,
   levelFromXp,
   rarityMult,
@@ -125,6 +133,8 @@ export class Mob {
   damage: number;
   speed: number;
   lastHitBy = 0;
+  /** Seconds of post-spawn invulnerability. Freshly hatched pets get a moment to get clear. */
+  spawnProtection = 0;
 
   constructor(id: number, type: number, mapId: number, x: number, y: number, rarity: number, friendly = false) {
     const def = MOBS[type];
@@ -155,6 +165,8 @@ export class Drop {
     public rarity: number,
     public ownerId = 0,
     public ttl = 45,
+    /** Cards merged into this one card. Nearby identical drops stack instead of littering. */
+    public count = 1,
   ) {}
 }
 
@@ -818,21 +830,45 @@ export class GameServer {
     p.pets[slot] = activePets;
   }
 
-  /** Spawns one pet for `slot`. The caller puts the summon petal into reload. */
+  /**
+   * Hatches this summon's batch of pets for `slot`. The caller puts the summon
+   * petal into reload afterwards.
+   *
+   * Batch size, cap and spawn protection all come from `SUMMON_CFG`, so a new
+   * egg is a data row rather than a new spawn method.
+   */
   private hatchPet(p: Player, slot: number, cell: Cell) {
     const def = ITEMS[cell.item];
     if (def.petMob === undefined) return;
-    const rarity = this.getSummonRarityWithDna(p, cell);
-    const m = new Mob(this.nextId++, def.petMob, p.mapId, p.x + 40, p.y + 40, rarity, true);
-    m.ownerId = p.id;
-    m.ownerSlot = slot;
-    m.maxHp = Math.round(m.maxHp * 1.4);
-    m.hp = m.maxHp;
-    m.damage *= 1.3;
-    m.speed = Math.max(70, m.speed * 1.5);
-    this.worlds[p.mapId].mobs.push(m);
+
     const pets = p.pets[slot] || [];
-    pets.push(m);
+    const room = getSummonCount(cell.item) - pets.length;
+    const toSpawn = Math.min(getSummonBatch(cell.item), Math.max(0, room));
+    if (toSpawn <= 0) return;
+
+    // One rarity roll per cycle, so a batch hatches as a matched set.
+    const rarity = this.getSummonRarityWithDna(p, cell);
+    const protection = getSpawnProtection(cell.item);
+    const map = MAPS[p.mapId];
+
+    for (let i = 0; i < toSpawn; i++) {
+      // Scatter around the player instead of always the same corner offset.
+      const angle = Math.random() * Math.PI * 2;
+      const dist = 40 + Math.random() * 30;
+      const x = clamp(p.x + Math.cos(angle) * dist, 40, map.width - 40);
+      const y = clamp(p.y + Math.sin(angle) * dist, 40, map.height - 40);
+
+      const m = new Mob(this.nextId++, def.petMob, p.mapId, x, y, rarity, true);
+      m.ownerId = p.id;
+      m.ownerSlot = slot;
+      m.maxHp = Math.round(m.maxHp * 1.4);
+      m.hp = m.maxHp;
+      m.damage *= 1.3;
+      m.speed = Math.max(70, m.speed * 1.5);
+      m.spawnProtection = protection;
+      this.worlds[p.mapId].mobs.push(m);
+      pets.push(m);
+    }
     p.pets[slot] = pets;
   }
 
@@ -884,6 +920,7 @@ export class GameServer {
     for (let i = world.mobs.length - 1; i >= 0; i--) {
       const mob = world.mobs[i];
       mob.hitCd = Math.max(0, mob.hitCd - dt);
+      mob.spawnProtection = Math.max(0, mob.spawnProtection - dt);
 
       // targeting
       let target: { x: number; y: number; id: number } | null = null;
@@ -963,9 +1000,12 @@ export class GameServer {
             // friendly pets fight hostiles
             const attacker = mob.friendly ? mob : other;
             const victim = mob.friendly ? other : mob;
-            victim.hp -= attacker.damage * 0.6;
-            victim.lastHitBy = attacker.ownerId;
-            attacker.hp -= victim.damage * 0.3;
+            // A just-hatched pet can't be chipped down before it gets moving.
+            if (victim.spawnProtection <= 0) {
+              victim.hp -= attacker.damage * 0.6;
+              victim.lastHitBy = attacker.ownerId;
+            }
+            if (attacker.spawnProtection <= 0) attacker.hp -= victim.damage * 0.3;
             mob.hitCd = 0.5;
             other.hitCd = 0.5;
           }
@@ -1024,7 +1064,38 @@ export class GameServer {
     if (hostiles < this.mobCapForMap(mapId) && Math.random() < 0.5) this.spawnMob(mapId);
   }
 
+  /**
+   * Extra whole copies of every drop this player earns, on top of the base one.
+   *
+   * Mirrors the reference `bonusMultiplier + membershipDropRate` maths. Neither
+   * a bonus/event system nor a shop membership exists here yet, so both terms
+   * are 0 and every kill drops a single copy — wiring either one up later only
+   * needs this method to return a bigger number.
+   */
+  private dropMultiplierFor(_p: Player | null): number {
+    const bonusMultiplier = 1; // event / bonus system multiplier
+    const membershipDropRate = 0; // shop membership bonus
+    return Math.max(1, Math.floor(bonusMultiplier + membershipDropRate));
+  }
+
+  /**
+   * Highest-rarity Magic Core equipped in the player's hotbar, or -1 if none.
+   * A Core lets magic item variants drop and caps (never raises) their rarity.
+   */
+  private magicCoreRarity(p: Player | null): number {
+    if (!p || MAGIC_CORE_ITEM < 0) return -1;
+    let best = -1;
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const cell = p.slots[i];
+      if (cell && cell.item === MAGIC_CORE_ITEM && cell.rarity > best) best = cell.rarity;
+    }
+    return best;
+  }
+
   private onMobKilled(mob: Mob, mapId: number) {
+    // Friendly pets never drop loot — they just despawn.
+    if (mob.friendly) return;
+
     const def = MOBS[mob.type];
     const map = MAPS[mapId];
     const world = this.worlds[mapId];
@@ -1040,6 +1111,15 @@ export class GameServer {
       this.pushEvent(killerClient!, EVT.KILL, mob.x, mob.y, mob.type);
     }
 
+    // Keep the ground from filling up with stale cards: once the map is at the
+    // cap the oldest few are swept away so fresh loot always has a home.
+    if (world.drops.length >= MAX_DROPPED_CARDS) {
+      world.drops.splice(0, DROP_TRIM_COUNT);
+    }
+
+    const dropCount = this.dropMultiplierFor(killer);
+    const coreRarity = this.magicCoreRarity(killer);
+
     // The map's rarity bias still nudges the mob's rarity a bit before we hand
     // it to the per-item drop table, matching the old "rarer map = better drops"
     // feel. We just don't bake the roll into a single number anymore.
@@ -1051,35 +1131,64 @@ export class GameServer {
     })();
     const mobRarityName = RARITIES[biasedRarityIndex].name;
 
+    const rarityIndexOf = (name: string) =>
+      Math.max(0, Math.min(MAX_RARITY, RARITIES.findIndex((r) => r.name === name)));
+
     // Roll every entry of the drop table first, then lay the winners out in a
     // small ring. Scattering them deterministically (rather than at random)
     // guarantees a 2- or 3-item drop never stacks into what looks like one card.
     const rolled: { item: number; rarity: number }[] = [];
     for (const drop of def.drops) {
-      if (Math.random() > drop.chance) continue;
-      const rarityName = getDropRarityByItem(drop.item, mobRarityName);
-      const rarityIndex = Math.max(
-        0,
-        Math.min(MAX_RARITY, RARITIES.findIndex((r) => r.name === rarityName)),
-      );
-      rolled.push({ item: drop.item, rarity: rarityIndex });
+      for (let i = 0; i < dropCount; i++) {
+        if (Math.random() > drop.chance) continue;
+
+        // Normal item: rolled straight off the per-item table, untouched by any
+        // Magic Core the player may be holding.
+        let item = drop.item;
+        let rarity = rarityIndexOf(getDropRarityByItem(drop.item, mobRarityName));
+
+        // Magic variant: only reachable while a Magic Core is equipped, and only
+        // when the variant's own roll beats Common. The Core then clamps the
+        // result down to its own rarity — it can never push a drop higher.
+        const magicItem = MAGIC_ITEM_MAP[drop.item];
+        if (magicItem !== undefined && coreRarity >= 0) {
+          const magicRarity = rarityIndexOf(getDropRarityByItem(magicItem, mobRarityName));
+          if (magicRarity > 0) {
+            item = magicItem;
+            rarity = Math.min(magicRarity, coreRarity);
+          }
+        }
+
+        rolled.push({ item, rarity });
+      }
     }
 
     const spread = rolled.length > 1 ? 26 : 0;
     const baseAngle = Math.random() * Math.PI * 2;
     rolled.forEach((roll, idx) => {
       const a = baseAngle + (idx / rolled.length) * Math.PI * 2;
-      const d = new Drop(
-        this.nextId++,
-        mapId,
-        mob.x + Math.cos(a) * spread + (Math.random() - 0.5) * 10,
-        mob.y + Math.sin(a) * spread + (Math.random() - 0.5) * 10,
-        roll.item,
-        roll.rarity,
-        killer ? killer.id : 0,
-      );
-      world.drops.push(d);
+      const dist = spread * (1 + Math.floor(idx / def.drops.length) * 0.5);
+      const x = mob.x + Math.cos(a) * dist + (Math.random() - 0.5) * 10;
+      const y = mob.y + Math.sin(a) * dist + (Math.random() - 0.5) * 10;
+      this.spawnDrop(mapId, roll.item, roll.rarity, x, y, killer ? killer.id : 0);
     });
+  }
+
+  /**
+   * Drops one card, merging it into a nearby identical card when possible so a
+   * busy field reads as a few stacked cards instead of a carpet of singles.
+   */
+  private spawnDrop(mapId: number, item: number, rarity: number, x: number, y: number, ownerId: number) {
+    const world = this.worlds[mapId];
+    for (const d of world.drops) {
+      if (d.item !== item || d.rarity !== rarity || d.count >= DROP_STACK_MAX) continue;
+      if (Math.hypot(d.x - x, d.y - y) > DROP_STACK_RADIUS) continue;
+      d.count++;
+      d.ttl = Math.max(d.ttl, 45); // refresh so a growing stack doesn't expire mid-fight
+      if (d.ownerId !== ownerId) d.ownerId = 0; // contested stack: nobody gets vacuum priority
+      return;
+    }
+    world.drops.push(new Drop(this.nextId++, mapId, x, y, item, rarity, ownerId));
   }
 
   private killPlayer(p: Player) {
@@ -1101,7 +1210,8 @@ export class GameServer {
       const d = world.drops[i];
       const dist = Math.hypot(d.x - p.x, d.y - p.y);
       if (dist < 46) {
-        if (this.addItem(p, d.item, d.rarity)) {
+        // A stacked card hands over every merged copy at once.
+        if (this.addItem(p, d.item, d.rarity, d.count)) {
           world.drops.splice(i, 1);
           const c = this.clientOf(p.id);
           // Spread the loot floaters out a little so a mob that dropped 2-3
@@ -1185,9 +1295,34 @@ export class GameServer {
     // drops
     for (const d of world.drops) {
       if (!inView(d.x, d.y)) continue;
-      body.u8(ENT.DROP).u16(d.id).u8(d.item).u8(d.rarity).i16(Math.round(d.x)).i16(Math.round(d.y)).u16(0).u8(12).u8(255);
+      // The drop entity has no health, so its hp byte carries the stack count.
+      body
+        .u8(ENT.DROP)
+        .u16(d.id)
+        .u8(d.item)
+        .u8(d.rarity)
+        .i16(Math.round(d.x))
+        .i16(Math.round(d.y))
+        .u16(0)
+        .u8(12)
+        .u8(Math.min(255, d.count));
       count++;
     }
+    // Per-slot reload progress (0..255, 255 = ready) trails the entity list so
+    // the hotbar can draw a live reload sweep on every petal and summon.
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const cell = p.slots[i];
+      const st = p.petals[i];
+      const def = cell ? ITEMS[cell.item] : null;
+      if (!cell || !st || !def || !orbitsAsPetal(def.kind) || st.alive) {
+        body.u8(255);
+        continue;
+      }
+      const total = def.reload > 0 ? def.reload : 1;
+      const progress = 1 - Math.max(0, Math.min(1, st.timer / total));
+      body.u8(Math.round(progress * 255));
+    }
+
     w.u16(count);
     const head = w.bytes();
     const tail = body.bytes();

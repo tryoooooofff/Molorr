@@ -844,7 +844,15 @@ export function drawCard(
   ctx: CanvasRenderingContext2D,
   r: Rect,
   cell: Cell | null,
-  opts: { hovered?: boolean; empty?: string; scale?: number; showName?: boolean; dim?: number } = {},
+  opts: {
+    hovered?: boolean;
+    empty?: string;
+    scale?: number;
+    showName?: boolean;
+    dim?: number;
+    /** 0..1 reload progress. 1 = fully reloaded/ready; below 1 draws a sweep overlay. */
+    reload?: number;
+  } = {},
 ) {
   const scale = opts.scale ?? 1;
   const cx = r.x + r.w / 2;
@@ -983,6 +991,25 @@ export function drawCard(
     ctx.fillStyle = "white";
     ctx.fillText(countStr, 0, 0);
 
+    ctx.restore();
+  }
+
+  // Reload overlay: darkens the card and drains a clockwise wedge as the petal
+  // (or summon) comes back. Mirrors the classic florr reload sweep.
+  const reload = opts.reload ?? 1;
+  if (reload < 1) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(r.x, r.y, r.w, r.h);
+    ctx.clip();
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    const sweep = Math.PI * 2 * (1 - Math.max(0, reload));
+    const radius = Math.hypot(r.w, r.h);
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, radius, -Math.PI / 2, -Math.PI / 2 + sweep);
+    ctx.closePath();
+    ctx.fill();
     ctx.restore();
   }
 

@@ -185,6 +185,8 @@ export class GameClient {
   private nextTradeAt = 0;
   private slots: (Cell | null)[] = emptyCells(SLOT_COUNT);
   private bag: (Cell | null)[] = emptyCells(BAG_COUNT);
+  /** Per-hotbar-slot reload progress (0..1, 1 = ready), streamed with each snapshot. */
+  private slotReload: number[] = new Array(SLOT_COUNT).fill(1);
   private floaters: Floater[] = [];
   private killFeed: { msg: string; life: number }[] = [];
 
@@ -524,6 +526,10 @@ export class GameClient {
           if (name) e.name = name;
           e.seen = this.time;
           if (e.spawn < 1) e.spawn = Math.min(1, e.spawn + 0.12);
+        }
+        // Trailing per-slot reload progress, one byte per hotbar slot.
+        if (r.remaining >= SLOT_COUNT) {
+          for (let i = 0; i < SLOT_COUNT; i++) this.slotReload[i] = r.u8() / 255;
         }
         break;
       }
@@ -2320,6 +2326,10 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     ctx.strokeRect(x, y, w, h);
     drawItemIcon(ctx, e.type, e.x, e.y + bob, 9, this.time * 2, e.team || 0);
     ctx.restore();
+    // Stacked drops (merged nearby copies) show how many cards they hand over.
+    // The server packs that count into the drop's otherwise-unused hp byte.
+    const stack = Math.round(e.hp * 255);
+    if (stack > 1) text(ctx, `x${stack}`, e.x, y + h - 3, 12, "#ffffff");
   }
 
   private drawMobEnt(e: Ent) {
@@ -2397,7 +2407,12 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     rects.forEach((r, i) => {
       const cell = this.slots[i];
       const hovered = hit(r, this.mx, this.my);
-      drawCard(ctx, r, cell, { hovered, empty: `${i + 1}`, dim: this.drag?.from === i ? 0.35 : 1 });
+      drawCard(ctx, r, cell, {
+        hovered,
+        empty: `${i + 1}`,
+        dim: this.drag?.from === i ? 0.35 : 1,
+        reload: this.slotReload[i] ?? 1,
+      });
       if (cell && ITEMS[cell.item].kind === "summon") {
         text(ctx, "SUMMON", r.x + r.w / 2, r.y + 12, 9, "#ffe763");
       }
@@ -2584,34 +2599,40 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
   private tooltip(cell: Cell, x: number, y: number) {
     const ctx = this.ctx;
     const def = ITEMS[cell.item];
-    const w = 208;
-    const h = 128;
+    const mult = RARITIES[cell.rarity].mult;
+
+    // Stat lines are collected first so the panel can size itself to fit.
+    const lines: { label: string; color: string }[] = [];
+    if (def.kind === "petal") {
+      lines.push({ label: `Damage ${(def.damage * mult).toFixed(0)}`, color: "#ffffff" });
+      lines.push({ label: `Health ${(def.health * mult).toFixed(0)}`, color: "#ffffff" });
+      if (def.heal) lines.push({ label: `Heal ${(def.heal * mult).toFixed(1)}/s`, color: "#8fffa8" });
+      if (def.speed) lines.push({ label: `Speed +${def.speed}%`, color: "#8fd8ff" });
+      lines.push({ label: `Reload ${def.reload.toFixed(1)}s`, color: "#ffd54a" });
+    } else if (def.kind === "summon") {
+      const count = getSummonCount(def.id);
+      const petRarity = def.noDowngrade ? cell.rarity : mapRarityToSummonRarity(cell.rarity);
+      const petName = MOBS[def.petMob ?? 0].name;
+      lines.push({
+        label: `Summons ${count > 1 ? `${count}x ` : ""}${RARITIES[petRarity].name} ${petName}`,
+        color: "#8fffa8",
+      });
+      lines.push({ label: `Health ${(def.health * mult).toFixed(0)}`, color: "#ffffff" });
+      lines.push({ label: `Reload ${def.reload.toFixed(1)}s per summon`, color: "#ffd54a" });
+    } else {
+      lines.push({ label: "Trade fodder — no combat use", color: "#ffd54a" });
+    }
+
+    const w = 216;
+    const lineH = 18;
+    const h = 52 + lines.length * lineH + 26;
     const px = Math.min(x, this.w - w - 8);
     const py = Math.max(8, Math.min(y - h, this.h - h - 8));
     panel(ctx, { x: px, y: py, w, h }, "rgba(12,18,26,0.95)");
     text(ctx, def.name, px + 12, py + 20, 17, RARITIES[cell.rarity].color, "left");
     text(ctx, RARITIES[cell.rarity].name, px + 12, py + 40, 13, RARITIES[cell.rarity].color, "left");
-    const mult = RARITIES[cell.rarity].mult;
-    if (def.kind === "petal") {
-      text(ctx, `Damage ${(def.damage * mult).toFixed(0)}`, px + 12, py + 62, 13, "#ffffff", "left");
-      text(ctx, `Health ${(def.health * mult).toFixed(0)}`, px + 12, py + 80, 13, "#ffffff", "left");
-    } else if (def.kind === "summon") {
-      const count = getSummonCount(def.id);
-      const petRarity = def.noDowngrade ? cell.rarity : mapRarityToSummonRarity(cell.rarity);
-      text(
-        ctx,
-        `Summons ${count > 1 ? `${count}x ` : ""}${RARITIES[petRarity].name} ${MOBS[def.petMob ?? 0].name}`,
-        px + 12,
-        py + 62,
-        13,
-        "#8fffa8",
-        "left",
-      );
-      text(ctx, `Reload ${def.reload}s after each summon`, px + 12, py + 80, 13, "#ffffff", "left");
-    } else {
-      text(ctx, "Trade fodder — no combat use", px + 12, py + 62, 13, "#ffd54a", "left");
-    }
-    text(ctx, def.desc, px + 12, py + 104, 12, "rgba(255,255,255,0.7)", "left");
+    lines.forEach((l, i) => text(ctx, l.label, px + 12, py + 62 + i * lineH, 13, l.color, "left"));
+    text(ctx, def.desc, px + 12, py + h - 10, 12, "rgba(255,255,255,0.7)", "left");
   }
 
   /**
