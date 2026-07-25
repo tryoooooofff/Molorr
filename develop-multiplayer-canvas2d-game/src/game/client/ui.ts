@@ -694,6 +694,110 @@ export function drawCard(
 // 怪物绘制
 // ============================================
 
+export function drawBee(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  animationTimer: number,
+  angleToPlayer: number,
+  level = 1,
+  viewScale = 1.0,
+  enemyObj: { isFriendly?: boolean } | null = null,
+) {
+  const scaledSize = size;
+  if (scaledSize <= 0) return;
+  const isFriendly = enemyObj?.isFriendly;
+  const totalScale = size / 100;
+  const bodyColor = isFriendly ? [255, 235, 120] : [255, 231, 99];
+  const darkBodyColor = isFriendly ? [230, 200, 80] : [211, 189, 7];
+
+  const colorToCss = (c: readonly number[] | string) => {
+    if (typeof c === "string") return c;
+    return `rgb(${c[0]},${c[1]},${c[2]})`;
+  };
+
+  context.save();
+  context.translate(x, y);
+  context.rotate(angleToPlayer);
+
+  const bw = scaledSize, bh = scaledSize * 0.70;
+  const bx = -bw / 2;
+  const lineWidth = Math.max(2, 7 * totalScale);
+  const cx = 0, cy = 0;
+  const a = bw / 2, b = bh / 2;
+  const swing = Math.sin(animationTimer * 5) * 0.52;
+  context.rotate(swing);
+
+  // --- 1. 绘制尾针 (放在最底层，稍微往右移一点点防止断层) ---
+  const sl = 10 * totalScale, sw2 = 8 * totalScale;
+  context.fillStyle = "#000";
+  context.beginPath();
+  context.moveTo(bx + 2, cy - sw2); // +2 像素确保没入身体内部
+  context.lineTo(bx + 2, cy + sw2);
+  context.lineTo(bx - sl, cy);
+  context.closePath();
+  context.fill();
+
+  // --- 2. 绘制身体基础填充 ---
+  context.fillStyle = colorToCss(bodyColor);
+  context.beginPath();
+  context.ellipse(cx, cy, a, b, 0, 0, Math.PI * 2);
+  context.fill();
+
+  // --- 3. 绘制条纹 (使用 clip 裁剪，确保线条绝不超出身体且无缝) ---
+  context.save();
+  context.beginPath();
+  context.ellipse(cx, cy, a, b, 0, 0, Math.PI * 2);
+  context.clip(); // 建立裁剪区域
+  context.fillStyle = "#333333";
+  const stripeW = Math.max(2, b * 0.4);
+  [0.65, 0, -0.65].forEach((off) => {
+    const sx2 = cx + a * off; // 直接画一个足够大的矩形，反正会被 clip 裁掉超出的部分
+    context.fillRect(sx2 - stripeW / 2, cy - b, stripeW * 1.2, b * 2);
+  });
+  context.restore();
+
+  // --- 4. 绘制身体描边 (放在填充和条纹之后，压住边缘缝隙) ---
+  context.strokeStyle = colorToCss(darkBodyColor);
+  context.lineWidth = lineWidth;
+  context.beginPath();
+  context.ellipse(cx, cy, a, b, 0, 0, Math.PI * 2);
+  context.stroke();
+
+  // --- 5. 绘制触角 (保持在描边之上) ---
+  const antennaLen = bw * 0.4;
+  const antennaBase = Math.max(3, 4 * totalScale);
+  const antennaTip = Math.max(4, 7 * totalScale);
+
+  const drawAntenna = (side: number, xOffsetMult: number, yOffset: number) => {
+    const sx = bx + bw * xOffsetMult;
+    const sy = cy + yOffset * totalScale;
+    const ctrlX = sx + antennaLen * 0.3;
+    const ctrlY = sy + side * antennaLen * -0.1;
+    const ex = sx + antennaLen * 0.8;
+    const ey = sy + side * antennaLen;
+
+    context.beginPath();
+    context.moveTo(sx, sy);
+    context.quadraticCurveTo(ctrlX, ctrlY, ex, ey);
+    context.strokeStyle = "#333333";
+    context.lineWidth = antennaBase;
+    context.lineCap = "round";
+    context.stroke();
+
+    context.beginPath();
+    context.arc(ex, ey, antennaTip, 0, Math.PI * 2); // 绝对居中
+    context.fillStyle = "#333333";
+    context.fill();
+  };
+
+  drawAntenna(-0.5, 0.95, -5);
+  drawAntenna(0.5, 0.95, 5);
+
+  context.restore();
+}
+
 /** Mobs are drawn procedurally, no images. */
 export function drawMob(
   ctx: CanvasRenderingContext2D,
@@ -1389,7 +1493,7 @@ export function drawMob(
 
   switch (type) {
     case 0: drawLadybug(); break;
-    case 1: drawHornet(); break;
+    case 1: drawBee(ctx, x, y, radius * 2, t, angle, level, 1.0, { isFriendly: friendly }); break;
     case 2: drawRock(); break;
     case 3: drawWorkerAnt(); break;
     case 4: drawCactus(); break;
