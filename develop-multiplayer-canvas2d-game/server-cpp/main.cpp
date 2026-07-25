@@ -99,7 +99,7 @@ class Simulation {
       body.i16v(static_cast<int16_t>(p.x));
       body.i16v(static_cast<int16_t>(p.y));
       body.u16v(0);
-      body.u8v(26);
+      body.u8v(static_cast<uint8_t>(26 * 0.7f)); // 70% player body size
       body.u8v(static_cast<uint8_t>(255.f * p.hp / p.maxHp));
       body.str(p.name);
       ++count;

@@ -157,7 +157,6 @@ export class GameClient {
   private focus: "name" | "user" | "pass" | null = null;
   private authStatus = "Playing as guest. Progress saved locally.";
   private account: { username: string; token: string } | null = null;
-  private menuTab: "play" | "account" = "play";
 
   // net
   private net: Transport | null = null;
@@ -422,7 +421,6 @@ export class GameClient {
       this.playerName = this.authUser;
       if (json.data) this.applySave(json.data);
       this.authStatus = `Signed in as ${this.authUser}. Progress syncs to the database.`;
-      this.menuTab = "play";
     } catch {
       this.authStatus = "Network error.";
     }
@@ -1384,21 +1382,21 @@ export class GameClient {
       this.typeInto(e.key);
       return;
     }
-    if (this.scene === "game" && this.bagOpen && this.bagSearchActive) {
+    if (this.bagOpen && this.bagSearchActive) {
       e.preventDefault();
       this.typeIntoBagSearch(e.key);
       return;
     }
-    if (this.scene === "game" && this.craftOpen && this.craftSearchActive) {
+    if (this.craftOpen && this.craftSearchActive) {
       e.preventDefault();
       this.typeIntoCraftSearch(e.key);
       return;
     }
     this.keys.add(e.code);
     if (e.code === "Space") e.preventDefault();
+    if (e.code === "KeyE" || e.code === "KeyI") this.toggleBag();
+    if (e.code === "KeyC") this.toggleCraft();
     if (this.scene === "game") {
-      if (e.code === "KeyE" || e.code === "KeyI") this.toggleBag();
-      if (e.code === "KeyC") this.toggleCraft();
       if (e.code === "Escape") this.gotoMenu();
     }
   };
@@ -1480,7 +1478,6 @@ export class GameClient {
   };
 
   private onWheel = (e: WheelEvent) => {
-    if (this.scene !== "game") return;
     // Pixel-accurate scrolling: translate the wheel delta directly into scrollY pixels
     // (with a little extra punch for coarse "line" deltas some browsers/mice report).
     const scrollAmount = (gridH: number) => {
@@ -1519,32 +1516,43 @@ export class GameClient {
     return { x, y, w: cw, h: ch };
   }
 
-  private menuClick(mx: number, my: number) {
+  /** Rects for the Inventory / PLAY / Craft row at the bottom of the main menu box. */
+  private menuActionRects() {
     const box = this.menuLayout();
-    const tabW = 120;
-    if (hit({ x: box.x + 16, y: box.y + 12, w: tabW, h: 34 }, mx, my)) this.menuTab = "play";
-    if (hit({ x: box.x + 16 + tabW + 8, y: box.y + 12, w: tabW, h: 34 }, mx, my)) this.menuTab = "account";
+    const playW = 220;
+    const sideW = 130;
+    const h = 52;
+    const gap = 14;
+    const totalW = sideW + gap + playW + gap + sideW;
+    const startX = box.x + box.w / 2 - totalW / 2;
+    const y = box.y + box.h - 74;
+    return {
+      inventory: { x: startX, y, w: sideW, h },
+      play: { x: startX + sideW + gap, y, w: playW, h },
+      craft: { x: startX + sideW + gap + playW + gap, y, w: sideW, h },
+    };
+  }
 
-    if (this.menuTab === "play") {
-      const nameRect = { x: box.x + 30, y: box.y + 76, w: box.w - 60, h: 42 };
-      this.focus = hit(nameRect, mx, my) ? "name" : null;
-      const cardW = (box.w - 80) / 3;
-      for (let i = 0; i < MAPS.length; i++) {
-        const r = { x: box.x + 30 + i * (cardW + 10), y: box.y + 140, w: cardW, h: 130 };
-        if (hit(r, mx, my)) this.selectedMap = i;
-      }
-      const playRect = { x: box.x + box.w / 2 - 110, y: box.y + box.h - 74, w: 220, h: 52 };
-      if (hit(playRect, mx, my)) this.startGame();
-    } else {
-      const userRect = { x: box.x + 30, y: box.y + 96, w: box.w - 60, h: 42 };
-      const passRect = { x: box.x + 30, y: box.y + 168, w: box.w - 60, h: 42 };
-      this.focus = hit(userRect, mx, my) ? "user" : hit(passRect, mx, my) ? "pass" : null;
-      const bw = (box.w - 80) / 3;
-      const by = box.y + 240;
-      if (hit({ x: box.x + 30, y: by, w: bw, h: 46 }, mx, my)) void this.auth("login");
-      if (hit({ x: box.x + 40 + bw, y: by, w: bw, h: 46 }, mx, my)) void this.auth("register");
-      if (hit({ x: box.x + 50 + bw * 2, y: by, w: bw, h: 46 }, mx, my)) this.logout();
+  private menuClick(mx: number, my: number) {
+    // Craft / Inventory panels can be opened right from the main menu — give
+    // them first crack at the click (same as in-game) so their own chrome
+    // (close button, search, scrollbar, drag targets) works here too.
+    if (this.craftAnim > 0.4 && this.handleCraftClick(mx, my)) return;
+    if (this.bagAnim > 0.4 && this.handleBagClick(mx, my)) return;
+
+    const box = this.menuLayout();
+    const nameRect = { x: box.x + 30, y: box.y + 20, w: box.w - 60, h: 42 };
+    this.focus = hit(nameRect, mx, my) ? "name" : null;
+    const cardW = (box.w - 80) / 3;
+    for (let i = 0; i < MAPS.length; i++) {
+      const r = { x: box.x + 30 + i * (cardW + 10), y: box.y + 84, w: cardW, h: 130 };
+      if (hit(r, mx, my)) this.selectedMap = i;
     }
+
+    const actions = this.menuActionRects();
+    if (hit(actions.play, mx, my)) this.startGame();
+    if (hit(actions.inventory, mx, my)) this.toggleBag();
+    if (hit(actions.craft, mx, my)) this.toggleCraft();
   }
 
   private startGame() {
@@ -1830,6 +1838,12 @@ export class GameClient {
   /** Fires the current mode's request if the selection satisfies its requirements. */
   private submitCraft() {
     if (this.craftPhase !== "none") return;
+    if (!this.net || !this.connected) {
+      this.craftMsg = "Press PLAY to enter the world before crafting.";
+      this.craftMsgLife = 2.2;
+      this.craftShake = 0.35;
+      return;
+    }
     const sel = this.craftSel;
     if (!sel) {
       this.craftMsg = "Pick a card first.";
@@ -2082,57 +2096,45 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
 
     const box = this.menuLayout();
     panel(ctx, box);
-    const tabW = 120;
-    button(ctx, { x: box.x + 16, y: box.y + 12, w: tabW, h: 34 }, "Play", this.menuTab === "play" ? "#3fae60" : "#41505f", false, 17);
-    button(ctx, { x: box.x + 16 + tabW + 8, y: box.y + 12, w: tabW, h: 34 }, "Account", this.menuTab === "account" ? "#3fae60" : "#41505f", false, 17);
 
-    if (this.menuTab === "play") {
-      this.field(box.x + 30, box.y + 76, box.w - 60, 42, this.playerName, "Flower name", this.focus === "name");
-      const cardW = (box.w - 80) / 3;
-      for (const map of MAPS) {
-        const r = { x: box.x + 30 + map.id * (cardW + 10), y: box.y + 140, w: cardW, h: 130 };
-        const selected = this.selectedMap === map.id;
-        const hovered = hit(r, this.mx, this.my);
-        ctx.save();
-        const pulse = selected ? 1 + Math.sin(t * 5) * 0.015 : 1;
-        ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
-        ctx.scale(pulse, pulse);
-        ctx.translate(-r.x - r.w / 2, -r.y - r.h / 2);
-        roundRect(ctx, r.x, r.y, r.w, r.h, 12);
-        ctx.fillStyle = map.bg;
-        ctx.fill();
-        ctx.lineWidth = selected ? 5 : 3;
-        ctx.strokeStyle = selected ? "#ffe763" : hovered ? "#ffffff" : "rgba(0,0,0,0.35)";
-        ctx.stroke();
-        ctx.save();
-        roundRect(ctx, r.x, r.y, r.w, r.h, 12);
-        ctx.clip();
-        ctx.fillStyle = map.grid;
-        for (let i = 0; i < 10; i++) ctx.fillRect(r.x + i * 26 - ((t * 12) % 26), r.y, 13, r.h);
-        const mobIds = map.mobs.slice(0, 3);
-        mobIds.forEach((mid, i) => {
-          drawMob(ctx, mid, r.x + r.w * (0.25 + i * 0.25), r.y + r.h * 0.55 + Math.sin(t * 2 + i) * 5, 15, Math.sin(t + i) * 0.6, t, false);
-        });
-        ctx.restore();
-        text(ctx, map.name, r.x + r.w / 2, r.y + 20, 20, "#ffffff");
-        text(ctx, `${map.mobs.length} species`, r.x + r.w / 2, r.y + r.h - 16, 13, "rgba(255,255,255,0.9)");
-        ctx.restore();
-      }
-      const playRect = { x: box.x + box.w / 2 - 110, y: box.y + box.h - 74, w: 220, h: 52 };
-      button(ctx, playRect, "PLAY", "#3fae60", hit(playRect, this.mx, this.my), 26);
-      text(ctx, this.authStatus, box.x + box.w / 2, box.y + box.h - 96, 13, "rgba(255,255,255,0.75)");
-    } else {
-      text(ctx, "Account (stored in PostgreSQL)", box.x + 30, box.y + 74, 16, "#ffe763", "left");
-      this.field(box.x + 30, box.y + 96, box.w - 60, 42, this.authUser, "username", this.focus === "user");
-      this.field(box.x + 30, box.y + 168, box.w - 60, 42, "*".repeat(this.authPass.length), "password", this.focus === "pass");
-      const bw = (box.w - 80) / 3;
-      const by = box.y + 240;
-      button(ctx, { x: box.x + 30, y: by, w: bw, h: 46 }, "Log in", "#3d8bd6", hit({ x: box.x + 30, y: by, w: bw, h: 46 }, this.mx, this.my), 18);
-      button(ctx, { x: box.x + 40 + bw, y: by, w: bw, h: 46 }, "Register", "#3fae60", hit({ x: box.x + 40 + bw, y: by, w: bw, h: 46 }, this.mx, this.my), 18);
-      button(ctx, { x: box.x + 50 + bw * 2, y: by, w: bw, h: 46 }, "Guest", "#7a5f45", hit({ x: box.x + 50 + bw * 2, y: by, w: bw, h: 46 }, this.mx, this.my), 18);
-      text(ctx, this.authStatus, box.x + box.w / 2, by + 76, 14, "rgba(255,255,255,0.85)");
-      text(ctx, "Guest progress lives in localStorage.", box.x + box.w / 2, by + 100, 13, "rgba(255,255,255,0.55)");
+    this.field(box.x + 30, box.y + 20, box.w - 60, 42, this.playerName, "Flower name", this.focus === "name");
+    const cardW = (box.w - 80) / 3;
+    for (const map of MAPS) {
+      const r = { x: box.x + 30 + map.id * (cardW + 10), y: box.y + 84, w: cardW, h: 130 };
+      const selected = this.selectedMap === map.id;
+      const hovered = hit(r, this.mx, this.my);
+      ctx.save();
+      const pulse = selected ? 1 + Math.sin(t * 5) * 0.015 : 1;
+      ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
+      ctx.scale(pulse, pulse);
+      ctx.translate(-r.x - r.w / 2, -r.y - r.h / 2);
+      roundRect(ctx, r.x, r.y, r.w, r.h, 12);
+      ctx.fillStyle = map.bg;
+      ctx.fill();
+      ctx.lineWidth = selected ? 5 : 3;
+      ctx.strokeStyle = selected ? "#ffe763" : hovered ? "#ffffff" : "rgba(0,0,0,0.35)";
+      ctx.stroke();
+      ctx.save();
+      roundRect(ctx, r.x, r.y, r.w, r.h, 12);
+      ctx.clip();
+      ctx.fillStyle = map.grid;
+      for (let i = 0; i < 10; i++) ctx.fillRect(r.x + i * 26 - ((t * 12) % 26), r.y, 13, r.h);
+      const mobIds = map.mobs.slice(0, 3);
+      mobIds.forEach((mid, i) => {
+        drawMob(ctx, mid, r.x + r.w * (0.25 + i * 0.25), r.y + r.h * 0.55 + Math.sin(t * 2 + i) * 5, 15, Math.sin(t + i) * 0.6, t, false);
+      });
+      ctx.restore();
+      text(ctx, map.name, r.x + r.w / 2, r.y + 20, 20, "#ffffff");
+      text(ctx, `${map.mobs.length} species`, r.x + r.w / 2, r.y + r.h - 16, 13, "rgba(255,255,255,0.9)");
+      ctx.restore();
     }
+
+    const actions = this.menuActionRects();
+    button(ctx, actions.inventory, "Inventory", "#3d8bd6", hit(actions.inventory, this.mx, this.my), 16);
+    button(ctx, actions.play, "PLAY", "#3fae60", hit(actions.play, this.mx, this.my), 26);
+    button(ctx, actions.craft, "Craft", "#9b59b6", hit(actions.craft, this.mx, this.my), 16);
+    text(ctx, this.authStatus, box.x + box.w / 2, box.y + box.h - 96, 13, "rgba(255,255,255,0.75)");
+
     text(
       ctx,
       "WASD / arrows move · hold left mouse to attack · right mouse to defend · E bag · C craft",
@@ -2141,6 +2143,18 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
       14,
       "rgba(255,255,255,0.7)",
     );
+
+    // Craft / Inventory panels can be opened right from the main menu, reusing
+    // the same in-game panel drawers.
+    this.renderBag();
+    this.renderCraft();
+    if (this.drag) {
+      const size = 60;
+      drawCard(ctx, { x: this.dragX - size / 2, y: this.dragY - size / 2, w: size, h: size }, this.drag.cell, {
+        hovered: true,
+        scale: 1.1,
+      });
+    }
   }
 
   private field(x: number, y: number, w: number, h: number, value: string, placeholder: string, focused: boolean) {
