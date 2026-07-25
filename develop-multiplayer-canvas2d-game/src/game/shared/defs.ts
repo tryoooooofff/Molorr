@@ -43,6 +43,8 @@ export const RARITIES: RarityDef[] = [
   { name: "Unique", color: rgb([50, 50, 50]), border: rgb([12, 12, 12]), mult: 30000, enemyMult: 3059830 },
 ];
 
+/** Number of identical cards consumed by one normal craft attempt. */
+export const CRAFT_CARD_COUNT = 5;
 /** Highest rarity index that can ever be stored/displayed. */
 export const MAX_RARITY = RARITIES.length - 1;
 /** Highest rarity reachable through the normal 5-combine crafting ladder (Eternal). Unique sits outside it. */

@@ -3,6 +3,7 @@
 
 import {
   BAG_COUNT,
+  CRAFT_CARD_COUNT,
   craftChanceFor,
   EMPTY_ITEM,
   ITEMS,
@@ -302,8 +303,8 @@ export class GameServer {
         if (!p) return;
         const item = r.u8();
         const rarity = r.u8();
-        const count = r.u16();
-        this.craft(c, p, item, rarity, count);
+        r.u16(); // legacy requested count; a normal craft is always one group of five
+        this.craft(c, p, item, rarity);
         break;
       }
       case C2S.ORACLE: {
@@ -443,46 +444,24 @@ export class GameServer {
     return have;
   }
 
-  /**
-   * Combine 5 cards of `item`+`rarity` into 1 of the next rarity. `requestedCount` lets the
-   * client batch multiple attempts at once (rounded down to a multiple of 5).
-   */
-  private craft(c: ClientState, p: Player, item: number, rarity: number, requestedCount: number) {
+  /** Combine exactly five cards of `item`+`rarity` in one craft attempt. */
+  private craft(c: ClientState, p: Player, item: number, rarity: number) {
     if (item >= ITEMS.length || ITEMS[item].kind === "trinket") return;
     const successRate = craftChanceFor(rarity);
     if (rarity >= MAX_CRAFT_RARITY || successRate === undefined) return;
+    if (this.countOf(p, item, rarity) < CRAFT_CARD_COUNT) return;
 
-    const have = this.countOf(p, item, rarity);
-    const want = requestedCount > 0 ? Math.min(requestedCount, have) : have;
-    const attempts = Math.floor(want / 5);
-    if (attempts <= 0) return;
+    const used = this.takeFromBag(p, item, rarity, CRAFT_CARD_COUNT);
+    if (used !== CRAFT_CARD_COUNT) return;
 
-    const used = this.takeFromBag(p, item, rarity, attempts * 5);
-    const actualAttempts = Math.floor(used / 5);
-    if (actualAttempts <= 0) return;
-
-    let successCount = 0;
-    let cardsLost = 0;
-    let cardsReturned = 0;
-    for (let i = 0; i < actualAttempts; i++) {
-      if (Math.random() < successRate) {
-        successCount++;
-      } else {
-        // Failing an attempt destroys 1-4 of the 5 cards; the rest are returned to the bag.
-        const destroyed = 1 + Math.floor(Math.random() * 4);
-        cardsLost += destroyed;
-        cardsReturned += 5 - destroyed;
-      }
-    }
-
-    if (successCount > 0) this.addItem(p, item, rarity + 1, successCount);
-    if (cardsReturned > 0) this.addItem(p, item, rarity, cardsReturned);
-
-    if (successCount > 0) {
-      this.pushEvent(c, EVT.CRAFT_OK, p.x, p.y, successCount, item, rarity + 1);
-    }
-    if (successCount < actualAttempts) {
-      this.pushEvent(c, EVT.CRAFT_FAIL, p.x, p.y, cardsLost, item, rarity);
+    if (Math.random() < successRate) {
+      this.addItem(p, item, rarity + 1);
+      this.pushEvent(c, EVT.CRAFT_OK, p.x, p.y, 1, item, rarity + 1);
+    } else {
+      // A failed attempt destroys 1-4 cards; the rest are returned to the bag.
+      const destroyed = 1 + Math.floor(Math.random() * (CRAFT_CARD_COUNT - 1));
+      this.addItem(p, item, rarity, CRAFT_CARD_COUNT - destroyed);
+      this.pushEvent(c, EVT.CRAFT_FAIL, p.x, p.y, destroyed, item, rarity);
     }
     p.dirty = true;
   }
