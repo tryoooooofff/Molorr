@@ -704,188 +704,660 @@ export function drawMob(
   angle: number,
   t: number,
   friendly: boolean,
+  rarity = 0,
+  level = 0,
 ) {
   const def = MOBS[type];
-  if (!def) return;
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(angle);
-  ctx.lineWidth = Math.max(2, radius * 0.14);
-  ctx.strokeStyle = def.outline;
-  const wob = Math.sin(t * 6 + x * 0.05) * radius * 0.05;
+  if (!def || radius <= 0) return;
 
-  const legs = (count: number, len: number) => {
+  const css = (rgb: readonly number[]) => {
+    if (rgb.length >= 4) return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${rgb[3]})`;
+    return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
+  };
+  const rarityName = RARITIES[Math.max(0, Math.min(RARITIES.length - 1, rarity))]?.name ?? "Common";
+
+  const drawCircle = (cx: number, cy: number, r: number, fill: readonly number[], stroke?: readonly number[]) => {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fillStyle = css(fill);
+    ctx.fill();
+    if (stroke) {
+      ctx.strokeStyle = css(stroke);
+      ctx.lineWidth = Math.max(1, r * 0.16);
+      ctx.stroke();
+    }
+  };
+
+  const drawAntAntenna = (
+    ox: number,
+    oy: number,
+    baseAngle: number,
+    scale: number,
+    color: readonly number[],
+    length = 12,
+    width = 2.5,
+    bendFactor = 0.2,
+    spread = 12,
+    animMult = 0.9,
+    tipX = 0,
+    tipY = -4,
+  ) => {
     ctx.save();
-    ctx.strokeStyle = "rgba(30,25,20,0.85)";
-    ctx.lineWidth = Math.max(1.5, radius * 0.1);
+    ctx.translate(ox, oy);
+    ctx.rotate(baseAngle);
+    ctx.strokeStyle = css(color);
+    ctx.lineWidth = Math.max(1, width * scale);
     ctx.lineCap = "round";
-    for (let i = 0; i < count; i++) {
-      const a = -0.9 + (i / (count - 1)) * 1.8;
-      const sw = Math.sin(t * 10 + i) * 0.18;
-      for (const side of [-1, 1]) {
-        ctx.beginPath();
-        ctx.moveTo(Math.cos(a) * radius * 0.5, side * radius * 0.4);
-        ctx.lineTo(Math.cos(a + sw) * radius * len, side * radius * (0.4 + len * 0.6));
-        ctx.stroke();
-      }
+    for (const side of [-1, 1]) {
+      const wave = Math.sin(t * 8 + side) * animMult * scale;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.quadraticCurveTo(
+        length * 0.45 * scale + wave,
+        side * spread * 0.7 * scale,
+        (length + tipX) * scale,
+        side * spread * scale + tipY * scale + side * bendFactor * length * scale,
+      );
+      ctx.stroke();
     }
     ctx.restore();
   };
 
-  switch (def.shape) {
-    case "bug": {
-      legs(3, 1.15);
-      ctx.fillStyle = def.color;
+  const drawJellyfish = () => {
+    const scaledSize = radius * 2.2;
+    const BODY = friendly ? "rgba(255,215,0,0.8)" : "rgba(200,215,235,0.8)";
+    const STROKE = friendly ? "rgba(255,235,120,0.85)" : "rgba(240,240,240,0.9)";
+    const TENT = friendly ? "rgba(200,160,0,0.9)" : "rgba(220,230,245,0.85)";
+    const scale = scaledSize / 180;
+    const R = 80 * scale;
+    ctx.save();
+    ctx.translate(x, y + Math.sin(t * 1.5) * 5);
+    ctx.rotate(angle + Math.PI);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = TENT;
+    ctx.lineWidth = 8 * scale;
+    for (let i = 0; i < 10; i++) {
+      const baseAngle = (i / 10) * Math.PI * 2;
+      const wave = Math.sin(t * 2 + i * 0.8) * 12 * scale;
+      const bx = Math.cos(baseAngle) * R;
+      const by = Math.sin(baseAngle) * R;
+      const ex = Math.cos(baseAngle) * (R + 55 * scale) + Math.sin(baseAngle) * wave;
+      const ey = Math.sin(baseAngle) * (R + 55 * scale) - Math.cos(baseAngle) * wave;
+      const cpx = Math.cos(baseAngle) * (R + 28 * scale) + Math.sin(baseAngle) * wave * 0.5;
+      const cpy = Math.sin(baseAngle) * (R + 28 * scale) - Math.cos(baseAngle) * wave * 0.5;
       ctx.beginPath();
-      ctx.ellipse(0, 0, radius, radius * 0.92 + wob, 0, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.moveTo(bx, by);
+      ctx.quadraticCurveTo(cpx, cpy, ex, ey);
       ctx.stroke();
-      ctx.fillStyle = "rgba(0,0,0,0.75)";
-      ctx.beginPath();
-      ctx.arc(radius * 0.55, 0, radius * 0.42, -Math.PI / 2, Math.PI / 2);
-      ctx.fill();
-      for (let i = 0; i < 4; i++) {
-        ctx.beginPath();
-        ctx.arc(-radius * 0.45 + (i % 2) * radius * 0.5, (i < 2 ? -1 : 1) * radius * 0.4, radius * 0.15, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      break;
     }
-    case "wasp": {
-      ctx.fillStyle = "rgba(255,255,255,0.55)";
-      const flap = Math.sin(t * 30) * radius * 0.35;
+    ctx.beginPath();
+    ctx.arc(0, 0, R, 0, Math.PI * 2);
+    ctx.fillStyle = BODY;
+    ctx.fill();
+    ctx.strokeStyle = STROKE;
+    ctx.lineWidth = 5 * scale;
+    ctx.stroke();
+    const pr = 13 * scale;
+    const pd = 20 * scale;
+    for (let i = 0; i < 4; i++) {
+      const a = (i / 4) * Math.PI * 2;
+      const cx2 = Math.cos(a) * pd;
+      const cy2 = Math.sin(a) * pd;
+      const gapCenter = a + Math.PI;
+      const gap = Math.PI * 0.18;
       ctx.beginPath();
-      ctx.ellipse(-radius * 0.1, -radius * 0.9 - flap, radius * 0.55, radius * 0.3, -0.4, 0, Math.PI * 2);
-      ctx.ellipse(-radius * 0.1, radius * 0.9 + flap, radius * 0.55, radius * 0.3, 0.4, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = def.color;
-      ctx.beginPath();
-      ctx.ellipse(0, 0, radius, radius * 0.8, 0, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.arc(cx2, cy2, pr, gapCenter + gap, gapCenter - gap, false);
       ctx.stroke();
-      ctx.fillStyle = "#1c1c1c";
-      for (let i = -1; i <= 1; i++) {
-        ctx.beginPath();
-        ctx.ellipse(i * radius * 0.42, 0, radius * 0.14, radius * 0.78, 0, 0, Math.PI * 2);
-        ctx.fill();
-      }
+    }
+    ctx.restore();
+  };
+
+  const drawHornet = () => {
+    const scale = (radius * 2) / 110;
+    const colors = friendly
+      ? { body: "#ffe667", stroke: "#d1bb54", dark: "#333333", stingerColor: "#333333" }
+      : { body: "#ffd363", stroke: "#d3ad46", dark: "#333333", stingerColor: "#333333" };
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle + Math.PI / 2);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    const bodyW = 55 * scale;
+    const bodyH = 75 * scale;
+    const strokeWidth = 12 * scale;
+    ctx.beginPath();
+    ctx.moveTo(-20 * scale, 50 * scale);
+    ctx.lineTo(0, 120 * scale);
+    ctx.lineTo(20 * scale, 50 * scale);
+    ctx.closePath();
+    ctx.fillStyle = colors.stingerColor;
+    ctx.strokeStyle = colors.stingerColor;
+    ctx.lineWidth = strokeWidth;
+    ctx.fill();
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.ellipse(0, 0, bodyW, bodyH, 0, 0, Math.PI * 2);
+    ctx.fillStyle = colors.body;
+    ctx.fill();
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(0, 0, bodyW, bodyH, 0, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.fillStyle = colors.dark;
+    const stripeWidth = 26 * scale;
+    ctx.fillRect(-bodyW * 1.5, -45 * scale, bodyW * 3, stripeWidth);
+    ctx.fillRect(-bodyW * 1.5, 5 * scale, bodyW * 3, stripeWidth);
+    ctx.fillRect(-bodyW * 1.5, 55 * scale, bodyW * 3, stripeWidth);
+    ctx.restore();
+    ctx.beginPath();
+    ctx.ellipse(0, 0, bodyW, bodyH, 0, 0, Math.PI * 2);
+    ctx.strokeStyle = colors.stroke;
+    ctx.lineWidth = strokeWidth;
+    ctx.stroke();
+    const drawAntenna = (isLeft: boolean) => {
+      ctx.save();
+      const side = isLeft ? -1 : 1;
+      ctx.translate(14 * scale * side, -62 * scale);
+      ctx.rotate((Math.PI / 6) * side);
       ctx.beginPath();
-      ctx.moveTo(-radius, -radius * 0.28);
-      ctx.lineTo(-radius * 1.6, 0);
-      ctx.lineTo(-radius, radius * 0.28);
+      ctx.moveTo(0, 0);
+      ctx.quadraticCurveTo(-8 * scale, -30 * scale, 0, -70 * scale);
+      ctx.quadraticCurveTo(8 * scale, -30 * scale, 0, 0);
+      ctx.fillStyle = colors.dark;
       ctx.fill();
-      break;
-    }
-    case "ant": {
-      legs(3, 1.1);
-      ctx.fillStyle = def.color;
-      for (const [ox, rr] of [[-radius * 0.75, 0.55], [0, 0.62], [radius * 0.8, 0.5]] as const) {
-        ctx.beginPath();
-        ctx.arc(ox, 0, radius * rr, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-      }
-      break;
-    }
-    case "rock": {
-      ctx.fillStyle = def.color;
+      ctx.strokeStyle = colors.dark;
+      ctx.lineWidth = 5 * scale;
+      ctx.stroke();
+      ctx.restore();
+    };
+    drawAntenna(true);
+    drawAntenna(false);
+    ctx.restore();
+  };
+
+  const drawBeetle = () => {
+    const vf = (radius * 2) / 75;
+    const BORDER = friendly ? [180, 130, 10] : [72, 38, 115];
+    const BODY = friendly ? [210, 165, 35] : [108, 62, 162];
+    const SPOT = friendly ? [140, 100, 10] : [62, 28, 100];
+    const SEAM = SPOT;
+    const BLACK = [20, 15, 25];
+    const hw = 27 * vf;
+    const hh = 40 * vf;
+    const topY = -hh;
+    const bodyPath = (w: number, h: number) => {
       ctx.beginPath();
-      for (let i = 0; i < 7; i++) {
-        const a = (i / 7) * Math.PI * 2;
-        const rr = radius * (0.82 + ((i * 37) % 10) / 40);
-        ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
-      }
+      const wideW = w * 1.2;
+      ctx.moveTo(0, -h);
+      ctx.bezierCurveTo(wideW, -h, wideW, -h * 0.2, wideW, 0);
+      ctx.bezierCurveTo(wideW, h * 0.2, wideW, h, 0, h);
+      ctx.bezierCurveTo(-wideW, h, -wideW, h * 0.2, -wideW, 0);
+      ctx.bezierCurveTo(-wideW, -h * 0.2, -wideW, -h, 0, -h);
+      ctx.closePath();
+    };
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle + Math.PI / 2);
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    const drawMandible = (side: number) => {
+      const mandibleHeight = hh * 1.5;
+      const p0x = side * 12 * vf;
+      const p0y = topY + 30 * vf;
+      const p1x = side * 15 * vf;
+      const p1y = -mandibleHeight * 0.55;
+      const p2x = side * -2 * vf;
+      const p2y = -mandibleHeight;
+      const cpX = side * 6 * vf;
+      const cpY = -mandibleHeight * 0.7;
+      const swing = Math.sin(t * 8) * 0.1 * side;
+      ctx.save();
+      ctx.translate(p0x, p0y);
+      ctx.rotate(swing);
+      ctx.fillStyle = css(BLACK);
+      ctx.strokeStyle = css(BLACK);
+      ctx.lineWidth = 2.5 * vf;
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(p1x, p1y);
+      ctx.lineTo(p2x, p2y);
+      ctx.quadraticCurveTo(cpX, cpY, 0, 0);
       ctx.closePath();
       ctx.fill();
       ctx.stroke();
-      break;
-    }
-    case "cactus": {
-      ctx.fillStyle = def.color;
-      roundRect(ctx, -radius * 0.45, -radius, radius * 0.9, radius * 2, radius * 0.4);
-      ctx.fill();
-      ctx.stroke();
-      roundRect(ctx, -radius, -radius * 0.5, radius * 0.6, radius * 0.9, radius * 0.3);
-      ctx.fill();
-      ctx.stroke();
-      roundRect(ctx, radius * 0.4, -radius * 0.3, radius * 0.6, radius * 0.9, radius * 0.3);
-      ctx.fill();
-      ctx.stroke();
-      ctx.strokeStyle = "rgba(255,255,255,0.6)";
-      ctx.lineWidth = Math.max(1, radius * 0.07);
-      for (let i = -2; i <= 2; i++) {
-        ctx.beginPath();
-        ctx.moveTo(-radius * 0.45, (i * radius) / 3);
-        ctx.lineTo(-radius * 0.7, (i * radius) / 3);
-        ctx.stroke();
-      }
-      break;
-    }
-    case "jelly": {
-      ctx.fillStyle = def.color;
-      ctx.globalAlpha = 0.85;
+      ctx.restore();
+    };
+    drawMandible(-1);
+    drawMandible(1);
+    ctx.fillStyle = css(BORDER);
+    bodyPath(hw, hh);
+    ctx.fill();
+    ctx.fillStyle = css(BODY);
+    bodyPath(hw - 3.5 * vf, hh - 3.5 * vf);
+    ctx.fill();
+    ctx.strokeStyle = css(SEAM);
+    ctx.lineWidth = 5 * vf;
+    ctx.beginPath();
+    ctx.moveTo(0, -hh + 10 * vf);
+    ctx.quadraticCurveTo(4 * vf, 0, 0, hh - 10 * vf);
+    ctx.stroke();
+    ctx.fillStyle = css(SPOT);
+    for (const [sx, sy, sr] of [[-11, -20, 5], [11, -20, 5], [-12, 0, 5], [12, 0, 5], [-11, 20, 5], [11, 20, 5]] as const) {
       ctx.beginPath();
-      ctx.arc(0, 0, radius, Math.PI, Math.PI * 2);
-      ctx.lineTo(radius, radius * 0.2);
-      ctx.quadraticCurveTo(0, radius * 0.55, -radius, radius * 0.2);
+      ctx.arc(sx * vf, sy * vf, sr * vf, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  };
+
+  const drawCrab = () => {
+    const bodyColor = friendly ? [255, 215, 0] : [230, 120, 80];
+    const bodyStrokeColor = friendly ? [200, 160, 0] : [180, 80, 50];
+    const limbColor = friendly ? [180, 140, 0] : [40, 40, 40];
+    const rarityMult = 1 + rarity * 0.15;
+    const legWidthMult = 0.65 + rarity * 0.15;
+    const clawSizeMult = 0.4 + rarity * 0.1;
+    const scale = (radius * 2) / 90;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle + Math.PI / 2);
+    const anim = t * 3;
+    const drawLeg = (baseX: number, baseY: number, dirX: number, dirY: number, phase: number) => {
+      const swing = Math.sin(anim * 2.6 + phase) * 0.25;
+      const cos = Math.cos(swing), sin = Math.sin(swing);
+      const lx = dirX * cos - dirY * sin;
+      const ly = dirX * sin + dirY * cos;
+      ctx.beginPath();
+      ctx.moveTo(baseX * scale, baseY * scale);
+      ctx.lineTo((baseX + lx * 0.7) * scale * rarityMult, (baseY + ly * 0.7) * scale * rarityMult);
+      ctx.strokeStyle = css(limbColor);
+      ctx.lineWidth = 4 * scale * legWidthMult;
+      ctx.lineCap = "round";
+      ctx.stroke();
+    };
+    [-1, 3, 7, 12].forEach((ly, i) => {
+      const len = [7, 6, 6, 3][i];
+      drawLeg(26, ly, len, (i - 1.5) * 3, i * 0.7);
+      drawLeg(-26, ly, -len, (i - 1.5) * 3, i * 0.7);
+    });
+    const drawClaw = (ox: number, oy: number, flip: number, clawAngle: number) => {
+      ctx.save();
+      ctx.translate(ox * scale, oy * scale);
+      ctx.scale(flip, 1);
+      ctx.rotate(clawAngle);
+      const s = scale * clawSizeMult;
+      const offsetX = -32 * s;
+      const offsetY = -50 * s;
+      ctx.fillStyle = "#2a2a2a";
+      ctx.strokeStyle = "#111111";
+      ctx.lineWidth = 3 * s;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.beginPath();
+      ctx.moveTo(offsetX, offsetY);
+      ctx.quadraticCurveTo(8 * s + offsetX, 25 * s + offsetY, 18 * s + offsetX, offsetY);
+      ctx.quadraticCurveTo(15 * s + offsetX, 22 * s + offsetY, 0, 0);
+      ctx.quadraticCurveTo(-18 * s + offsetX, 35 * s + offsetY, offsetX, offsetY);
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+    };
+    const visualScale = Math.sqrt(scale);
+    const clawAngle = Math.sin(anim * 2.5) * 0.2;
+    drawClaw(-visualScale * 25, -10, 1, clawAngle);
+    drawClaw(visualScale * 25, -10, -1, clawAngle);
+    const wFront = 160 * scale * rarityMult / 3;
+    const wBack = 132 * scale * rarityMult / 3;
+    const H = 95 * scale * rarityMult / 3;
+    const r = 30 * scale * rarityMult / 3;
+    const arc = 24 * scale * rarityMult / 3;
+    const xFL = -wFront / 2, xFR = wFront / 2, xBL = -wBack / 2, xBR = wBack / 2;
+    const yF = -H / 2, yB = H / 2;
+    ctx.fillStyle = css(bodyColor);
+    ctx.strokeStyle = css(bodyStrokeColor);
+    ctx.lineWidth = 5 * scale * rarityMult / 2;
+    ctx.beginPath();
+    ctx.moveTo(xBL, yB - r);
+    ctx.arcTo(xBL, yB, xBL + r, yB, r);
+    ctx.lineTo(xBR - r, yB);
+    ctx.arcTo(xBR, yB, xBR, yB - r, r);
+    ctx.lineTo(xFR, yF + r);
+    ctx.arcTo(xFR, yF, xFR - r, yF, r);
+    ctx.quadraticCurveTo(0, yF - arc, xFL + r, yF);
+    ctx.arcTo(xFL, yF, xFL, yF + r, r);
+    ctx.lineTo(xBL, yB - r);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(0,0,0,0.2)";
+    ctx.lineWidth = 4 * scale * rarityMult / 3;
+    [[-15, -20, -11, 8, -13, 22], [15, -20, 11, 8, 13, 22]].forEach(([ax, ay, bx, by, ex, ey]) => {
+      const s = scale * rarityMult / 3;
+      ctx.beginPath();
+      ctx.moveTo(ax * s, ay * s);
+      ctx.bezierCurveTo(bx * s, (by / 2) * s, bx * s, by * s, ex * s, ey * s);
+      ctx.stroke();
+    });
+    ctx.restore();
+  };
+
+  const drawWorkerAnt = () => {
+    const scaledSize = radius * 2;
+    const bodyColor = friendly ? [200, 160, 0] : [60, 60, 60];
+    const innerBodyColor = friendly ? [255, 215, 0] : [90, 90, 90];
+    const antennaColor = [51, 51, 51];
+    const headRadius = scaledSize / 2.2;
+    const bodyRadius = headRadius * 0.8;
+    const headX = Math.cos(angle) * headRadius * 0.3;
+    const headY = Math.sin(angle) * headRadius * 0.3;
+    ctx.save();
+    ctx.translate(x, y);
+    drawAntAntenna(headX, headY, angle, scaledSize / 22, antennaColor, 12, 3, 0.2, 12, 0.9, 0, -4);
+    drawCircle(-Math.cos(angle) * bodyRadius * 0.8, -Math.sin(angle) * bodyRadius * 0.8, bodyRadius, bodyColor);
+    drawCircle(-Math.cos(angle) * bodyRadius * 0.8, -Math.sin(angle) * bodyRadius * 0.8, bodyRadius * 0.7, innerBodyColor);
+    drawCircle(headX, headY, headRadius, bodyColor);
+    drawCircle(headX, headY, headRadius * 0.7, innerBodyColor);
+    ctx.restore();
+  };
+
+  const drawLadybug = () => {
+    const scaledSize = radius * 2;
+    const DEEP_RED = friendly ? "#B8860B" : "#8B0000";
+    const DARK_RED = friendly ? "#DAA520" : "#A52A2A";
+    const BLACK = "#000000";
+    const BODY_OUTER_RADIUS = scaledSize * 0.5;
+    const BODY_INNER_RADIUS = scaledSize * 0.44;
+    const spots = [
+      { xRatio: -0.36, yRatio: -0.28, radiusRatio: 0.18 },
+      { xRatio: 0.34, yRatio: -0.20, radiusRatio: 0.16 },
+      { xRatio: -0.22, yRatio: 0.20, radiusRatio: 0.15 },
+      { xRatio: 0.30, yRatio: 0.28, radiusRatio: 0.19 },
+      { xRatio: 0.02, yRatio: 0.00, radiusRatio: 0.13 },
+    ];
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle + Math.PI / 2);
+    ctx.beginPath();
+    ctx.arc(0, 0, BODY_OUTER_RADIUS, 0, Math.PI * 2);
+    ctx.fillStyle = DEEP_RED;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(0, 0, BODY_INNER_RADIUS, 0, Math.PI * 2);
+    ctx.fillStyle = DARK_RED;
+    ctx.fill();
+    ctx.fillStyle = BLACK;
+    for (const spot of spots) {
+      ctx.beginPath();
+      ctx.arc(BODY_INNER_RADIUS * spot.xRatio, BODY_INNER_RADIUS * spot.yRatio, BODY_INNER_RADIUS * spot.radiusRatio, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    const ellipseY = -BODY_INNER_RADIUS;
+    const ellipseRx = BODY_INNER_RADIUS * 0.5;
+    const ellipseRy = BODY_INNER_RADIUS * 0.3;
+    ctx.save();
+    ctx.beginPath();
+    ctx.ellipse(0, ellipseY, ellipseRx, ellipseRy, 0, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.beginPath();
+    ctx.ellipse(0, ellipseY, ellipseRx + 1, ellipseRy + 1, 0, 0, Math.PI * 2);
+    ctx.fillStyle = BLACK;
+    ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(0, -5 * (scaledSize / 90), BODY_INNER_RADIUS, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.beginPath();
+    ctx.ellipse(0, ellipseY, ellipseRx, ellipseRy, 0, 0, Math.PI * 2);
+    ctx.strokeStyle = DEEP_RED;
+    ctx.lineWidth = Math.max(1, 5 * (scaledSize / 90));
+    ctx.stroke();
+    ctx.restore();
+    ctx.restore();
+  };
+
+  const drawScorpion = () => {
+    const scale = (radius * 2) / 100;
+    const bodyColor = friendly ? "#FFD700" : "#b59646";
+    const darkColor = friendly ? "#B8860B" : "#8d7435";
+    const legColor = friendly ? "#DAA520" : "#5a3e1a";
+    const timestamp = t * 1000;
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle + Math.PI / 2);
+    ctx.save();
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = 10 * scale;
+    ctx.lineCap = "round";
+    const mouthY = -75 * scale;
+    const mouthSwing = Math.sin(timestamp * 0.008) * 0.1;
+    for (const side of [-1, 1]) {
+      const sx = side * 20 * scale;
+      const sy = mouthY + 8 * scale;
+      const a = -Math.PI / 2 - side * 0.25 - side * mouthSwing;
+      const mouthLen = 28 * scale;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy);
+      ctx.quadraticCurveTo(sx + Math.cos(a + side * 0.4) * mouthLen * 0.5, sy + Math.sin(a + side * 0.4) * mouthLen * 0.5, sx + Math.cos(a) * mouthLen, sy + Math.sin(a) * mouthLen);
+      ctx.stroke();
+    }
+    ctx.restore();
+    ctx.save();
+    ctx.strokeStyle = legColor;
+    ctx.lineWidth = 10 * scale;
+    ctx.lineCap = "round";
+    [-40, -10, 20, 60].forEach((ly, index) => {
+      const len = [5, 20, 30, 15][index] * scale;
+      const swing = Math.sin(timestamp * 0.010 + index * 1.5) * 5 * scale;
+      ctx.beginPath();
+      ctx.moveTo(-38 * scale, ly * scale);
+      ctx.lineTo(-45 * scale - len, ly * scale - scale + swing);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(40 * scale, ly * scale);
+      ctx.lineTo(45 * scale + len, ly * scale - scale + swing);
+      ctx.stroke();
+    });
+    ctx.restore();
+    const body = (cy: number, r: number, frontW: number, midW: number, tailW: number, frontY: number, midY: number, tailY: number) => {
+      ctx.save();
+      ctx.beginPath();
+      ctx.lineJoin = "round";
+      ctx.moveTo(-frontW + 10 * scale, cy + frontY);
+      ctx.arcTo(frontW, cy + frontY, midW, cy + midY, r);
+      ctx.arcTo(midW, cy + midY, tailW, cy + tailY, r);
+      ctx.arcTo(tailW, cy + tailY, -tailW, cy + tailY, r);
+      ctx.arcTo(-tailW, cy + tailY, -midW, cy + midY, r);
+      ctx.arcTo(-midW, cy + midY, -frontW, cy + frontY, r);
+      ctx.arcTo(-frontW, cy + frontY, frontW, cy + frontY, r);
+      ctx.closePath();
+      ctx.fillStyle = bodyColor;
+      ctx.fill();
+      ctx.strokeStyle = darkColor;
+      ctx.lineWidth = 10 * scale;
+      ctx.stroke();
+      ctx.restore();
+    };
+    body(0, 25 * scale, 20 * scale, 70 * scale, 40 * scale, -80 * scale, 20 * scale, 80 * scale);
+    ctx.save();
+    ctx.strokeStyle = darkColor;
+    ctx.lineWidth = 10 * scale;
+    ctx.lineCap = "round";
+    [-50, -25, 15, 30].forEach((yy, index) => {
+      ctx.beginPath();
+      const mid = index === 1 || index === 2;
+      ctx.arc(0, yy * scale - 20 * scale, (mid ? 44 : 30) * scale, (mid ? 0.2 : 0.3) * Math.PI, (mid ? 0.8 : 0.7) * Math.PI, false);
+      ctx.stroke();
+    });
+    ctx.restore();
+    const smallBodyY = 60 * scale;
+    body(smallBodyY, 15 * scale, 10 * scale, 30 * scale, 20 * scale, -30 * scale, 10 * scale, 30 * scale);
+    ctx.save();
+    const stingerSwing = Math.sin(timestamp * 0.015) * 3 * scale;
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = 15 * scale;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(stingerSwing * 0.2, 20 * scale);
+    ctx.lineTo(-15 * scale + stingerSwing * 0.5, 35 * scale);
+    ctx.lineTo(15 * scale + stingerSwing * 0.5, 35 * scale);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.fillStyle = "#2d2d2d";
+    ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.strokeStyle = darkColor;
+    ctx.lineWidth = 8 * scale;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.arc(0, smallBodyY - 12 * scale, 10 * scale, 0.2 * Math.PI, 0.8 * Math.PI, false);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(0, smallBodyY, 12 * scale, 0.2 * Math.PI, 0.8 * Math.PI, false);
+    ctx.stroke();
+    ctx.restore();
+    ctx.restore();
+  };
+
+  const drawCactus = () => {
+    const scaledSize = (radius * 2) / 1.4;
+    const cactusColor = friendly ? [255, 215, 0] : [100, 200, 100];
+    const outlineColor = friendly ? [200, 160, 0] : [50, 150, 50];
+    const spikeCount = 18 + level * 2;
+    const baseRadius = scaledSize * 0.6;
+    const spikeHeight = scaledSize * 0.2;
+    const currentBaseRadius = baseRadius + Math.sin(t * 3) * 1.5;
+    const angleStep = (Math.PI * 2) / spikeCount;
+    const spikeWidthFactor = 0.3;
+    const tips: { x: number; y: number; angle: number }[] = [];
+    ctx.save();
+    for (let i = 0; i < spikeCount; i++) {
+      const a = i * angleStep;
+      tips.push({ x: x + Math.cos(a) * (currentBaseRadius + spikeHeight), y: y + Math.sin(a) * (currentBaseRadius + spikeHeight), angle: a });
+    }
+    ctx.fillStyle = "rgb(30,30,30)";
+    const triHeight = scaledSize * 0.13;
+    const triWidth = scaledSize * 0.1;
+    const offsetDistance = spikeHeight * 0.6;
+    for (const pos of tips) {
+      ctx.save();
+      ctx.translate(pos.x - Math.cos(pos.angle) * offsetDistance, pos.y - Math.sin(pos.angle) * offsetDistance);
+      ctx.rotate(pos.angle);
+      ctx.beginPath();
+      ctx.moveTo(triHeight, 0);
+      ctx.lineTo(0, -triWidth / 2);
+      ctx.lineTo(0, triWidth / 2);
       ctx.closePath();
       ctx.fill();
-      ctx.stroke();
-      ctx.lineWidth = Math.max(1.5, radius * 0.12);
-      for (let i = -2; i <= 2; i++) {
-        ctx.beginPath();
-        ctx.moveTo((i * radius) / 3, radius * 0.3);
-        ctx.quadraticCurveTo(
-          (i * radius) / 3 + Math.sin(t * 4 + i) * radius * 0.3,
-          radius * 0.8,
-          (i * radius) / 3 + Math.sin(t * 4 + i) * radius * 0.5,
-          radius * 1.4,
-        );
-        ctx.stroke();
-      }
-      ctx.globalAlpha = 1;
-      break;
+      ctx.restore();
     }
-    case "crab": {
-      legs(3, 1.0);
-      ctx.fillStyle = def.color;
-      ctx.beginPath();
-      ctx.ellipse(0, 0, radius, radius * 0.78, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-      const claw = Math.sin(t * 5) * 0.2;
-      for (const side of [-1, 1]) {
-        ctx.save();
-        ctx.translate(radius * 0.85, side * radius * 0.7);
-        ctx.rotate(side * (0.4 + claw));
+    ctx.beginPath();
+    for (let i = 0; i < spikeCount; i++) {
+      const centerAngle = i * angleStep;
+      const leftAngle = centerAngle - angleStep * spikeWidthFactor;
+      const rightAngle = centerAngle + angleStep * spikeWidthFactor;
+      const nextLeftAngle = (i + 1) * angleStep - angleStep * spikeWidthFactor;
+      const leftX = x + Math.cos(leftAngle) * currentBaseRadius;
+      const leftY = y + Math.sin(leftAngle) * currentBaseRadius;
+      const rightX = x + Math.cos(rightAngle) * currentBaseRadius;
+      const rightY = y + Math.sin(rightAngle) * currentBaseRadius;
+      const nextLeftX = x + Math.cos(nextLeftAngle) * currentBaseRadius;
+      const nextLeftY = y + Math.sin(nextLeftAngle) * currentBaseRadius;
+      if (i === 0) ctx.moveTo(leftX, leftY);
+      ctx.quadraticCurveTo(tips[i].x, tips[i].y, rightX, rightY);
+      ctx.lineTo(nextLeftX, nextLeftY);
+    }
+    ctx.closePath();
+    ctx.fillStyle = css(cactusColor);
+    ctx.fill();
+    ctx.strokeStyle = css(outlineColor);
+    ctx.lineWidth = baseRadius * 0.1;
+    ctx.lineJoin = "round";
+    ctx.stroke();
+    ctx.restore();
+  };
+
+  const drawStarfish = () => {
+    const scales: Record<string, number> = { Common: 1.0, Unusual: 1.2, Rare: 1.4, Epic: 1.6, Legendary: 1.8, Mythic: 2.0, Ultra: 2.3, Super: 2.6, Omega: 3.0, Eternal: 3.5 };
+    const baseScale = radius * 2.2 * (scales[rarityName] || 1.0);
+    const lightColor = friendly ? "rgb(255, 235, 120)" : "rgb(255, 150, 80)";
+    const darkColor = friendly ? "rgb(255, 215, 0)" : "rgb(200, 90, 40)";
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(t * 5.2);
+    const outerR = baseScale * 0.45;
+    const innerR = baseScale * 0.14;
+    const coords: { x: number; y: number; angle: number; isTip: boolean }[] = [];
+    for (let i = 0; i < 10; i++) {
+      const a = (i * Math.PI) / 5 - Math.PI / 2;
+      const rr = i % 2 === 0 ? outerR : innerR;
+      coords.push({ x: Math.cos(a) * rr, y: Math.sin(a) * rr, angle: a, isTip: i % 2 === 0 });
+    }
+    ctx.beginPath();
+    ctx.moveTo((coords[0].x + coords[coords.length - 1].x) / 2, (coords[0].y + coords[coords.length - 1].y) / 2);
+    for (let i = 0; i < coords.length; i++) {
+      const curr = coords[i];
+      const next = coords[(i + 1) % coords.length];
+      const midX = (curr.x + next.x) / 2;
+      const midY = (curr.y + next.y) / 2;
+      ctx.quadraticCurveTo(curr.x, curr.y, midX, midY);
+    }
+    ctx.closePath();
+    ctx.fillStyle = lightColor;
+    ctx.fill();
+    ctx.lineJoin = "round";
+    ctx.lineWidth = 0.06 * baseScale;
+    ctx.strokeStyle = darkColor;
+    ctx.stroke();
+    ctx.fillStyle = "rgba(255, 255, 255, 0.28)";
+    for (let arm = 0; arm < 5; arm++) {
+      const a = (arm * 2 * Math.PI) / 5 - Math.PI / 2;
+      [{ dMult: 0.06, rMult: 0.035 }, { dMult: 0.15, rMult: 0.028 }, { dMult: 0.23, rMult: 0.022 }, { dMult: 0.31, rMult: 0.016 }].forEach((conf) => {
         ctx.beginPath();
-        ctx.ellipse(0, 0, radius * 0.42, radius * 0.28, 0, 0, Math.PI * 2);
+        ctx.arc(Math.cos(a) * baseScale * conf.dMult, Math.sin(a) * baseScale * conf.dMult, baseScale * conf.rMult, 0, Math.PI * 2);
         ctx.fill();
-        ctx.stroke();
-        ctx.restore();
-      }
-      ctx.fillStyle = "#101010";
-      ctx.beginPath();
-      ctx.arc(radius * 0.35, -radius * 0.25, radius * 0.12, 0, Math.PI * 2);
-      ctx.arc(radius * 0.35, radius * 0.25, radius * 0.12, 0, Math.PI * 2);
-      ctx.fill();
-      break;
+      });
     }
-    case "star": {
-      ctx.fillStyle = def.color;
-      ctx.beginPath();
-      for (let i = 0; i < 10; i++) {
-        const a = (i / 10) * Math.PI * 2;
-        const rr = i % 2 === 0 ? radius * 1.15 : radius * 0.48;
-        ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
-      }
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      break;
+    ctx.restore();
+  };
+
+  const drawRock = () => {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle);
+    ctx.fillStyle = def.color;
+    ctx.strokeStyle = def.outline;
+    ctx.lineWidth = Math.max(2, radius * 0.14);
+    ctx.beginPath();
+    for (let i = 0; i < 7; i++) {
+      const a = (i / 7) * Math.PI * 2;
+      const rr = radius * (0.82 + ((i * 37) % 10) / 40);
+      if (i === 0) ctx.moveTo(Math.cos(a) * rr, Math.sin(a) * rr);
+      else ctx.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
     }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
+  };
+
+  switch (type) {
+    case 0: drawLadybug(); break;
+    case 1: drawHornet(); break;
+    case 2: drawRock(); break;
+    case 3: drawWorkerAnt(); break;
+    case 4: drawCactus(); break;
+    case 5: drawScorpion(); break;
+    case 6: drawBeetle(); break;
+    case 7: drawJellyfish(); break;
+    case 8: drawCrab(); break;
+    case 9: drawStarfish(); break;
+    default: drawRock(); break;
   }
-  ctx.restore();
+
   if (friendly) {
     ctx.save();
     ctx.strokeStyle = "rgba(120,255,160,0.85)";
