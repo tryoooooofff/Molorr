@@ -28,6 +28,7 @@ import {
   craftBurst,
   craftPad,
   drawCard,
+  drawDefaultSkin,
   drawFlower,
   drawItemIcon,
   drawMob,
@@ -62,6 +63,13 @@ interface Ent {
   seen: number;
   hurt: number;
   spawn: number;
+  spreadMode?: boolean;
+  contractMode?: boolean;
+  mousePosition?: { x: number; y: number };
+  health?: number;
+  maxHealth?: number;
+  spreadAnim?: number;
+  contractAnim?: number;
 }
 
 interface Floater {
@@ -2191,7 +2199,35 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
 
   private drawPlayerEnt(e: Ent) {
     const ctx = this.ctx;
-    drawFlower(ctx, e.x, e.y, e.radius, e.team === TEAM.SELF, e.hurt);
+    const isSelf = e.team === TEAM.SELF;
+    let spreadMode = false;
+    let contractMode = false;
+    let mousePos: { x: number; y: number } | undefined = undefined;
+
+    if (isSelf) {
+      const uiBusy = this.drag !== null;
+      spreadMode = this.mouseDown && !uiBusy;
+      contractMode = this.rightDown || this.keys.has("Space");
+      const zoom = Math.min(1.15, Math.max(0.72, Math.min(this.w / 1280, this.h / 800) * 1.05));
+      const worldMouseX = (this.mx - this.w / 2) / zoom + this.camX;
+      const worldMouseY = (this.my - this.h / 2) / zoom + this.camY;
+      mousePos = { x: worldMouseX, y: worldMouseY };
+    } else {
+      spreadMode = (e.type & 1) !== 0;
+      contractMode = (e.type & 2) !== 0;
+      mousePos = {
+        x: e.x + Math.cos(e.angle) * 100,
+        y: e.y + Math.sin(e.angle) * 100,
+      };
+    }
+
+    e.spreadMode = spreadMode;
+    e.contractMode = contractMode;
+    e.mousePosition = mousePos;
+    e.health = isSelf ? this.hp : e.hp * 100;
+    e.maxHealth = isSelf ? this.maxHp : 100;
+
+    drawDefaultSkin(ctx, e.x, e.y, e.radius, e);
     text(ctx, e.name || "flower", e.x, e.y - e.radius - 16, 14, "#ffffff");
     healthBar(ctx, e.x - 32, e.y + e.radius + 8, 64, 9, e.hp);
   }

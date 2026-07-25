@@ -965,7 +965,7 @@ export class GameServer {
       body
         .u8(ENT.PLAYER)
         .u16(op.id)
-        .u8(0)
+        .u8(op.flags)
         .u8(op === p ? TEAM.SELF : TEAM.FRIENDLY)
         .i16(Math.round(op.x))
         .i16(Math.round(op.y))

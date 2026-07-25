@@ -710,7 +710,8 @@ export function drawMob(
   const def = MOBS[type];
   if (!def || radius <= 0) return;
 
-  const css = (rgb: readonly number[]) => {
+  const css = (rgb: readonly number[] | string) => {
+    if (typeof rgb === "string") return rgb;
     if (rgb.length >= 4) return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${rgb[3]})`;
     return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
   };
@@ -729,38 +730,80 @@ export function drawMob(
   };
 
   const drawAntAntenna = (
-    ox: number,
-    oy: number,
-    baseAngle: number,
-    scale: number,
-    color: readonly number[],
-    length = 12,
-    width = 2.5,
-    bendFactor = 0.2,
-    spread = 12,
-    animMult = 0.9,
-    tipX = 0,
-    tipY = -4,
+    ctx: CanvasRenderingContext2D,
+    headX: number,
+    headY: number,
+    angleToPlayer: number,
+    scale = 1.0,
+    animationTimer = 0,
+    antennaColor: readonly number[] | string = [50, 50, 50],
+    antennaLen = 20,
+    antennaWidth = 2,
+    antennaWaveAmp = 0.2,
+    antennaWaveFreq = 10,
+    bendFactor = 0.9,
+    startOffset = 0,
+    endGap = -4,
   ) => {
-    ctx.save();
-    ctx.translate(ox, oy);
-    ctx.rotate(baseAngle);
-    ctx.strokeStyle = css(color);
-    ctx.lineWidth = Math.max(1, width * scale);
+    const len = antennaLen * scale;
+    const width = Math.max(1, antennaWidth * scale);
+    const startOffsetScaled = startOffset * scale;
+    const endGapScaled = endGap * scale;
+
+    const waveAngle = Math.sin(animationTimer * antennaWaveFreq) * (antennaWaveAmp * 0.3);
+
+    ctx.strokeStyle = css(antennaColor);
+    ctx.lineWidth = width;
     ctx.lineCap = "round";
-    for (const side of [-1, 1]) {
-      const wave = Math.sin(t * 8 + side) * animMult * scale;
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.quadraticCurveTo(
-        length * 0.45 * scale + wave,
-        side * spread * 0.7 * scale,
-        (length + tipX) * scale,
-        side * spread * scale + tipY * scale + side * bendFactor * length * scale,
-      );
-      ctx.stroke();
-    }
-    ctx.restore();
+
+    const getPerpOffset = (ang: number, gap: number) => ({
+      x: -Math.sin(ang) * gap,
+      y: Math.cos(ang) * gap,
+    });
+
+    // 左触角
+    const leftBaseAngle = angleToPlayer - Math.PI / 6 + waveAngle;
+    const leftStartX = headX + Math.cos(leftBaseAngle) * startOffsetScaled;
+    const leftStartY = headY + Math.sin(leftBaseAngle) * startOffsetScaled;
+    const leftEndBaseX = headX + Math.cos(leftBaseAngle) * len;
+    const leftEndBaseY = headY + Math.sin(leftBaseAngle) * len;
+    const leftShrink = -Math.min(endGapScaled, len * 0.3);
+    const leftPerp = getPerpOffset(leftBaseAngle, leftShrink);
+    const leftEndX = leftEndBaseX + leftPerp.x;
+    const leftEndY = leftEndBaseY + leftPerp.y;
+    const leftMidAngle = leftBaseAngle - bendFactor;
+    const leftMidDist = len * 0.5;
+    const leftMidShrink = -Math.min(endGapScaled * 0.5, len * 0.15);
+    const leftMidPerp = getPerpOffset(leftMidAngle, leftMidShrink);
+    const leftMidX = headX + Math.cos(leftMidAngle) * leftMidDist + leftMidPerp.x;
+    const leftMidY = headY + Math.sin(leftMidAngle) * leftMidDist + leftMidPerp.y;
+
+    ctx.beginPath();
+    ctx.moveTo(leftStartX, leftStartY);
+    ctx.quadraticCurveTo(leftMidX, leftMidY, leftEndX, leftEndY);
+    ctx.stroke();
+
+    // 右触角
+    const rightBaseAngle = angleToPlayer + Math.PI / 6 - waveAngle;
+    const rightStartX = headX + Math.cos(rightBaseAngle) * startOffsetScaled;
+    const rightStartY = headY + Math.sin(rightBaseAngle) * startOffsetScaled;
+    const rightEndBaseX = headX + Math.cos(rightBaseAngle) * len;
+    const rightEndBaseY = headY + Math.sin(rightBaseAngle) * len;
+    const rightShrink = Math.min(endGapScaled, len * 0.3);
+    const rightPerp = getPerpOffset(rightBaseAngle, rightShrink);
+    const rightEndX = rightEndBaseX + rightPerp.x;
+    const rightEndY = rightEndBaseY + rightPerp.y;
+    const rightMidAngle = rightBaseAngle + bendFactor;
+    const rightMidDist = len * 0.5;
+    const rightMidShrink = Math.min(endGapScaled * 0.5, len * 0.15);
+    const rightMidPerp = getPerpOffset(rightMidAngle, rightMidShrink);
+    const rightMidX = headX + Math.cos(rightMidAngle) * rightMidDist + rightMidPerp.x;
+    const rightMidY = headY + Math.sin(rightMidAngle) * rightMidDist + rightMidPerp.y;
+
+    ctx.beginPath();
+    ctx.moveTo(rightStartX, rightStartY);
+    ctx.quadraticCurveTo(rightMidX, rightMidY, rightEndX, rightEndY);
+    ctx.stroke();
   };
 
   const drawJellyfish = () => {
@@ -1054,7 +1097,7 @@ export function drawMob(
     const headY = Math.sin(angle) * headRadius * 0.3;
     ctx.save();
     ctx.translate(x, y);
-    drawAntAntenna(headX, headY, angle, scaledSize / 22, antennaColor, 12, 3, 0.2, 12, 0.9, 0, -4);
+    drawAntAntenna(ctx, headX, headY, angle, scaledSize / 22, t, antennaColor, 20, 2, 0.2, 10, 0.9, 0, -4);
     drawCircle(-Math.cos(angle) * bodyRadius * 0.8, -Math.sin(angle) * bodyRadius * 0.8, bodyRadius, bodyColor);
     drawCircle(-Math.cos(angle) * bodyRadius * 0.8, -Math.sin(angle) * bodyRadius * 0.8, bodyRadius * 0.7, innerBodyColor);
     drawCircle(headX, headY, headRadius, bodyColor);
@@ -1371,8 +1414,242 @@ export function drawMob(
 }
 
 // ============================================
-// 花朵绘制
+// 花朵 / 默认皮肤绘制
 // ============================================
+
+export interface PlayerSkinState {
+  spreadMode?: boolean;
+  contractMode?: boolean;
+  mousePosition?: { x: number; y: number };
+  health?: number;
+  maxHealth?: number;
+  hurt?: number;
+  spreadAnim?: number;
+  contractAnim?: number;
+  angle?: number;
+}
+
+export function drawDefaultSkin(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  radius: number,
+  player: PlayerSkinState = {},
+) {
+  const WIDTH = ctx.canvas?.width || 800;
+  const HEIGHT = ctx.canvas?.height || 600;
+
+  // 1. 身体绘制
+  ctx.beginPath();
+  ctx.arc(x, y, radius + 5, 0, Math.PI * 2);
+  ctx.fillStyle = "#999900";
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.arc(x, y, radius + 2, 0, Math.PI * 2);
+  ctx.fillStyle = player.hurt && player.hurt > 0 ? "#ff9d9d" : "#F6E476";
+  ctx.fill();
+
+  // 2. 角度计算
+  let mouseX = player.mousePosition?.x;
+  let mouseY = player.mousePosition?.y;
+  if (mouseX === undefined || mouseY === undefined) {
+    if (player.angle !== undefined) {
+      mouseX = x + Math.cos(player.angle) * 100;
+      mouseY = y + Math.sin(player.angle) * 100;
+    } else {
+      mouseX = WIDTH / 2;
+      mouseY = HEIGHT / 2;
+    }
+  }
+  const angleToMouse = Math.atan2(mouseY - y, mouseX - x);
+
+  // 将缩放系数统一为 0.7
+  const s = 0.7;
+
+  // 模式平滑过度 (Animation / Smooth change)
+  const targetSpread = player.spreadMode ? 1 : 0;
+  const targetContract = player.contractMode ? 1 : 0;
+
+  if (player.spreadAnim === undefined) player.spreadAnim = targetSpread;
+  else player.spreadAnim += (targetSpread - player.spreadAnim) * 0.2;
+
+  if (player.contractAnim === undefined) player.contractAnim = targetContract;
+  else player.contractAnim += (targetContract - player.contractAnim) * 0.2;
+
+  if (Math.abs(targetSpread - player.spreadAnim) < 0.005) player.spreadAnim = targetSpread;
+  if (Math.abs(targetContract - player.contractAnim) < 0.005) player.contractAnim = targetContract;
+
+  const wSpread = player.spreadAnim;
+  const wContract = player.contractAnim;
+  const wNormal = Math.max(0, 1 - wSpread - wContract);
+
+  // 开启相对坐标系，将画布原点临时移到玩家中心 (x, y)
+  ctx.save();
+  ctx.translate(x, y);
+
+  // 根据模式渲染眼睛 (支持平滑淡入淡出及位置过渡)
+  const drawEyeSet = (mode: "spread" | "contract" | "normal", alpha: number) => {
+    if (alpha <= 0.001) return;
+    ctx.save();
+    ctx.globalAlpha = (ctx.globalAlpha || 1) * alpha;
+
+    if (mode === "spread") {
+      // ========== 【新模式】 Spread Mode 状态（愤怒） ==========
+      const customEyePositions = [
+        {
+          x: -7 * s * (wSpread + wContract) + -7 * (1 - wSpread - wContract),
+          y: -8 * s * (wSpread + wContract) + -5 * (1 - wSpread - wContract),
+          isLeft: true,
+        },
+        {
+          x: 7 * s * (wSpread + wContract) + 7 * (1 - wSpread - wContract),
+          y: -8 * s * (wSpread + wContract) + -5 * (1 - wSpread - wContract),
+          isLeft: false,
+        },
+      ];
+
+      customEyePositions.forEach((eye) => {
+        ctx.save();
+        ctx.translate(eye.x, eye.y);
+
+        if (eye.isLeft) {
+          ctx.scale(-1, 1);
+        }
+
+        ctx.fillStyle = "#000000";
+        ctx.strokeStyle = "#000000";
+        ctx.lineWidth = 2.0 * s;
+        ctx.lineJoin = "round";
+
+        ctx.beginPath();
+        ctx.moveTo(0 * s, 0 * s);
+        ctx.bezierCurveTo(1 * s, 16 * s, 5 * s, 16 * s, 6 * s, -4 * s);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.clip();
+
+        // 动起来的内部圆（瞳孔）
+        const directionMultiplier = eye.isLeft ? -1 : 1;
+        const pOffX = Math.cos(angleToMouse) * 2 * s * directionMultiplier;
+        const pOffY = Math.sin(angleToMouse) * 3 * s;
+
+        ctx.beginPath();
+        ctx.arc(3 * s + pOffX, 4 * s + pOffY, 3.5 * s, 0, Math.PI * 2);
+        ctx.fillStyle = "#ffffff";
+        ctx.fill();
+        ctx.restore();
+      });
+    } else if (mode === "contract") {
+      // ========== 【新模式】 Contract Mode 状态（悲伤） ==========
+      const customEyePositions = [
+        {
+          x: -7 * s * (wSpread + wContract) + -7 * (1 - wSpread - wContract),
+          y: -8 * s * (wSpread + wContract) + -5 * (1 - wSpread - wContract),
+          isLeft: true,
+        },
+        {
+          x: 7 * s * (wSpread + wContract) + 7 * (1 - wSpread - wContract),
+          y: -8 * s * (wSpread + wContract) + -5 * (1 - wSpread - wContract),
+          isLeft: false,
+        },
+      ];
+
+      customEyePositions.forEach((eye) => {
+        ctx.save();
+        ctx.translate(eye.x, eye.y);
+
+        if (eye.isLeft) {
+          ctx.scale(-1, 1);
+        }
+
+        ctx.fillStyle = "#000000";
+        ctx.strokeStyle = "#000000";
+        ctx.lineWidth = 2 * s;
+        ctx.lineJoin = "round";
+
+        ctx.beginPath();
+        ctx.moveTo(0, -4 * s);
+        ctx.bezierCurveTo(0.2 * s, 16 * s, 5 * s, 16 * s, 6 * s, 0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.clip();
+
+        // 动起来的内部圆
+        const directionMultiplier = eye.isLeft ? -1 : 1;
+        const pOffX = Math.cos(angleToMouse) * 2 * s * directionMultiplier;
+        const pOffY = Math.sin(angleToMouse) * 3 * s;
+
+        ctx.beginPath();
+        ctx.arc(3 * s + pOffX, 4 * s + pOffY, 3.5 * s, 0, Math.PI * 2);
+        ctx.fillStyle = "#ffffff";
+        ctx.fill();
+        ctx.restore();
+      });
+    } else {
+      // ========== 【常规模式】 还原你原本的普通眼睛 ==========
+      const eyePositions = [
+        {
+          x: -7 * (1 - wSpread - wContract) + -7 * s * (wSpread + wContract),
+          y: -5 * (1 - wSpread - wContract) + -8 * s * (wSpread + wContract),
+        },
+        {
+          x: 7 * (1 - wSpread - wContract) + 7 * s * (wSpread + wContract),
+          y: -5 * (1 - wSpread - wContract) + -8 * s * (wSpread + wContract),
+        },
+      ];
+
+      eyePositions.forEach((eye) => {
+        ctx.save();
+
+        // 绘制黑色眼眶
+        ctx.beginPath();
+        ctx.ellipse(eye.x, eye.y, 2.2, 6, 0, 0, Math.PI * 2);
+        ctx.fillStyle = "#000000";
+        ctx.fill();
+
+        // 设置裁剪区域
+        ctx.beginPath();
+        ctx.ellipse(eye.x, eye.y, 2.2, 6, 0, 0, Math.PI * 2);
+        ctx.clip();
+
+        // 瞳孔
+        ctx.fillStyle = "#FFFFFF";
+        const pOffX = Math.cos(angleToMouse) * 2;
+        const pOffY = Math.sin(angleToMouse) * 2;
+        ctx.beginPath();
+        ctx.arc(eye.x + pOffX, eye.y + pOffY, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.restore();
+      });
+    }
+
+    ctx.restore();
+  };
+
+  if (wNormal > 0) drawEyeSet("normal", wNormal);
+  if (wSpread > 0) drawEyeSet("spread", wSpread);
+  if (wContract > 0) drawEyeSet("contract", wContract);
+
+  // 恢复画布到之前的状态，确保下面的嘴巴绝对坐标正常工作
+  ctx.restore();
+
+  // 3. 嘴巴（带有平滑位置与弧度过渡）
+  ctx.strokeStyle = "#000000";
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+
+  const mouthY = y + (5 * (1 - wSpread) + 12 * wSpread);
+  const startAngle = (0.2 * (1 - wSpread) + 1.2 * wSpread) * Math.PI;
+  const endAngle = (0.8 * (1 - wSpread) + 1.8 * wSpread) * Math.PI;
+
+  ctx.arc(x, mouthY, 6, startAngle, endAngle);
+  ctx.stroke();
+}
 
 export function drawFlower(
   ctx: CanvasRenderingContext2D,
@@ -1382,26 +1659,11 @@ export function drawFlower(
   self: boolean,
   hurt: number,
 ) {
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.beginPath();
-  ctx.arc(0, 0, radius, 0, Math.PI * 2);
-  ctx.fillStyle = hurt > 0 ? "#ff9d9d" : self ? "#ffe763" : "#ffd54a";
-  ctx.fill();
-  ctx.lineWidth = radius * 0.16;
-  ctx.strokeStyle = "#d6ab27";
-  ctx.stroke();
-  ctx.fillStyle = "#1d1d1d";
-  ctx.beginPath();
-  ctx.ellipse(-radius * 0.32, -radius * 0.12, radius * 0.13, radius * 0.24, 0, 0, Math.PI * 2);
-  ctx.ellipse(radius * 0.32, -radius * 0.12, radius * 0.13, radius * 0.24, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.lineWidth = radius * 0.1;
-  ctx.strokeStyle = "#1d1d1d";
-  ctx.beginPath();
-  ctx.arc(0, radius * 0.18, radius * 0.4, 0.15 * Math.PI, 0.85 * Math.PI);
-  ctx.stroke();
-  ctx.restore();
+  drawDefaultSkin(ctx, x, y, radius, {
+    spreadMode: false,
+    contractMode: false,
+    hurt,
+  });
 }
 
 // ============================================
