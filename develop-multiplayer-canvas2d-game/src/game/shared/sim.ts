@@ -23,6 +23,7 @@ import {
   Wall,
   enemyRarityMult,
   getDropRarityByItem,
+  getSummonCount,
   levelFromXp,
   rarityMult,
 } from "./defs";
@@ -83,7 +84,7 @@ export class Player {
   slots: (Cell | null)[] = new Array(SLOT_COUNT).fill(null);
   bag: (Cell | null)[] = new Array(BAG_COUNT).fill(null);
   petals: PetalState[] = [];
-  pets: (Mob | null)[] = new Array(SLOT_COUNT).fill(null);
+  pets: Mob[][] = Array.from({ length: SLOT_COUNT }, () => []);
   petTimer: number[] = new Array(SLOT_COUNT).fill(0);
   hurtCd = 0;
   dirty = true;
@@ -571,11 +572,13 @@ export class GameServer {
         hitCd: 0,
       });
       // remove pet if slot no longer holds the same summon
-      const pet = p.pets[i];
-      if (pet && (!def || def.kind !== "summon" || ITEMS[cell!.item].petMob !== pet.type)) {
-        const world = this.worlds[pet.mapId];
-        world.mobs = world.mobs.filter((m) => m !== pet);
-        p.pets[i] = null;
+      const pets = p.pets[i] || [];
+      if (pets.length > 0 && (!def || def.kind !== "summon" || ITEMS[cell!.item].petMob !== pets[0].type)) {
+        for (const pet of pets) {
+          const world = this.worlds[pet.mapId];
+          world.mobs = world.mobs.filter((m) => m !== pet);
+        }
+        p.pets[i] = [];
         p.petTimer[i] = 0;
       }
     }
@@ -710,15 +713,24 @@ export class GameServer {
   private updatePet(p: Player, slot: number, item: number, rarity: number, dt: number) {
     const def = ITEMS[item];
     if (def.petMob === undefined) return;
-    let pet = p.pets[slot];
-    if (pet && (pet.hp <= 0 || pet.mapId !== p.mapId)) {
-      const w = this.worlds[pet.mapId];
-      w.mobs = w.mobs.filter((m) => m !== pet);
-      p.pets[slot] = null;
-      p.petTimer[slot] = def.reload;
-      pet = null;
+    let pets = p.pets[slot] || [];
+
+    // Filter alive and correct map pets, clean up others
+    const activePets: Mob[] = [];
+    for (const pet of pets) {
+      if (pet && pet.hp > 0 && pet.mapId === p.mapId) {
+        activePets.push(pet);
+      } else if (pet) {
+        const w = this.worlds[pet.mapId];
+        if (w) {
+          w.mobs = w.mobs.filter((m) => m !== pet);
+        }
+      }
     }
-    if (!pet) {
+    p.pets[slot] = activePets;
+
+    const maxCount = getSummonCount(item);
+    if (activePets.length < maxCount) {
       p.petTimer[slot] -= dt;
       if (p.petTimer[slot] <= 0) {
         const m = new Mob(this.nextId++, def.petMob, p.mapId, p.x + 40, p.y + 40, rarity, true);
@@ -729,7 +741,9 @@ export class GameServer {
         m.damage *= 1.3;
         m.speed = Math.max(70, m.speed * 1.5);
         this.worlds[p.mapId].mobs.push(m);
-        p.pets[slot] = m;
+        activePets.push(m);
+        p.pets[slot] = activePets;
+        p.petTimer[slot] = def.reload;
       }
     }
   }
@@ -859,8 +873,8 @@ export class GameServer {
         if (mob.friendly) {
           const owner = here.find((p) => p.id === mob.ownerId);
           if (owner && mob.ownerSlot >= 0) {
-            owner.pets[mob.ownerSlot] = null;
-            owner.petTimer[mob.ownerSlot] = 4;
+            owner.pets[mob.ownerSlot] = (owner.pets[mob.ownerSlot] || []).filter((m) => m !== mob);
+            owner.petTimer[mob.ownerSlot] = ITEMS[owner.slots[mob.ownerSlot]?.item ?? 0]?.reload ?? 4;
           }
           continue;
         }
@@ -934,7 +948,7 @@ export class GameServer {
     p.statsDirty = true;
     const world = this.worlds[p.mapId];
     world.mobs = world.mobs.filter((m) => m.ownerId !== p.id);
-    for (let i = 0; i < SLOT_COUNT; i++) p.pets[i] = null;
+    for (let i = 0; i < SLOT_COUNT; i++) p.pets[i] = [];
     const c = this.clientOf(p.id);
     if (c) this.pushEvent(c, EVT.DEATH, p.x, p.y, p.level);
   }

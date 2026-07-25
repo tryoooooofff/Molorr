@@ -1,5 +1,5 @@
 // Pure canvas2d drawing kit: every widget in this game is painted here.
-import { ITEMS, MOBS, RARITIES } from "../shared/defs";
+import { ITEMS, MOBS, RARITIES, getSummonCount } from "../shared/defs";
 import type { Cell } from "../shared/sim";
 
 // ============================================
@@ -505,10 +505,63 @@ export function drawItemIcon(
           break;
         }
         case "egg": {
-          ctx.beginPath();
-          ctx.ellipse(0, 0, size * 0.85, size * 1.15, 0, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.stroke();
+          const count = getSummonCount(def.id);
+          const isCircleEgg = (def.id === 12 || def.id === 14);
+
+          if (isCircleEgg) {
+            // Draw circle arrangement
+            const overlapPercent = 0.15 + 0.05 * count;
+            const shapeRadius = size * 0.55; // Proportional radius
+            const effectiveDiameter = shapeRadius * 2 * (1 - overlapPercent);
+            let centerDistance = 0;
+            if (count === 1) {
+              centerDistance = 0;
+            } else if (count === 2) {
+              centerDistance = effectiveDiameter / 2;
+            } else {
+              const angleStep = (Math.PI * 2) / count;
+              centerDistance = effectiveDiameter / (2 * Math.sin(angleStep / 2));
+            }
+
+            const angleStep = (Math.PI * 2) / count;
+            for (let i = 0; i < count; i++) {
+              const angle = i * angleStep;
+              const ex = centerDistance * Math.cos(angle);
+              const ey = centerDistance * Math.sin(angle);
+
+              ctx.beginPath();
+              ctx.arc(ex, ey, shapeRadius, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.stroke();
+            }
+          } else {
+            // Draw narrow ellipse arrangement
+            const overlapPercent = 0.15;
+            const shapeRadius = size * 0.72; // Proportional radius for nice fit
+            const rx = shapeRadius * 0.6; // 较短的半径
+            const ry = shapeRadius;       // 较长的半径
+            const angleStep = (Math.PI * 2) / count;
+            const effectiveDiameter = (rx * 2) * (1 - overlapPercent);
+            let centerDistance = 0;
+            if (count === 1) {
+              centerDistance = 0;
+            } else if (count === 2) {
+              centerDistance = effectiveDiameter / 2;
+            } else {
+              centerDistance = effectiveDiameter / (2 * Math.sin(angleStep / 2));
+            }
+
+            for (let i = 0; i < count; i++) {
+              const angle = i * angleStep;
+              const ex = centerDistance * Math.cos(angle);
+              const ey = centerDistance * Math.sin(angle);
+
+              ctx.beginPath();
+              ctx.ellipse(ex, ey, rx, ry, 0, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.stroke();
+            }
+          }
           break;
         }
         case "star": {
@@ -1391,6 +1444,82 @@ export function drawMob(
     ctx.restore();
   };
 
+  const drawSandstorm = () => {
+    const scaledSize = radius * 2 * 1.2;
+    if (scaledSize <= 0) return;
+
+    const isFriendly = friendly;
+    let outerColor: string, middleColor: string, innerColor: string;
+    if (isFriendly) {
+      outerColor = '#FFD700';
+      middleColor = '#DAA520';
+      innerColor = '#B8860B';
+    } else {
+      outerColor = '#e7dd8d';
+      middleColor = '#e1c751';
+      innerColor = '#d7ba37';
+    }
+
+    const heptagonTemplate: { x: number; y: number }[] = [];
+    for (let i = 0; i < 7; i++) {
+      const a = (i * 2 * Math.PI) / 7;
+      heptagonTemplate.push({ x: Math.cos(a), y: Math.sin(a) });
+    }
+
+    ctx.save();
+    ctx.translate(x, y);
+
+    // --- 1. 外层 7 边形 ---
+    ctx.save();
+    const outerRotation = (t * 200) * Math.PI / 180;
+    ctx.rotate(outerRotation);
+
+    const outerRadius = scaledSize * 0.45;
+    ctx.beginPath();
+    ctx.moveTo(heptagonTemplate[0].x * outerRadius, heptagonTemplate[0].y * outerRadius);
+    for (let i = 1; i < 7; i++) {
+      ctx.lineTo(heptagonTemplate[i].x * outerRadius, heptagonTemplate[i].y * outerRadius);
+    }
+    ctx.closePath();
+    ctx.fillStyle = outerColor;
+    ctx.fill();
+    ctx.restore();
+
+    // --- 2. 中层 7 边形 ---
+    ctx.save();
+    const midRotation = (t * 240) * Math.PI / 180;
+    ctx.rotate(midRotation);
+
+    const midRadius = scaledSize * 0.3;
+    ctx.beginPath();
+    ctx.moveTo(heptagonTemplate[0].x * midRadius, heptagonTemplate[0].y * midRadius);
+    for (let i = 1; i < 7; i++) {
+      ctx.lineTo(heptagonTemplate[i].x * midRadius, heptagonTemplate[i].y * midRadius);
+    }
+    ctx.closePath();
+    ctx.fillStyle = middleColor;
+    ctx.fill();
+    ctx.restore();
+
+    // --- 3. 内层 7 边形 ---
+    ctx.save();
+    const innerRotation = (t * 270) * Math.PI / 180;
+    ctx.rotate(innerRotation);
+
+    const innerRadius = scaledSize * 0.15;
+    ctx.beginPath();
+    ctx.moveTo(heptagonTemplate[0].x * innerRadius, heptagonTemplate[0].y * innerRadius);
+    for (let i = 1; i < 7; i++) {
+      ctx.lineTo(heptagonTemplate[i].x * innerRadius, heptagonTemplate[i].y * innerRadius);
+    }
+    ctx.closePath();
+    ctx.fillStyle = innerColor;
+    ctx.fill();
+    ctx.restore();
+
+    ctx.restore();
+  };
+
   const drawStarfish = () => {
     const scales: Record<string, number> = { Common: 1.0, Unusual: 1.2, Rare: 1.4, Epic: 1.6, Legendary: 1.8, Mythic: 2.0, Ultra: 2.3, Super: 2.6, Omega: 3.0, Eternal: 3.5 };
     const baseScale = radius * 2.2 * (scales[rarityName] || 1.0);
@@ -1469,7 +1598,7 @@ export function drawMob(
     // New mob placeholders. The user is still drawing the detailed art, so
     // these reuse existing shapes as a sensible stand-in.
     case 10: drawWorkerAnt(); break; // Worker Ant — same ant shape as Soldier Ant
-    case 11: drawCactus(); break;    // Sandstorm — placeholder; refine later
+    case 11: drawSandstorm(); break;    // Sandstorm — procedural heptagons
     default: drawRock(); break;
   }
 
@@ -1560,167 +1689,85 @@ export function drawDefaultSkin(
   ctx.save();
   ctx.translate(x, y);
 
-  // 根据模式渲染眼睛 (支持平滑淡入淡出及位置过渡)
-  const drawEyeSet = (mode: "spread" | "contract" | "normal", alpha: number) => {
-    if (alpha <= 0.001) return;
+  // 2. 渲染眼睛与眉毛（比原先更加简单、纯粹且省去繁重的 Canvas clipping）
+  const eyePositions = [
+    { x: -7, y: -5, isLeft: true },
+    { x: 7, y: -5, isLeft: false }
+  ];
+
+  eyePositions.forEach((eye) => {
     ctx.save();
-    ctx.globalAlpha = (ctx.globalAlpha || 1) * alpha;
+    
+    // 眼神视线随鼠标微动
+    const lookX = Math.cos(angleToMouse) * 1.5;
+    const lookY = Math.sin(angleToMouse) * 1.5;
 
-    if (mode === "spread") {
-      // ========== 【新模式】 Spread Mode 状态（愤怒） ==========
-      const customEyePositions = [
-        {
-          x: -7 * s * (wSpread + wContract) + -7 * (1 - wSpread - wContract),
-          y: -8 * s * (wSpread + wContract) + -5 * (1 - wSpread - wContract),
-          isLeft: true,
-        },
-        {
-          x: 7 * s * (wSpread + wContract) + 7 * (1 - wSpread - wContract),
-          y: -8 * s * (wSpread + wContract) + -5 * (1 - wSpread - wContract),
-          isLeft: false,
-        },
-      ];
+    // 眼眶：简单的黑色垂直椭圆
+    ctx.beginPath();
+    ctx.ellipse(eye.x + lookX, eye.y + lookY, 3, 5, 0, 0, Math.PI * 2);
+    ctx.fillStyle = "#000000";
+    ctx.fill();
 
-      customEyePositions.forEach((eye) => {
-        ctx.save();
-        ctx.translate(eye.x, eye.y);
+    // 瞳孔/高光：小白色高光，给角色注入灵魂
+    ctx.beginPath();
+    ctx.arc(eye.x + lookX * 1.6, eye.y + lookY * 1.6, 1.2, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
 
-        if (eye.isLeft) {
-          ctx.scale(-1, 1);
-        }
+    // 眉毛：愤怒(Spread)与悲伤(Contract)的直接表现
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = 1.8;
+    ctx.lineCap = "round";
 
-        ctx.fillStyle = "#000000";
-        ctx.strokeStyle = "#000000";
-        ctx.lineWidth = 2.0 * s;
-        ctx.lineJoin = "round";
-
-        ctx.beginPath();
-        ctx.moveTo(0 * s, 0 * s);
-        ctx.bezierCurveTo(1 * s, 16 * s, 5 * s, 16 * s, 6 * s, -4 * s);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-        ctx.clip();
-
-        // 动起来的内部圆（瞳孔）
-        const directionMultiplier = eye.isLeft ? -1 : 1;
-        const pOffX = Math.cos(angleToMouse) * 2 * s * directionMultiplier;
-        const pOffY = Math.sin(angleToMouse) * 3 * s;
-
-        ctx.beginPath();
-        ctx.arc(3 * s + pOffX, 4 * s + pOffY, 3.5 * s, 0, Math.PI * 2);
-        ctx.fillStyle = "#ffffff";
-        ctx.fill();
-        ctx.restore();
-      });
-    } else if (mode === "contract") {
-      // ========== 【新模式】 Contract Mode 状态（悲伤） ==========
-      const customEyePositions = [
-        {
-          x: -7 * s * (wSpread + wContract) + -7 * (1 - wSpread - wContract),
-          y: -8 * s * (wSpread + wContract) + -5 * (1 - wSpread - wContract),
-          isLeft: true,
-        },
-        {
-          x: 7 * s * (wSpread + wContract) + 7 * (1 - wSpread - wContract),
-          y: -8 * s * (wSpread + wContract) + -5 * (1 - wSpread - wContract),
-          isLeft: false,
-        },
-      ];
-
-      customEyePositions.forEach((eye) => {
-        ctx.save();
-        ctx.translate(eye.x, eye.y);
-
-        if (eye.isLeft) {
-          ctx.scale(-1, 1);
-        }
-
-        ctx.fillStyle = "#000000";
-        ctx.strokeStyle = "#000000";
-        ctx.lineWidth = 2 * s;
-        ctx.lineJoin = "round";
-
-        ctx.beginPath();
-        ctx.moveTo(0, -4 * s);
-        ctx.bezierCurveTo(0.2 * s, 16 * s, 5 * s, 16 * s, 6 * s, 0);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-        ctx.clip();
-
-        // 动起来的内部圆
-        const directionMultiplier = eye.isLeft ? -1 : 1;
-        const pOffX = Math.cos(angleToMouse) * 2 * s * directionMultiplier;
-        const pOffY = Math.sin(angleToMouse) * 3 * s;
-
-        ctx.beginPath();
-        ctx.arc(3 * s + pOffX, 4 * s + pOffY, 3.5 * s, 0, Math.PI * 2);
-        ctx.fillStyle = "#ffffff";
-        ctx.fill();
-        ctx.restore();
-      });
-    } else {
-      // ========== 【常规模式】 还原你原本的普通眼睛 ==========
-      const eyePositions = [
-        {
-          x: -7 * (1 - wSpread - wContract) + -7 * s * (wSpread + wContract),
-          y: -5 * (1 - wSpread - wContract) + -8 * s * (wSpread + wContract),
-        },
-        {
-          x: 7 * (1 - wSpread - wContract) + 7 * s * (wSpread + wContract),
-          y: -5 * (1 - wSpread - wContract) + -8 * s * (wSpread + wContract),
-        },
-      ];
-
-      eyePositions.forEach((eye) => {
-        ctx.save();
-
-        // 绘制黑色眼眶
-        ctx.beginPath();
-        ctx.ellipse(eye.x, eye.y, 2.2, 6, 0, 0, Math.PI * 2);
-        ctx.fillStyle = "#000000";
-        ctx.fill();
-
-        // 设置裁剪区域
-        ctx.beginPath();
-        ctx.ellipse(eye.x, eye.y, 2.2, 6, 0, 0, Math.PI * 2);
-        ctx.clip();
-
-        // 瞳孔
-        ctx.fillStyle = "#FFFFFF";
-        const pOffX = Math.cos(angleToMouse) * 2;
-        const pOffY = Math.sin(angleToMouse) * 2;
-        ctx.beginPath();
-        ctx.arc(eye.x + pOffX, eye.y + pOffY, 2.5, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.restore();
-      });
+    if (wSpread > 0.05) {
+      ctx.save();
+      ctx.globalAlpha = wSpread;
+      ctx.beginPath();
+      if (eye.isLeft) {
+        ctx.moveTo(eye.x - 4, eye.y - 7);
+        ctx.lineTo(eye.x + 3, eye.y - 4);
+      } else {
+        ctx.moveTo(eye.x - 3, eye.y - 4);
+        ctx.lineTo(eye.x + 4, eye.y - 7);
+      }
+      ctx.stroke();
+      ctx.restore();
+    } else if (wContract > 0.05) {
+      ctx.save();
+      ctx.globalAlpha = wContract;
+      ctx.beginPath();
+      if (eye.isLeft) {
+        ctx.moveTo(eye.x - 4, eye.y - 4);
+        ctx.lineTo(eye.x + 3, eye.y - 7);
+      } else {
+        ctx.moveTo(eye.x - 3, eye.y - 7);
+        ctx.lineTo(eye.x + 4, eye.y - 4);
+      }
+      ctx.stroke();
+      ctx.restore();
     }
 
     ctx.restore();
-  };
+  });
 
-  if (wNormal > 0) drawEyeSet("normal", wNormal);
-  if (wSpread > 0) drawEyeSet("spread", wSpread);
-  if (wContract > 0) drawEyeSet("contract", wContract);
-
-  // 恢复画布到之前的状态，确保下面的嘴巴绝对坐标正常工作
+  // 恢复画布到之前的状态
   ctx.restore();
 
-  // 3. 嘴巴（带有平滑位置与弧度过渡）
+  // 3. 嘴巴（平滑地自上而下过渡，不绕圈旋转）
+  ctx.save();
   ctx.strokeStyle = "#000000";
   ctx.lineWidth = 2.5;
   ctx.lineCap = "round";
+  ctx.lineJoin = "round";
   ctx.beginPath();
 
-  const mouthY = y + (5 * (1 - wSpread) + 12 * wSpread);
-  const startAngle = (0.2 * (1 - wSpread) + 1.2 * wSpread) * Math.PI;
-  const endAngle = (0.8 * (1 - wSpread) + 1.8 * wSpread) * Math.PI;
+  const baseMouthY = y + 8;
+  const cyOffset = 3.5 * (1 - wSpread) - 3.5 * wSpread; 
 
-  ctx.arc(x, mouthY, 6, startAngle, endAngle);
+  ctx.moveTo(x - 5.5, baseMouthY);
+  ctx.quadraticCurveTo(x, baseMouthY + cyOffset, x + 5.5, baseMouthY);
   ctx.stroke();
+  ctx.restore();
 }
 
 export function drawFlower(
