@@ -304,8 +304,12 @@ export class GameServer {
       case C2S.SWAP: {
         const p = c.player;
         if (!p) return;
-        this.swapCells(p, r.u8(), r.u8());
-
+        const from = r.u8();
+        const to = r.u8();
+        // Bag entries are stacks, but dragging an inventory card equips/moves
+        // one item at a time. Hotbar drags keep their existing swap behaviour.
+        if (from >= SLOT_COUNT) this.moveOneFromBag(p, from, to);
+        else this.swapCells(p, from, to);
         break;
       }
       case C2S.CRAFT: {
@@ -418,6 +422,33 @@ export class GameServer {
       this.setCell(p, b, ca);
     }
     if (a < SLOT_COUNT || b < SLOT_COUNT) this.rebuildPetals(p);
+    p.dirty = true;
+  }
+
+  /** Move one card out of an inventory stack, never the full item type. */
+  private moveOneFromBag(p: Player, from: number, to: number) {
+    if (from === to || from < SLOT_COUNT || from >= TOTAL_CELLS || to >= TOTAL_CELLS) return;
+    const source = this.cellAt(p, from);
+    if (!source || source.count <= 0) return;
+    const one: Cell = { item: source.item, rarity: source.rarity, count: 1 };
+    const target = this.cellAt(p, to);
+
+    if (to >= SLOT_COUNT) {
+      // A one-item drag can fill an empty bag cell or add to a matching stack;
+      // it never overwrites an unrelated stack.
+      if (target && (target.item !== one.item || target.rarity !== one.rarity || target.count >= 999)) return;
+      if (target) target.count += 1;
+      else this.setCell(p, to, one);
+    } else {
+      // Equipping one item replaces the target petal. Return that displaced
+      // petal to the unlimited bag before placing the single dragged item.
+      if (target && !this.addItem(p, target.item, target.rarity, target.count)) return;
+      this.setCell(p, to, one);
+      this.rebuildPetals(p);
+    }
+
+    source.count -= 1;
+    if (source.count === 0) this.setCell(p, from, null);
     p.dirty = true;
   }
 
