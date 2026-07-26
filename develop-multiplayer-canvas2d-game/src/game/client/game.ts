@@ -334,6 +334,7 @@ class SettingsSystem {
             if (pos.x >= px && pos.x <= px + pw && pos.y >= py && pos.y <= py + ph) {
                 if (e.cancelable) e.preventDefault();
                 e.stopPropagation();
+                if (e.stopImmediatePropagation) e.stopImmediatePropagation();
                 this.handleWheel(e.deltaY);
             }
         };
@@ -508,8 +509,12 @@ class SettingsSystem {
     draw(ctx: CanvasRenderingContext2D, x: number, y: number) {
         if (!this.panelOpen) return;
 
-        const panelW = 320, panelH = 480;
-        const panelX = x - panelW / 2, panelY = y - 20;
+        const panelW = 320;
+        const viewW = x * 2;
+        const viewH = y * 2;
+        const panelX = Math.min(118, Math.max(12, viewW - panelW - 12));
+        const panelY = 16;
+        const panelH = Math.max(300, Math.min(480, viewH - panelY - 16));
         this.panelRect = [panelX, panelY, panelW, panelH];
 
         const totalContentHeight = 880;
@@ -739,7 +744,8 @@ class SettingsSystem {
 
         // 滚动条
         if (this.maxScrollOffset > 0) {
-            const scrollBarX = panelX + panelW - 12;
+            const scrollBarW = 9;
+            const scrollBarX = panelX + panelW - 15;
             const scrollBarY = contentY + 4;
             const scrollBarH = contentH - 8;
             const thumbH = Math.max(25, (contentH / totalContentHeight) * scrollBarH);
@@ -748,23 +754,26 @@ class SettingsSystem {
             ctx.fillStyle = 'rgba(255,255,255,0.15)';
             ctx.beginPath();
             if (ctx.roundRect) {
-                ctx.roundRect(scrollBarX, scrollBarY, 5, scrollBarH, 3);
+                ctx.roundRect(scrollBarX, scrollBarY, scrollBarW, scrollBarH, 3);
             } else {
-                ctx.rect(scrollBarX, scrollBarY, 5, scrollBarH);
+                ctx.rect(scrollBarX, scrollBarY, scrollBarW, scrollBarH);
             }
             ctx.fill();
 
             ctx.fillStyle = 'rgba(255,255,255,0.5)';
             ctx.beginPath();
             if (ctx.roundRect) {
-                ctx.roundRect(scrollBarX, thumbY, 5, thumbH, 3);
+                ctx.roundRect(scrollBarX, thumbY, scrollBarW, thumbH, 3);
             } else {
-                ctx.rect(scrollBarX, thumbY, 5, thumbH);
+                ctx.rect(scrollBarX, thumbY, scrollBarW, thumbH);
             }
             ctx.fill();
 
-            this._scrollBarRect = [scrollBarX, scrollBarY, 5, scrollBarH];
-            this._scrollThumbRect = [scrollBarX, thumbY, 5, thumbH];
+            this._scrollBarRect = [scrollBarX, scrollBarY, scrollBarW, scrollBarH];
+            this._scrollThumbRect = [scrollBarX, thumbY, scrollBarW, thumbH];
+        } else {
+            this._scrollBarRect = null;
+            this._scrollThumbRect = null;
         }
 
         // 关闭按钮
@@ -798,7 +807,19 @@ class SettingsSystem {
             return true;
         }
 
-        // 2. 滚动条点击
+        // 2. 滚动条拖拽开始 — test the thumb before the track because
+        // the thumb sits inside the track rectangle.
+        if (this._scrollThumbRect) {
+            const [tx, ty, tw, th] = this._scrollThumbRect;
+            if (x >= tx && x <= tx + tw && y >= ty && y <= ty + th) {
+                this.isDraggingScroll = true;
+                this.dragStartY = y;
+                this.dragStartOffset = this.scrollOffset;
+                return true;
+            }
+        }
+
+        // 3. 滚动条点击
         if (this._scrollBarRect) {
             const [sx, sy, sw, sh] = this._scrollBarRect;
             if (x >= sx && x <= sx + sw && y >= sy && y <= sy + sh) {
@@ -806,17 +827,6 @@ class SettingsSystem {
                 const ratio = relativeY / sh;
                 this.scrollOffset = Math.max(0, Math.min(this.maxScrollOffset, ratio * this.maxScrollOffset));
                 this._forceRedraw();
-                return true;
-            }
-        }
-
-        // 3. 滚动条拖拽开始
-        if (this._scrollThumbRect) {
-            const [tx, ty, tw, th] = this._scrollThumbRect;
-            if (x >= tx && x <= tx + tw && y >= ty && y <= ty + th) {
-                this.isDraggingScroll = true;
-                this.dragStartY = y;
-                this.dragStartOffset = this.scrollOffset;
                 return true;
             }
         }
@@ -2689,6 +2699,7 @@ export class GameClient {
     }
     if (this.bagDraggingThumb) this.dragBagThumb(p.y);
     if (this.craftDraggingThumb) this.dragCraftThumb(p.y);
+    if (this.settings.panelOpen) this.settings.handleMouseMove(p.x, p.y);
     this.quickSlot.handleMouseMove(p.x, p.y);
   };
 
@@ -2713,10 +2724,21 @@ export class GameClient {
     this.mouseDown = false;
     this.bagDraggingThumb = false;
     this.craftDraggingThumb = false;
+    if (this.settings.panelOpen) this.settings.handleMouseUp();
     if (this.drag) this.dropDrag(this.mx, this.my);
   };
 
   private onWheel = (e: WheelEvent) => {
+    if (this.settings.panelOpen && this.settings.panelRect) {
+      const [px, py, pw, ph] = this.settings.panelRect;
+      if (this.mx >= px && this.mx <= px + pw && this.my >= py && this.my <= py + ph) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.settings.handleWheel(e.deltaY);
+        return;
+      }
+    }
+
     // Pixel-accurate scrolling: translate the wheel delta directly into scrollY pixels
     // (with a little extra punch for coarse "line" deltas some browsers/mice report).
     const scrollAmount = (gridH: number) => {
@@ -3795,16 +3817,13 @@ export class GameClient {
     const ctx = this.ctx;
     const map = MAPS[this.mapId] ?? MAPS[0];
 
-    // Ensure biome and WALL_DATA are set up
+    // Ensure biome is up to date. Walls are drawn from the authoritative
+    // rectangle list (`this.walls`) instead of the old raster cache so the
+    // visuals always match collision exactly and never get stuck with an
+    // empty/stale WALL_DATA entry while joining a biome.
     const mapName = map.name || "Garden";
     if (this.currentBiome !== mapName) {
       this.currentBiome = mapName;
-    }
-    if (typeof window !== "undefined") {
-      (window as any).WALL_DATA = (window as any).WALL_DATA || {};
-      if (!(window as any).WALL_DATA[mapName]) {
-        (window as any).WALL_DATA[mapName] = generateWallData(this.worldW, this.worldH, this.walls);
-      }
     }
 
     const zoom = Math.min(1.15, Math.max(0.72, Math.min(this.w / 1280, this.h / 800) * 1.05));
@@ -4004,150 +4023,86 @@ export class GameClient {
     this._wallEdgeBiome = this.currentBiome;    
   }
 
-  drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {    
-    const d = (window as any).WALL_DATA?.[this.currentBiome];    
-    if (!d) return;    
-    
-    // ⭐ 低质量模式：绘制原始直线墙壁    
-    if (this.settings.lowQualityWall) {    
-        this._drawWallsLegacy(ctx, c, d);    
-        return;    
-    }    
-    
-    // =========================    
-    // pattern（高质量模式）    
-    // =========================    
-    if (!this.wallPattern || this._wallPatternBiome !== this.currentBiome) {    
-        const s = 512, cv = document.createElement('canvas');    
-        cv.width = cv.height = s;    
-    
-        const g = cv.getContext('2d');    
-        if (g) {
-          const b = BIOME_BACKGROUNDS[this.currentBiome]?.wall_color || [80, 80, 80];    
-    
-          g.fillStyle = `rgb(${b[0]},${b[1]},${b[2]})`;    
-          g.fillRect(0, 0, s, s);    
-    
-          g.fillStyle = `rgba(${Math.max(0, b[0] - 25)}, ${Math.max(0, b[1] - 25)}, ${Math.max(0, b[2] - 25)}, .5)`;    
-    
-          for (let i = 0; i < 17; i++) {    
-              const r = 5 + Math.random() * 10;    
-              const x = Math.random() * s;    
-              const y = Math.random() * s;    
-    
-              g.beginPath();    
-              g.arc(x, y, r, 0, Math.PI * 2);    
-              g.fill();    
-          }    
+  drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
+    if (!this.walls.length) return;
+
+    // Draw directly from the authoritative wall rectangles received from the
+    // sim. The previous renderer converted walls to a 64px raster first; that
+    // rounded every rectangle outward and could also cache an empty grid before
+    // the server's wall list arrived (Garden then had collision but no visible
+    // walls). Direct rectangles keep the drawn footprint identical to collision
+    // for every biome.
+    const cx = c.x;
+    const cy = c.y;
+    const viewScale = this.viewZoom || 1;
+    const vw = this.w / viewScale;
+    const vh = this.h / viewScale;
+    const left = cx - vw / 2;
+    const right = cx + vw / 2;
+    const top = cy - vh / 2;
+    const bottom = cy + vh / 2;
+    const pad = 80 / viewScale;
+
+    const visibleWalls = this.walls.filter((w) =>
+      w.x + w.w >= left - pad && w.x <= right + pad &&
+      w.y + w.h >= top - pad && w.y <= bottom + pad,
+    );
+    if (!visibleWalls.length) return;
+
+    if (!this.wallPattern || this._wallPatternBiome !== this.currentBiome) {
+      const s = 512, cv = document.createElement('canvas');
+      cv.width = cv.height = s;
+      const g = cv.getContext('2d');
+      if (g) {
+        const b = BIOME_BACKGROUNDS[this.currentBiome]?.wall_color || [80, 80, 80];
+        g.fillStyle = `rgb(${b[0]},${b[1]},${b[2]})`;
+        g.fillRect(0, 0, s, s);
+        g.fillStyle = `rgba(${Math.max(0, b[0] - 25)}, ${Math.max(0, b[1] - 25)}, ${Math.max(0, b[2] - 25)}, .5)`;
+        for (let i = 0; i < 17; i++) {
+          const r = 5 + Math.random() * 10;
+          const x = Math.random() * s;
+          const y = Math.random() * s;
+          g.beginPath();
+          g.arc(x, y, r, 0, Math.PI * 2);
+          g.fill();
         }
-    
-        this.wallPattern = ctx.createPattern(cv, 'repeat');    
-        this._wallPatternBiome = this.currentBiome;    
-    }    
-    
-    if (this._wallEdgeBiome !== this.currentBiome)    
-        this.buildWallEdgeCache();    
-    
-    // =========================    
-    // camera + scale    
-    // =========================    
-    const cx = c.x;    
-    const cy = c.y;    
-    
-    const viewScale = this.viewZoom || 1;    
-    
-    const vw = this.w / viewScale;    
-    const vh = this.h / viewScale;    
-    
-    const left = cx - vw / 2;    
-    const right = cx + vw / 2;    
-    const top = cy - vh / 2;    
-    const bottom = cy + vh / 2;    
-    
-    // The caller already applied the camera transform (translate/scale in
-    // renderGame), so wall geometry is emitted in raw world coordinates and
-    // the pattern needs no counter-translation. Subtracting the camera here
-    // as well used to shift every wall a second time, pushing the whole map
-    // off-screen — which is why no walls were visible.
-    
-    const size = Math.sqrt(d.length) | 0;    
-    const cellW = this.worldW / size;    
-    const BUFFER_BLOCKS = 11;    
-    const pad = cellW * BUFFER_BLOCKS * viewScale;    
-    
-    // =========================    
-    // 一次性把所有可见轮廓拼进一个 Path2D    
-    // =========================    
-    const path = new Path2D();    
-    let hasVisible = false;    
-    
-    for (const loop of this.wallNoisyLoops) {    
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;    
-        for (const p of loop) {    
-            if (p.x < minX) minX = p.x;    
-            if (p.x > maxX) maxX = p.x;    
-            if (p.y < minY) minY = p.y;    
-            if (p.y > maxY) maxY = p.y;    
-        }    
-        if (maxX < left - pad || minX > right + pad ||    
-            maxY < top - pad || minY > bottom + pad) continue;    
-    
-        hasVisible = true;    
-        path.moveTo(loop[0].x, loop[0].y);    
-        for (let i = 1; i < loop.length; i++) {    
-            path.lineTo(loop[i].x, loop[i].y);    
-        }    
-        path.closePath();    
-    }    
-    
-    if (!hasVisible) return;    
-    
-    if (this.wallPattern) {
-      ctx.fillStyle = this.wallPattern;    
+      }
+      this.wallPattern = ctx.createPattern(cv, 'repeat');
+      this._wallPatternBiome = this.currentBiome;
     }
-    ctx.fill(path, 'evenodd');    
-    
-    const bgConfig = BIOME_BACKGROUNDS[this.currentBiome];    
-    const wallColor = bgConfig?.wall_color || [80, 80, 80];    
-    const darkColor = `rgb(${Math.max(0, wallColor[0] - 50)}, ${Math.max(0, wallColor[1] - 50)}, ${Math.max(0, wallColor[2] - 50)})`;    
-    const groundColor = bgConfig?.ground_color || [80, 80, 80];    
-    const lightColor = `rgba(${Math.min(255, groundColor[0] - 30)}, ${Math.min(255, groundColor[1] - 30)}, ${Math.min(255, groundColor[2] - 30)}, 0.4)`;    
-    
-    if (this.wallPattern) {
-      ctx.fillStyle = this.wallPattern;    
+
+    const path = new Path2D();
+    for (const w of visibleWalls) path.rect(w.x, w.y, w.w, w.h);
+
+    const bgConfig = BIOME_BACKGROUNDS[this.currentBiome];
+    const wallColor = bgConfig?.wall_color || [80, 80, 80];
+    const darkColor = `rgb(${Math.max(0, wallColor[0] - 50)}, ${Math.max(0, wallColor[1] - 50)}, ${Math.max(0, wallColor[2] - 50)})`;
+    const groundColor = bgConfig?.ground_color || [80, 80, 80];
+    const lightColor = `rgba(${Math.max(0, groundColor[0] - 30)}, ${Math.max(0, groundColor[1] - 30)}, ${Math.max(0, groundColor[2] - 30)}, 0.4)`;
+    const outlineScale = 1 / viewScale;
+
+    ctx.save();
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+
+    // Clip all decoration to the wall path. This prevents the art from
+    // extending past the collision rectangles, which made Desert/Ocean walls
+    // appear larger than the actual blocked area.
+    ctx.clip(path);
+    ctx.fillStyle = this.wallPattern || `rgb(${wallColor[0]},${wallColor[1]},${wallColor[2]})`;
+    ctx.fill(path);
+
+    if (!this.settings.lowQualityWall) {
+      ctx.strokeStyle = lightColor;
+      ctx.lineWidth = 28 * outlineScale;
+      ctx.stroke(path);
     }
-    ctx.fill(path, 'evenodd');    
-    
-    ctx.lineJoin = 'round';    
-    ctx.lineCap = 'round';    
-    
-    // Outlines are authored in screen pixels but stroked in world space, so
-    // divide by the zoom to keep their apparent thickness constant.
-    const outlineScale = 1 / viewScale;    
-    
-    // 1) 先画一圈宽的浅色描边（这一圈是以 path 为中心，内外各占一半）    
-    ctx.strokeStyle = lightColor;    
-    ctx.lineWidth = 36 * outlineScale;    
-    ctx.stroke(path);    
-    
-    // 2) 重新填充一次 —— fill 只会画在 path 内部，正好把浅色描边"往里"的那一半盖掉，    
-    //    只留下贴着外面（草地那一侧）的浅色边框    
-    if (this.wallPattern) {
-      ctx.fillStyle = this.wallPattern;    
-    }
-    ctx.fill(path, 'evenodd');    
-    
-    // 3) 再画一圈窄的深色描边，压在浅色边框的内侧    
-    ctx.strokeStyle = darkColor;    
-    ctx.lineWidth = 12 * outlineScale;    
-    ctx.stroke(path);    
-    
-    // 4) 再填充一次，把深色描边"往里"的那一半也盖掉，    
-    //    只留下贴着浅色边框内侧的一圈深色细线，再往里就是正常的墙体填充    
-    if (this.wallPattern) {
-      ctx.fillStyle = this.wallPattern;    
-    }
-    ctx.fill(path, 'evenodd');    
+
+    ctx.strokeStyle = darkColor;
+    ctx.lineWidth = (this.settings.lowQualityWall ? 4 : 10) * outlineScale;
+    ctx.stroke(path);
+
+    ctx.restore();
   }
 
   _drawWallsLegacy(ctx: CanvasRenderingContext2D, cameraOffset: { x: number; y: number }, wallData: string) {    
@@ -4570,7 +4525,7 @@ export class GameClient {
     // quick-slot row: square rarity background, centered item icon, item name,
     // and stack badge. Only the gentle world-space bob is unique to loot.
     const bob = Math.sin(this.time * 4 + e.id) * 3;
-    const size = 52;
+    const size = 46;
     const stack = Math.max(1, Math.round(e.hp * 255));
     drawCard(
       this.ctx,
