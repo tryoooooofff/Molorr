@@ -1247,3 +1247,21 @@ export function getSpawnProtection(itemId: number): number {
 }
 
 export const EMPTY_ITEM = 255;
+
+// =====================================================================
+// Lookup tables used by the chat system for colored name rendering.
+// =====================================================================
+
+/** Maps item name → item def for the chat system's name highlighting. */
+export const ITEM_STATS: Record<string, ItemDef> = (() => {
+  const out: Record<string, ItemDef> = {};
+  for (const item of ITEMS) out[item.name] = item;
+  return out;
+})();
+
+/** Maps mob name → mob def (drop table) for the chat system's name highlighting. */
+export const ENEMY_DROP_TABLE: Record<string, MobDef> = (() => {
+  const out: Record<string, MobDef> = {};
+  for (const m of MOBS) out[m.name] = m;
+  return out;
+})();

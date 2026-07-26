@@ -18,6 +18,8 @@ export const C2S = {
   SWAP_ROW: 10,
   /** Current client-persisted daily-bonus multiplier and seconds remaining. */
   BONUS_STATUS: 11,
+  /** Chat message or command (e.g. /claim, /create_public_squad). Payload: utf8 string. */
+  CHAT: 12,
 } as const;
 
 /** SWAP_ROW payload meaning "swap the entire row", not a single slot. */
@@ -30,6 +32,10 @@ export const S2C = {
   STATS: 4,
   EVENT: 5,
   PONG: 6,
+  /** Chat message from server (system message, other player message, or command result). */
+  CHAT: 7,
+  /** Squad state update (joined/created/left/auto-joined). */
+  SQUAD_UPDATE: 8,
 } as const;
 
 export const ENT = {

@@ -55,6 +55,31 @@ import {
 
 import { C2S, ENT, EVT, Reader, S2C, SWAP_ROW_ALL, TEAM, Writer } from "./protocol";
 
+// =====================================================================
+// Squad system
+// =====================================================================
+
+interface SquadMember {
+  clientId: number;
+  playerId: number;
+  name: string;
+  level: number;
+}
+
+interface Squad {
+  code: string;
+  isPublic: boolean;
+  members: Map<number, SquadMember>; // key = playerId
+  createdAt: number;
+}
+
+/** Maximum level gap between squad members */
+const SQUAD_LEVEL_GAP_MAX = 20;
+/** Maximum members per squad */
+const SQUAD_MAX_MEMBERS = 4;
+/** Squad code length */
+const SQUAD_CODE_LENGTH = 6;
+
 
 export interface Cell {
   item: number;
@@ -113,6 +138,8 @@ export class Player {
   /** Daily-bonus state supplied by the local-progress client. */
   bonusMultiplier = 1;
   bonusEndsAt = 0;
+  /** Squad code this player belongs to (empty string = no squad). */
+  squadCode = "";
 
   slots: (Cell | null)[] = new Array(SLOT_COUNT).fill(null);
   /**
@@ -245,6 +272,8 @@ export class GameServer {
   private worlds: World[] = MAPS.map(() => ({ mobs: [], drops: [] }));
   private tickCount = 0;
   private mobCapScale: number;
+  /** All active squads, keyed by their 6-character code. */
+  private squads = new Map<string, Squad>();
 
   constructor(options: GameServerOptions = {}) {
     this.mobCapScale =
@@ -274,6 +303,10 @@ export class GameServer {
     if (c?.player) {
       const w = this.worlds[c.player.mapId];
       w.mobs = w.mobs.filter((m) => m.ownerId !== c.player!.id);
+      // Clean up squad membership on disconnect
+      if (c.player.squadCode) {
+        this.removePlayerFromSquad(c.player);
+      }
     }
     this.clients.delete(id);
   }
@@ -430,7 +463,262 @@ export class GameServer {
         c.send(w.bytes());
         break;
       }
+      case C2S.CHAT: {
+        const p = c.player;
+        if (!p) return;
+        const msg = r.str();
+        this.handleChat(c, p, msg);
+        break;
+      }
     }
+  }
+
+  // ---------------------------------------------------------------- squad helpers
+  private generateSquadCode(): string {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let code = "";
+    for (let i = 0; i < SQUAD_CODE_LENGTH; i++) {
+      code += chars[Math.floor(Math.random() * chars.length)];
+    }
+    return code;
+  }
+
+  private sendChatToClient(c: ClientState, text: string, sender: string, isSystem: boolean, isCraftReport: boolean) {
+    const w = new Writer(256);
+    w.u8(S2C.CHAT);
+    w.str(text.slice(0, 200));
+    w.str(sender.slice(0, 30));
+    w.u8(isSystem ? 1 : 0);
+    w.u8(isCraftReport ? 1 : 0);
+    c.send(w.bytes());
+  }
+
+  private broadcastChatToSquad(squadCode: string, text: string, sender: string) {
+    const squad = this.squads.get(squadCode);
+    if (!squad) return;
+    for (const member of squad.members.values()) {
+      const c = this.clients.get(member.clientId);
+      if (c) this.sendChatToClient(c, text, sender, false, false);
+    }
+  }
+
+  private broadcastChatToMap(mapId: number, text: string, sender: string) {
+    for (const c of this.clients.values()) {
+      if (c.player && c.player.mapId === mapId) {
+        this.sendChatToClient(c, text, sender, false, false);
+      }
+    }
+  }
+
+  private sendSquadUpdate(c: ClientState, squadCode: string) {
+    const w = new Writer(16);
+    w.u8(S2C.SQUAD_UPDATE);
+    w.str(squadCode.slice(0, SQUAD_CODE_LENGTH));
+    c.send(w.bytes());
+  }
+
+  private removePlayerFromSquad(p: Player): string | null {
+    if (!p.squadCode) return null;
+    const squad = this.squads.get(p.squadCode);
+    if (!squad) {
+      p.squadCode = "";
+      return null;
+    }
+    squad.members.delete(p.id);
+    const oldCode = p.squadCode;
+    p.squadCode = "";
+    // If the squad is empty, remove it
+    if (squad.members.size === 0) {
+      this.squads.delete(oldCode);
+    }
+    return oldCode;
+  }
+
+  private canJoinSquad(p: Player, squad: Squad): string | null {
+    if (squad.members.size >= SQUAD_MAX_MEMBERS) return "Squad is full.";
+    // Check level gap
+    for (const member of squad.members.values()) {
+      if (Math.abs(p.level - member.level) > SQUAD_LEVEL_GAP_MAX) {
+        return `Level gap too large (max ${SQUAD_LEVEL_GAP_MAX}). Your level: ${p.level}, their level: ${member.level}.`;
+      }
+    }
+    return null;
+  }
+
+  // ---------------------------------------------------------------- chat & commands
+  private handleChat(c: ClientState, p: Player, msg: string) {
+    const trimmed = msg.trim();
+    if (!trimmed) return;
+
+    // Commands start with /
+    if (trimmed.startsWith("/")) {
+      this.handleCommand(c, p, trimmed);
+      return;
+    }
+
+    // Regular chat message — broadcast to same map
+    const displayMsg = `${p.name}: ${trimmed}`;
+    this.broadcastChatToMap(p.mapId, displayMsg, p.name);
+  }
+
+  private handleCommand(c: ClientState, p: Player, cmd: string) {
+    const parts = cmd.split(/\s+/);
+    const command = parts[0].toLowerCase();
+
+    switch (command) {
+      case "/claim": {
+        // Server-side daily claim notification
+        // The actual claim logic is client-side (BonusSystem), but we send
+        // a confirmation message back
+        this.sendChatToClient(c, "Daily bonus can be claimed from the main menu.", "System", true, false);
+        break;
+      }
+
+      case "/create_public_squad": {
+        if (p.squadCode) {
+          this.sendChatToClient(c, "You are already in a squad. Use /leave_squad first.", "System", true, false);
+          return;
+        }
+        const code = this.generateSquadCode();
+        const squad: Squad = {
+          code,
+          isPublic: true,
+          members: new Map(),
+          createdAt: Date.now(),
+        };
+        squad.members.set(p.id, {
+          clientId: this.getClientIdForPlayer(p),
+          playerId: p.id,
+          name: p.name,
+          level: p.level,
+        });
+        this.squads.set(code, squad);
+        p.squadCode = code;
+        this.sendChatToClient(c, `Public squad created! Code: ${code}`, "System", true, false);
+        this.sendSquadUpdate(c, code);
+        break;
+      }
+
+      case "/create_private_squad": {
+        if (p.squadCode) {
+          this.sendChatToClient(c, "You are already in a squad. Use /leave_squad first.", "System", true, false);
+          return;
+        }
+        const code = this.generateSquadCode();
+        const squad: Squad = {
+          code,
+          isPublic: false,
+          members: new Map(),
+          createdAt: Date.now(),
+        };
+        squad.members.set(p.id, {
+          clientId: this.getClientIdForPlayer(p),
+          playerId: p.id,
+          name: p.name,
+          level: p.level,
+        });
+        this.squads.set(code, squad);
+        p.squadCode = code;
+        this.sendChatToClient(c, `Private squad created! Code: ${code}`, "System", true, false);
+        this.sendSquadUpdate(c, code);
+        break;
+      }
+
+      case "/join_squad": {
+        const squadCode = (parts[1] || "").toUpperCase();
+        if (!squadCode) {
+          this.sendChatToClient(c, "Usage: /join_squad <CODE>", "System", true, false);
+          return;
+        }
+        if (p.squadCode) {
+          this.sendChatToClient(c, "You are already in a squad. Use /leave_squad first.", "System", true, false);
+          return;
+        }
+        const squad = this.squads.get(squadCode);
+        if (!squad) {
+          this.sendChatToClient(c, "Squad not found.", "System", true, false);
+          return;
+        }
+        const error = this.canJoinSquad(p, squad);
+        if (error) {
+          this.sendChatToClient(c, error, "System", true, false);
+          return;
+        }
+        squad.members.set(p.id, {
+          clientId: this.getClientIdForPlayer(p),
+          playerId: p.id,
+          name: p.name,
+          level: p.level,
+        });
+        p.squadCode = squadCode;
+        this.sendChatToClient(c, `Joined squad! Code: ${squadCode} (${squad.members.size} members)`, "System", true, false);
+        this.sendSquadUpdate(c, squadCode);
+        // Notify other squad members
+        this.broadcastChatToSquad(squadCode, `System: ${p.name} joined the squad.`, "System");
+        break;
+      }
+
+      case "/leave_squad": {
+        if (!p.squadCode) {
+          this.sendChatToClient(c, "You are not in a squad.", "System", true, false);
+          return;
+        }
+        const oldCode = p.squadCode;
+        const squad = this.squads.get(oldCode);
+        this.removePlayerFromSquad(p);
+        this.sendChatToClient(c, "You left the squad.", "System", true, false);
+        this.sendSquadUpdate(c, "");
+        // Notify remaining members
+        if (squad && squad.members.size > 0) {
+          this.broadcastChatToSquad(oldCode, `System: ${p.name} left the squad.`, "System");
+        }
+        break;
+      }
+
+      case "/find_public_squad": {
+        if (p.squadCode) {
+          this.sendChatToClient(c, "You are already in a squad. Use /leave_squad first.", "System", true, false);
+          return;
+        }
+        // Find all public squads where the level gap is acceptable
+        const candidates: Squad[] = [];
+        for (const squad of this.squads.values()) {
+          if (!squad.isPublic) continue;
+          if (squad.members.size >= SQUAD_MAX_MEMBERS) continue;
+          const error = this.canJoinSquad(p, squad);
+          if (!error) candidates.push(squad);
+        }
+        if (candidates.length === 0) {
+          this.sendChatToClient(c, "No available public squads found.", "System", true, false);
+          return;
+        }
+        // Pick a random one
+        const chosen = candidates[Math.floor(Math.random() * candidates.length)];
+        chosen.members.set(p.id, {
+          clientId: this.getClientIdForPlayer(p),
+          playerId: p.id,
+          name: p.name,
+          level: p.level,
+        });
+        p.squadCode = chosen.code;
+        this.sendChatToClient(c, `Auto-joined public squad! Code: ${chosen.code} (${chosen.members.size} members)`, "System", true, false);
+        this.sendSquadUpdate(c, chosen.code);
+        this.broadcastChatToSquad(chosen.code, `System: ${p.name} joined the squad.`, "System");
+        break;
+      }
+
+      default: {
+        this.sendChatToClient(c, `Unknown command: ${command}`, "System", true, false);
+        break;
+      }
+    }
+  }
+
+  private getClientIdForPlayer(p: Player): number {
+    for (const [clientId, c] of this.clients.entries()) {
+      if (c.player === p) return clientId;
+    }
+    return 0;
   }
 
   private sendWelcome(c: ClientState, p: Player) {

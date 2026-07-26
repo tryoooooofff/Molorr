@@ -10,7 +10,9 @@ import {
   BAG_MAX,
   CRAFT_CARD_COUNT,
   EMPTY_ITEM,
+  ENEMY_DROP_TABLE,
   HOTBAR_CELLS,
+  ITEM_STATS,
   ITEMS,
   MAPS,
   MAX_CRAFT_RARITY,
@@ -45,6 +47,7 @@ import {
   dropdownField,
   dropdownList,
   ease,
+  FONT_FAMILY,
   healthBar,
   hit,
   panel,
@@ -149,6 +152,226 @@ function emptyCells(n: number): (Cell | null)[] {
   return new Array(n).fill(null);
 }
 
+// =====================================================================
+// Chat System
+// =====================================================================
+
+interface ChatMessage {
+  text: string;
+  sender: string;
+  timestamp: number;
+  isSystem: boolean;
+  isCraftReport: boolean;
+  isSelf: boolean;
+}
+
+class ChatSystem {
+  messages: ChatMessage[] = [];
+  inputText = "";
+  inputActive = false;
+  visible = true;
+  width = 380;
+  height = 130;
+
+  addMessage(text: string, sender: string, isSystem = false, isCraftReport = false, isSelf = false) {
+    this.messages.push({
+      text,
+      sender,
+      timestamp: Date.now(),
+      isSystem,
+      isCraftReport,
+      isSelf,
+    });
+    // Keep last 50 messages in memory
+    if (this.messages.length > 50) this.messages.shift();
+  }
+
+  /** Send the current input text. Returns the text to send, then clears input. */
+  sendInput(): string {
+    const msg = this.inputText.trim();
+    this.inputText = "";
+    this.inputActive = false;
+    return msg;
+  }
+
+  draw(ctx: CanvasRenderingContext2D, screenHeight: number) {
+    if (!this.visible) return;
+    if (!this.messages) this.messages = [];
+    const now = Date.now();
+    this.messages = this.messages.filter(msg => now - msg.timestamp < 30000);
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    const dpr = Math.min(2, (window.devicePixelRatio || 1));
+    ctx.scale(dpr, dpr);
+    const panelX = 15;
+    const panelY = screenHeight - this.height - 10;
+    const padding = 12;
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+    ctx.beginPath();
+    ctx.roundRect(panelX, panelY, this.width, this.height, 10);
+    ctx.fill();
+    ctx.lineJoin = 'round';
+    ctx.miterLimit = 2;
+    ctx.textAlign = 'left';
+    const visibleMsgs = this.messages.slice(-12);
+    const lineHeight = 18;
+    const baseX = panelX + padding;
+    ctx.font = `16px ${FONT_FAMILY || 'Arial'}`;
+    ctx.textBaseline = 'top';
+
+    const rarityColors: Record<string, string> = {
+      "Mythic": "#00cccc",
+      "Ultra": "#cc5490",
+      "Super": "#74bf74",
+      "Omega": "#b31fa3",
+      "Eternal": "#ffd700",
+      "Unique": "#ffffff",
+      "Legendary": "#cc0000",
+      "Epic": "#9932cc",
+      "Rare": "#0066cc",
+      "Unusual": "#cccc00",
+      "Common": "#66C057",
+    };
+
+    const itemNames = Object.keys(ITEM_STATS || {});
+    const bioNames = Object.keys(ENEMY_DROP_TABLE || {});
+    const allNames = [...itemNames, ...bioNames];
+    const sortedNames = allNames.sort((a, b) => b.length - a.length);
+
+    visibleMsgs.forEach((msg, i) => {
+      const y = panelY - 10 - i * lineHeight;
+      let displayText = msg.text || '';
+
+      if (msg.sender === 'System' || msg.isSystem || msg.isCraftReport) {
+        let xOffset = baseX;
+        let remaining = displayText;
+        let currentColor = '#ffffff';
+
+        while (remaining.length > 0) {
+          let found = false;
+
+          // 1. Find rarity
+          for (const [rarity, color] of Object.entries(rarityColors)) {
+            if (remaining.startsWith(rarity)) {
+              currentColor = color;
+              ctx.strokeStyle = '#000000';
+              ctx.lineWidth = 3;
+              ctx.strokeText(rarity, xOffset, y);
+              ctx.fillStyle = color;
+              ctx.fillText(rarity, xOffset, y);
+              xOffset += ctx.measureText(rarity).width;
+              remaining = remaining.substring(rarity.length);
+              found = true;
+              break;
+            }
+          }
+
+          // 2. Find item or mob name
+          if (!found) {
+            for (const name of sortedNames) {
+              if (remaining.startsWith(name)) {
+                ctx.strokeStyle = '#000000';
+                ctx.lineWidth = 3;
+                ctx.strokeText(name, xOffset, y);
+                ctx.fillStyle = currentColor;
+                ctx.fillText(name, xOffset, y);
+                xOffset += ctx.measureText(name).width;
+                remaining = remaining.substring(name.length);
+                found = true;
+                break;
+              }
+            }
+          }
+
+          // 3. Numbers (use upcoming rarity color)
+          if (!found && /^\d/.test(remaining)) {
+            const match = remaining.match(/^(\d+)/);
+            if (match) {
+              const number = match[1];
+              const numberStartOffset = xOffset;
+              let tempRemaining = remaining.substring(number.length);
+              if (tempRemaining.startsWith('x')) tempRemaining = tempRemaining.substring(1);
+              if (tempRemaining.startsWith(' ')) tempRemaining = tempRemaining.substring(1);
+
+              let numberColor = '#ffffff';
+              for (const [rarity, color] of Object.entries(rarityColors)) {
+                if (tempRemaining.startsWith(rarity)) {
+                  numberColor = color;
+                  break;
+                }
+              }
+
+              ctx.strokeStyle = '#000000';
+              ctx.lineWidth = 3;
+              ctx.strokeText(number, numberStartOffset, y);
+              ctx.fillStyle = numberColor;
+              ctx.fillText(number, numberStartOffset, y);
+              xOffset += ctx.measureText(number).width;
+
+              ctx.strokeStyle = '#000000';
+              ctx.lineWidth = 3;
+              ctx.strokeText(' ', xOffset, y);
+              ctx.fillStyle = numberColor;
+              ctx.fillText(' ', xOffset, y);
+              xOffset += ctx.measureText(' ').width;
+
+              remaining = tempRemaining;
+              found = true;
+            }
+          }
+
+          // 4. Space
+          if (!found && remaining[0] === ' ') {
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 3;
+            ctx.strokeText(' ', xOffset, y);
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText(' ', xOffset, y);
+            xOffset += ctx.measureText(' ').width;
+            remaining = remaining.substring(1);
+            found = true;
+          }
+
+          // 5. Plain character
+          if (!found) {
+            const char = remaining[0];
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 3;
+            ctx.strokeText(char, xOffset, y);
+            ctx.fillStyle = '#ffffff';
+            ctx.fillText(char, xOffset, y);
+            xOffset += ctx.measureText(char).width;
+            remaining = remaining.substring(1);
+          }
+        }
+      }
+      // Normal chat message
+      else {
+        const fullText = `${msg.sender}: ${msg.text || ''}`;
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 3;
+        ctx.strokeText(fullText, baseX, y);
+        ctx.fillStyle = msg.isSelf ? '#70e0f0' : '#ffffff';
+        ctx.fillText(fullText, baseX, y);
+      }
+    });
+
+    // Input line
+    const inputY = panelY + this.height - 28;
+    ctx.font = `16px ${FONT_FAMILY || 'Arial'}`;
+    ctx.textBaseline = 'middle';
+    const display = this.inputActive
+      ? '> ' + (this.inputText || '') + (Math.floor(Date.now() / 500) % 2 ? '_' : '')
+      : '[Enter] to chat';
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 3.5;
+    ctx.strokeText(display, baseX, inputY + 14);
+    ctx.fillStyle = '#cccccc';
+    ctx.fillText(display, baseX, inputY + 14);
+    ctx.restore();
+  }
+}
+
 export class GameClient {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -174,6 +397,8 @@ export class GameClient {
   private account: { username: string; token: string } | null = null;
   private bonus = new BonusSystem();
   private bonusOpen = false;
+  private chat = new ChatSystem();
+  private squadCode = "";
 
   // net
   private net: Transport | null = null;
@@ -540,6 +765,13 @@ export class GameClient {
     this.net?.send(w.bytes());
   }
 
+  private sendChat(text: string) {
+    if (!this.net || !this.connected) return;
+    const w = new Writer(256);
+    w.u8(C2S.CHAT).str(text);
+    this.net.send(w.bytes());
+  }
+
   private handlePacket(data: Uint8Array) {
     const r = new Reader(data);
     const type = r.u8();
@@ -556,6 +788,7 @@ export class GameClient {
         }
         this.ents.clear();
         this.mapFlash = 1;
+        this.chat.addMessage("Welcome! Press [Enter] to chat. Commands: /claim, /create_public_squad, /create_private_squad, /join_squad <code>, /leave_squad, /find_public_squad", "System", true);
         break;
       }
       case S2C.SNAPSHOT: {
@@ -650,6 +883,24 @@ export class GameClient {
         const item = r.u8();
         const rarity = r.u8();
         this.onEvent(kind, x, y, value, item, rarity);
+        break;
+      }
+      case S2C.CHAT: {
+        const text = r.str();
+        const sender = r.str();
+        const isSystem = r.u8() === 1;
+        const isCraftReport = r.u8() === 1;
+        const isSelf = sender === this.playerName;
+        this.chat.addMessage(text, sender, isSystem, isCraftReport, isSelf);
+        break;
+      }
+      case S2C.SQUAD_UPDATE: {
+        this.squadCode = r.str();
+        if (this.squadCode) {
+          this.chat.addMessage(`Joined squad: ${this.squadCode}`, "System", true);
+        } else {
+          this.chat.addMessage("Left squad.", "System", true);
+        }
         break;
       }
       default:
@@ -827,7 +1078,7 @@ export class GameClient {
     // continuously overshooting the cursor.
     let dx = 0;
     let dy = 0;
-    const uiBusy = this.drag !== null || this.bagAnim > 0.4 || this.craftAnim > 0.4;
+    const uiBusy = this.drag !== null || this.bagAnim > 0.4 || this.craftAnim > 0.4 || this.chat.inputActive;
     const mouseDx = this.mx - this.w / 2;
     const mouseDy = this.my - this.h / 2;
     const mouseDistance = Math.hypot(mouseDx, mouseDy);
@@ -1514,11 +1765,24 @@ export class GameClient {
       this.typeIntoCraftSearch(e.key);
       return;
     }
+    // Chat input mode
+    if (this.chat.inputActive) {
+      e.preventDefault();
+      this.typeIntoChat(e.key);
+      return;
+    }
     this.keys.add(e.code);
     if (e.code === "Space") e.preventDefault();
     if (e.code === "KeyE" || e.code === "KeyI") this.toggleBag();
     if (e.code === "KeyC") this.toggleCraft();
     if (this.scene === "game") {
+      // Enter toggles chat input
+      if (e.code === "Enter") {
+        this.chat.inputActive = !this.chat.inputActive;
+        this.chat.inputText = "";
+        e.preventDefault();
+        return;
+      }
       if (e.code === "Escape") this.gotoMenu();
       // QuickSlot hotkeys: 'r' swaps both rows at once; the number keys swap a
       // single main slot with its secondary partner.
@@ -1552,6 +1816,26 @@ export class GameClient {
     else if (key.length === 1 && this.craftSearchText.length < 24) this.craftSearchText += key;
     this.craftScrollY = 0;
     this.clampCraftScroll();
+  }
+
+  private typeIntoChat(key: string) {
+    if (key === "Backspace") {
+      this.chat.inputText = this.chat.inputText.slice(0, -1);
+    } else if (key === "Enter") {
+      const msg = this.chat.sendInput();
+      if (msg) {
+        this.sendChat(msg);
+        // Show own message locally for instant feedback
+        if (!msg.startsWith("/")) {
+          this.chat.addMessage(`${this.playerName}: ${msg}`, this.playerName, false, false, true);
+        }
+      }
+    } else if (key === "Escape") {
+      this.chat.inputActive = false;
+      this.chat.inputText = "";
+    } else if (key.length === 1 && this.chat.inputText.length < 200) {
+      this.chat.inputText += key;
+    }
   }
 
   private typeInto(key: string) {
@@ -2445,6 +2729,9 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     this.renderHud();
     this.renderBag();
     this.renderCraft();
+    // Chat system overlay (bottom-left, above hotbar)
+    this.chat.width = Math.min(400, this.w * 0.35);
+    this.chat.draw(this.ctx, this.h - this.hotbarHeight());
     if (this.drag) {
       const size = 60;
       drawCard(ctx, { x: this.dragX - size / 2, y: this.dragY - size / 2, w: size, h: size }, this.drag.cell, {
