@@ -77,14 +77,17 @@ export class QuickSlot {
   private layout() {
     const w = this.host.viewWidth();
     const h = this.host.viewHeight();
+    const isMobile = w < 640 || /Mobi|Android/i.test(typeof navigator !== "undefined" ? navigator.userAgent : "");
 
-    const mainSize = Math.min(this.MAIN_MAX_SIZE, w / 12);
-    const secSize = Math.max(18, Math.round(mainSize * this.SECONDARY_SCALE));
+    // On phone, make hotbar slots slightly larger for touch, and lift a bit for joystick clearance
+    const mainSize = Math.min(this.MAIN_MAX_SIZE + (isMobile ? 8 : 0), isMobile ? w / 9.5 : w / 12);
+    const secSize = Math.max(isMobile ? 22 : 18, Math.round(mainSize * this.SECONDARY_SCALE));
 
     const mainTotal = SLOT_COUNT * mainSize + (SLOT_COUNT - 1) * this.MAIN_GAP;
     const secTotal = SECONDARY_SLOT_COUNT * secSize + (SECONDARY_SLOT_COUNT - 1) * this.SECONDARY_GAP;
 
-    const secY = h - this.BOTTOM_MARGIN - secSize;
+    const bottomMargin = this.BOTTOM_MARGIN + (isMobile ? 6 : 0);
+    const secY = h - bottomMargin - secSize;
     const mainY = secY - this.ROW_GAP - mainSize;
 
     return {

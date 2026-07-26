@@ -1340,6 +1340,26 @@ export class GameClient {
   private saveTimer = 0;
   private saveDirty = false;
 
+  // --- Mobile detection & touch controls ---
+  private isMobile = false;
+  private mobileJoystick = {
+    active: false,
+    centerX: 0,
+    centerY: 0,
+    currX: 0,
+    currY: 0,
+    radius: 60,
+    pointerId: null as number | null,
+  };
+  private mobileSpreadActive = false;
+  private mobileContractActive = false;
+  private mobileSpreadRect: Rect | null = null;
+  private mobileContractRect: Rect | null = null;
+  private mobileJoystickRect: Rect | null = null;
+  private mobileFullscreenBtn: Rect | null = null;
+  private mobileControlsVisible = false;
+  private lastTouchTime = 0;
+
   // Dual-row quick-slot bar (main + secondary)
   quickSlot!: QuickSlot;
 
@@ -1414,6 +1434,59 @@ export class GameClient {
   }
 
 
+  private detectMobile(): boolean {
+    if (typeof window === "undefined") return false;
+    return (
+      window.innerWidth <= 900 ||
+      /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+      "ontouchstart" in window
+    );
+  }
+
+  private updateMobileLayout() {
+    this.isMobile = this.detectMobile();
+    if (!this.isMobile) {
+      this.mobileControlsVisible = false;
+      return;
+    }
+    // Show mobile controls only in game scene for better UX
+    this.mobileControlsVisible = this.scene === "game";
+    const hotbarH = this.hotbarHeight();
+    // Joystick bottom-left
+    const joyRadius = Math.min(62, Math.max(48, this.w * 0.13));
+    const joyCenterX = 90;
+    const joyCenterY = this.h - hotbarH - joyRadius - 18;
+    this.mobileJoystick.radius = joyRadius;
+    if (!this.mobileJoystick.active) {
+      this.mobileJoystick.centerX = joyCenterX;
+      this.mobileJoystick.centerY = joyCenterY;
+      this.mobileJoystick.currX = joyCenterX;
+      this.mobileJoystick.currY = joyCenterY;
+    }
+    this.mobileJoystickRect = {
+      x: joyCenterX - joyRadius - 16,
+      y: joyCenterY - joyRadius - 16,
+      w: (joyRadius + 16) * 2,
+      h: (joyRadius + 16) * 2,
+    };
+    // Action buttons bottom-right (Spread = Space, Contract = Shift)
+    const btnSize = Math.min(70, Math.max(54, this.w * 0.15));
+    const gap = 12;
+    const rightX = this.w - btnSize - 18;
+    const baseY = this.h - hotbarH - btnSize * 2 - gap - 22;
+    this.mobileSpreadRect = { x: rightX, y: baseY, w: btnSize, h: btnSize };
+    this.mobileContractRect = { x: rightX, y: baseY + btnSize + gap, w: btnSize, h: btnSize };
+  }
+
+  private tryEnterFullscreen() {
+    try {
+      const el = document.documentElement as any;
+      if (document.fullscreenElement) return;
+      if (el.requestFullscreen) el.requestFullscreen().catch(() => {});
+      else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+    } catch {}
+  }
+
   private resize = () => {
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     const rect = this.canvas.getBoundingClientRect();
@@ -1422,6 +1495,7 @@ export class GameClient {
     this.canvas.width = Math.floor(this.w * dpr);
     this.canvas.height = Math.floor(this.h * dpr);
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.updateMobileLayout();
   };
 
   // ------------------------------------------------------------- storage
@@ -1902,32 +1976,51 @@ export class GameClient {
   private sendInput() {
     if (!this.net || !this.connected) return;
 
-    // Mouse movement is measured from the camera/screen centre (where the
-    // player is rendered). The server remains authoritative for acceleration,
-    // wall collision, and map bounds; this is only the desired direction.
-    // Close to the player, reduce the input so it eases to a stop instead of
-    // continuously overshooting the cursor.
     let dx = 0;
     let dy = 0;
     const uiBusy = this.drag !== null || this.bagAnim > 0.4 || this.craftAnim > 0.4 || this.chat.inputActive;
-    const mouseDx = this.mx - this.w / 2;
-    const mouseDy = this.my - this.h / 2;
-    const mouseDistance = Math.hypot(mouseDx, mouseDy);
-    if (!uiBusy && mouseDistance > 6) {
-      const distanceFactor = Math.min(1, mouseDistance / 100);
-      dx = (mouseDx / mouseDistance) * distanceFactor;
-      dy = (mouseDy / mouseDistance) * distanceFactor;
+
+    if (this.isMobile && this.mobileJoystick.active) {
+      // Joystick overrides mouse movement on phone
+      const jdx = this.mobileJoystick.currX - this.mobileJoystick.centerX;
+      const jdy = this.mobileJoystick.currY - this.mobileJoystick.centerY;
+      const dist = Math.hypot(jdx, jdy);
+      if (dist > 4) {
+        const maxDist = this.mobileJoystick.radius || 60;
+        const norm = Math.min(1, dist / maxDist);
+        const angle = Math.atan2(jdy, jdx);
+        dx = Math.cos(angle) * norm;
+        dy = Math.sin(angle) * norm;
+      }
     } else {
-      // Retain WASD/arrow support when the pointer is centred or a panel is
-      // open, without letting UI interaction make the player walk.
-      if (this.keys.has("KeyA") || this.keys.has("ArrowLeft")) dx -= 1;
-      if (this.keys.has("KeyD") || this.keys.has("ArrowRight")) dx += 1;
-      if (this.keys.has("KeyW") || this.keys.has("ArrowUp")) dy -= 1;
-      if (this.keys.has("KeyS") || this.keys.has("ArrowDown")) dy += 1;
+      // Mouse movement is measured from the camera/screen centre (where the
+      // player is rendered). The server remains authoritative for acceleration,
+      // wall collision, and map bounds; this is only the desired direction.
+      // Close to the player, reduce the input so it eases to a stop instead of
+      // continuously overshooting the cursor.
+      const mouseDx = this.mx - this.w / 2;
+      const mouseDy = this.my - this.h / 2;
+      const mouseDistance = Math.hypot(mouseDx, mouseDy);
+      if (!uiBusy && mouseDistance > 6) {
+        const distanceFactor = Math.min(1, mouseDistance / 100);
+        dx = (mouseDx / mouseDistance) * distanceFactor;
+        dy = (mouseDy / mouseDistance) * distanceFactor;
+      } else {
+        // Retain WASD/arrow support when the pointer is centred or a panel is
+        // open, without letting UI interaction make the player walk.
+        if (this.keys.has("KeyA") || this.keys.has("ArrowLeft")) dx -= 1;
+        if (this.keys.has("KeyD") || this.keys.has("ArrowRight")) dx += 1;
+        if (this.keys.has("KeyW") || this.keys.has("ArrowUp")) dy -= 1;
+        if (this.keys.has("KeyS") || this.keys.has("ArrowDown")) dy += 1;
+      }
     }
     let flags = 0;
-    if (this.mouseDown && !uiBusy) flags |= 1;
-    if (this.rightDown || this.keys.has("Space")) flags |= 2;
+    const isSpaceDown = this.keys.has("Space") || this.mobileSpreadActive;
+    const isShiftDown = this.keys.has("ShiftLeft") || this.keys.has("ShiftRight") || this.keys.has("Shift") || this.mobileContractActive;
+    // New mapping: Space = spread (attack), Shift = contract (defend)
+    // Keep mouse buttons as well for usability: left click = spread, right click = contract
+    if ((this.mouseDown && !uiBusy) || isSpaceDown) flags |= 1;
+    if (this.rightDown || isShiftDown) flags |= 2;
     const w = new Writer(8);
     w.u8(C2S.INPUT).i8(dx * 100).i8(dy * 100).u8(flags);
     this.net.send(w.bytes());
@@ -1943,12 +2036,14 @@ export class GameClient {
   }
 
   private bagPanelRect(): Rect {
-    const w = Math.min(400, this.w * 0.92);
+    // Mobile: almost full width for easier touch
+    const isMobileLayout = this.isMobile || this.w < 640;
+    const w = isMobileLayout ? Math.min(440, this.w * 0.96) : Math.min(400, this.w * 0.92);
     const hotbarH = this.hotbarHeight();
-    const maxH = this.h - hotbarH - 130;
-    const h = Math.min(560, Math.max(320, maxH));
+    const maxH = this.h - hotbarH - (isMobileLayout ? 40 : 130);
+    const h = Math.min(isMobileLayout ? this.h * 0.86 : 560, Math.max(320, maxH));
     const hidden = this.h + 20;
-    const shown = this.h - hotbarH - h - 26;
+    const shown = this.h - hotbarH - h - (isMobileLayout ? 10 : 26);
     const t = ease.outCubic(this.bagAnim);
     return { x: (this.w - w) / 2, y: hidden + (shown - hidden) * t, w, h };
   }
@@ -2067,12 +2162,19 @@ export class GameClient {
 
   private craftPanelRect(): Rect {
     // WIDER panel as requested — 760px ideal, responsive down to 92% of screen
-    const idealW = 780;
-    const w = Math.min(idealW, Math.floor(this.w * 0.92));
+    // On mobile, use almost full width and slide from bottom instead of side for better touch
+    const isMobileLayout = this.isMobile || this.w < 640;
+    const idealW = isMobileLayout ? this.w * 0.96 : 780;
+    const w = Math.min(idealW, Math.floor(this.w * (isMobileLayout ? 0.96 : 0.92)));
     const hotbarH = this.hotbarHeight();
-    const maxH = this.h - hotbarH - 40;
-    const h = Math.min(620, Math.max(560, maxH, this.h - 40));
+    const maxH = this.h - hotbarH - (isMobileLayout ? 12 : 40);
+    const h = Math.min(isMobileLayout ? this.h * 0.88 : 620, Math.max(560, maxH, this.h - 40));
     const t = ease.outCubic(this.craftAnim);
+    if (isMobileLayout) {
+      const hidden = this.h + 20;
+      const shown = this.h - hotbarH - h - 10;
+      return { x: (this.w - w) / 2, y: hidden + (shown - hidden) * t, w, h };
+    }
     const hidden = this.w + 20;
     const shown = this.w - w - 16;
     return { x: hidden + (shown - hidden) * t, y: Math.max(12, this.h - hotbarH - h - 18), w, h };
@@ -2558,25 +2660,35 @@ export class GameClient {
    * they follow it instead of using fixed offsets from the bottom edge.
    */
   private hudButtonRowY(row: 0 | 1): number {
-    const bottom = this.h - this.hotbarHeight() - 34;
+    const isMobileLayout = this.isMobile || this.w < 640;
+    const mobileOffset = isMobileLayout ? 130 : 0; // lift above joystick
+    const bottom = this.h - this.hotbarHeight() - 34 - mobileOffset;
     return bottom - (1 - row) * 46 - 38;
   }
 
   private hudButtons(): { id: string; rect: Rect; label: string; color: string }[] {
-    const bw = Math.min(120, this.w / 8);
+    const isMobileLayout = this.isMobile || this.w < 640;
+    const bw = isMobileLayout ? Math.min(100, this.w * 0.22) : Math.min(120, this.w / 8);
+    const bh = isMobileLayout ? 44 : 38;
+    const invLabel = isMobileLayout ? "Bag" : "Inventory";
     return [
-      { id: "bag", rect: { x: 16, y: this.hudButtonRowY(0), w: bw, h: 38 }, label: "Inventory", color: "#3d8bd6" },
-      { id: "craft", rect: { x: 16, y: this.hudButtonRowY(1), w: bw, h: 38 }, label: "Craft", color: "#c9762b" },
+      { id: "bag", rect: { x: 16, y: this.hudButtonRowY(0), w: bw, h: bh }, label: invLabel, color: "#3d8bd6" },
+      { id: "craft", rect: { x: 16, y: this.hudButtonRowY(1), w: bw, h: bh }, label: "Craft", color: "#c9762b" },
       // Settings is a main-menu-only panel: it is deliberately absent from the
       // in-game HUD (neither the button nor the panel is drawn while playing).
-      { id: "menu", rect: { x: this.w - 108, y: this.hudButtonRowY(1), w: 92, h: 38 }, label: "Menu", color: "#8a4d4d" },
+      { id: "menu", rect: { x: this.w - (isMobileLayout ? 88 : 108), y: this.hudButtonRowY(1), w: isMobileLayout ? 72 : 92, h: bh }, label: "Menu", color: "#8a4d4d" },
     ];
   }
 
   private mapButtons(): { id: number; rect: Rect }[] {
-    const bw = 92;
-    const x = this.w - (bw + 8) * MAPS.length - 8;
-    return MAPS.map((m) => ({ id: m.id, rect: { x: x + m.id * (bw + 8), y: this.hudButtonRowY(0), w: bw, h: 38 } }));
+    const isMobileLayout = this.isMobile || this.w < 640;
+    const bw = isMobileLayout ? 78 : 92;
+    const bh = isMobileLayout ? 36 : 38;
+    // On mobile, show map buttons centered at top or just above hotbar but shifted right to avoid joystick overlap
+    const x = isMobileLayout ? this.w * 0.32 : this.w - (bw + 8) * MAPS.length - 8;
+    const baseY = this.hudButtonRowY(0);
+    // If mobile, put map buttons slightly lower than inventory to avoid overlap?
+    return MAPS.map((m, idx) => ({ id: m.id, rect: { x: x + idx * (bw + 8), y: baseY, w: bw, h: bh } }));
   }
 
   // ---------------------------------------------------------------- events
@@ -2605,7 +2717,7 @@ export class GameClient {
       return;
     }
     this.keys.add(e.code);
-    if (e.code === "Space") e.preventDefault();
+    if (e.code === "Space" || e.code.startsWith("Shift")) e.preventDefault();
     if (e.code === "KeyE" || e.code === "KeyI") this.toggleBag();
     if (e.code === "KeyC") this.toggleCraft();
     if (this.scene === "game") {
@@ -2693,6 +2805,21 @@ export class GameClient {
     const p = this.pointerPos(e);
     this.mx = p.x;
     this.my = p.y;
+    // Mobile joystick handling: if active, clamp current point to radius
+    if (this.isMobile && this.mobileJoystick.active) {
+      const dx = p.x - this.mobileJoystick.centerX;
+      const dy = p.y - this.mobileJoystick.centerY;
+      const dist = Math.hypot(dx, dy);
+      const maxDist = this.mobileJoystick.radius;
+      if (dist > maxDist) {
+        const angle = Math.atan2(dy, dx);
+        this.mobileJoystick.currX = this.mobileJoystick.centerX + Math.cos(angle) * maxDist;
+        this.mobileJoystick.currY = this.mobileJoystick.centerY + Math.sin(angle) * maxDist;
+      } else {
+        this.mobileJoystick.currX = p.x;
+        this.mobileJoystick.currY = p.y;
+      }
+    }
     if (this.drag) {
       this.dragX = p.x;
       this.dragY = p.y;
@@ -2707,6 +2834,48 @@ export class GameClient {
     const p = this.pointerPos(e);
     this.mx = p.x;
     this.my = p.y;
+    // Mobile controls: spread (Space) / contract (Shift) / joystick
+    if (this.isMobile) {
+      if (this.scene === "menu" && this.mobileFullscreenBtn && hit(this.mobileFullscreenBtn, p.x, p.y)) {
+        this.tryEnterFullscreen();
+        return;
+      }
+      if (this.scene === "game") {
+        if (this.mobileSpreadRect && hit(this.mobileSpreadRect, p.x, p.y)) {
+          this.mobileSpreadActive = true;
+          this.lastTouchTime = performance.now();
+          try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
+          return;
+        }
+        if (this.mobileContractRect && hit(this.mobileContractRect, p.x, p.y)) {
+          this.mobileContractActive = true;
+          this.lastTouchTime = performance.now();
+          try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
+          return;
+        }
+        if (this.mobileJoystickRect && hit(this.mobileJoystickRect, p.x, p.y)) {
+          this.mobileJoystick.active = true;
+          this.mobileJoystick.pointerId = e.pointerId;
+          this.mobileJoystick.currX = p.x;
+          this.mobileJoystick.currY = p.y;
+          this.lastTouchTime = performance.now();
+          try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
+          return;
+        }
+        // Allow starting joystick from any left-bottom touch as fallback
+        if (p.x < this.w * 0.45 && p.y > this.h * 0.35) {
+          this.mobileJoystick.active = true;
+          this.mobileJoystick.pointerId = e.pointerId;
+          this.mobileJoystick.centerX = p.x;
+          this.mobileJoystick.centerY = p.y;
+          this.mobileJoystick.currX = p.x;
+          this.mobileJoystick.currY = p.y;
+          this.lastTouchTime = performance.now();
+          try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
+          return;
+        }
+      }
+    }
     if (e.button === 2) {
       this.rightDown = true;
       return;
@@ -2717,6 +2886,17 @@ export class GameClient {
   };
 
   private onPointerUp = (e: PointerEvent) => {
+    // Release mobile touch buttons
+    if (this.isMobile) {
+      this.mobileSpreadActive = false;
+      this.mobileContractActive = false;
+      if (this.mobileJoystick.active && (this.mobileJoystick.pointerId === null || this.mobileJoystick.pointerId === e.pointerId)) {
+        this.mobileJoystick.active = false;
+        this.mobileJoystick.currX = this.mobileJoystick.centerX;
+        this.mobileJoystick.currY = this.mobileJoystick.centerY;
+        this.mobileJoystick.pointerId = null;
+      }
+    }
     if (e.button === 2) {
       this.rightDown = false;
       return;
@@ -2886,17 +3066,18 @@ export class GameClient {
   }
   
   private menuLayout() {
-    // New layout: biome buttons in 3-column grid centered
-    const COLS = 3;
-    const BIOME_W = 180;
-    const BIOME_H = 45;
-    const BIOME_GAP = 15;
-    const gridYOffset = 80;
-    
+    // Mobile responsive: single column on phone, 3 columns on desktop
+    const isMobileLayout = this.isMobile || this.w < 640;
+    const COLS = isMobileLayout ? 1 : 3;
+    const BIOME_W = isMobileLayout ? Math.min(280, this.w * 0.82) : 180;
+    const BIOME_H = isMobileLayout ? 52 : 45;
+    const BIOME_GAP = isMobileLayout ? 12 : 15;
+    const gridYOffset = isMobileLayout ? 40 : 80;
+
     const gridW = COLS * BIOME_W + (COLS - 1) * BIOME_GAP;
     const gridX = this.w / 2 - gridW / 2;
     const gridY = this.h / 2 - gridYOffset;
-    
+
     return { gridX, gridY, gridW, BIOME_W, BIOME_H, BIOME_GAP };
   }
 
@@ -2925,25 +3106,38 @@ export class GameClient {
     return buttons;
   }
 
-  /** Rects for the main-menu actions (top bar and left sidebar) */
+  /** Rects for the main-menu actions (top bar and left sidebar) - responsive for phone */
   private menuActionRects() {
     const W = this.w;
     const H = this.h;
-    
-    // Left sidebar buttons
-    const LEFT_X = 14;
-    const LEFT_W = 90;
-    const LEFT_H = 45;
-    const LEFT_GAP = 10;
-    const leftMidY = H / 2 - (LEFT_H * 4 + LEFT_GAP * 3) / 2;
-    
     const buttons: Record<string, { x: number; y: number; w: number; h: number }> = {};
-    
-    buttons['left_inventory'] = { x: LEFT_X, y: leftMidY, w: LEFT_W, h: LEFT_H };
-    buttons['left_craft'] = { x: LEFT_X, y: leftMidY + LEFT_H + LEFT_GAP, w: LEFT_W, h: LEFT_H };
-    buttons['left_bonus'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 2, w: LEFT_W, h: LEFT_H };
-    buttons['left_settings'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 3, w: LEFT_W, h: LEFT_H };
-    
+    const isMobileLayout = this.isMobile || W < 640;
+
+    if (isMobileLayout) {
+      // Phone: bottom horizontal bar with 4 buttons
+      const BTN_W = Math.min(78, (W - 40) / 4);
+      const BTN_H = 42;
+      const GAP = 8;
+      const totalW = BTN_W * 4 + GAP * 3;
+      const startX = (W - totalW) / 2;
+      const y = H - BTN_H - 58; // above instructions
+      buttons['left_inventory'] = { x: startX, y, w: BTN_W, h: BTN_H };
+      buttons['left_craft'] = { x: startX + BTN_W + GAP, y, w: BTN_W, h: BTN_H };
+      buttons['left_bonus'] = { x: startX + (BTN_W + GAP) * 2, y, w: BTN_W, h: BTN_H };
+      buttons['left_settings'] = { x: startX + (BTN_W + GAP) * 3, y, w: BTN_W, h: BTN_H };
+    } else {
+      // Desktop: left sidebar
+      const LEFT_X = 14;
+      const LEFT_W = 90;
+      const LEFT_H = 45;
+      const LEFT_GAP = 10;
+      const leftMidY = H / 2 - (LEFT_H * 4 + LEFT_GAP * 3) / 2;
+      buttons['left_inventory'] = { x: LEFT_X, y: leftMidY, w: LEFT_W, h: LEFT_H };
+      buttons['left_craft'] = { x: LEFT_X, y: leftMidY + LEFT_H + LEFT_GAP, w: LEFT_W, h: LEFT_H };
+      buttons['left_bonus'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 2, w: LEFT_W, h: LEFT_H };
+      buttons['left_settings'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 3, w: LEFT_W, h: LEFT_H };
+    }
+
     return buttons;
   }
 
@@ -3001,10 +3195,12 @@ export class GameClient {
   
   private menuPlayButtonRect(): Rect | null {
     const layout = this.menuLayout();
-    const totalRows = Math.ceil(MAPS.length / 3);
+    const isMobileLayout = this.isMobile || this.w < 640;
+    const cols = isMobileLayout ? 1 : 3;
+    const totalRows = Math.ceil(MAPS.length / cols);
     const playBtnY = layout.gridY + totalRows * (layout.BIOME_H + layout.BIOME_GAP) + 30;
-    const playBtnW = 180;
-    const playBtnH = 52;
+    const playBtnW = isMobileLayout ? Math.min(300, this.w * 0.86) : 180;
+    const playBtnH = isMobileLayout ? 60 : 52;
     return { x: this.w / 2 - playBtnW / 2, y: playBtnY, w: playBtnW, h: playBtnH };
   }
 
@@ -3016,6 +3212,7 @@ export class GameClient {
       // canvas listeners would keep swallowing clicks and wheel events over
       // an invisible panel for the whole match.
       this.settings.close();
+      this.updateMobileLayout();
       this.connect();
     };
   }
@@ -3031,6 +3228,7 @@ export class GameClient {
       this.craftOpen = false;
       this.craftSearchActive = false;
       this.craftBiomeOpen = false;
+      this.updateMobileLayout();
     };
   }
 
@@ -3763,6 +3961,37 @@ export class GameClient {
         hovered: true,
         scale: 1.1,
       });
+    }
+
+    // Mobile: suggest fullscreen + show current control scheme
+    if (this.isMobile) {
+      const isFs = typeof document !== "undefined" && !!document.fullscreenElement;
+      const topY = 8;
+      const tipW = Math.min(360, W * 0.92);
+      const tipH = isFs ? 58 : 84;
+      const tipX = W / 2 - tipW / 2;
+      ctx.save();
+      roundRect(ctx, tipX, topY, tipW, tipH, 10);
+      ctx.fillStyle = isFs ? "rgba(0,0,0,0.48)" : "rgba(28,36,46,0.92)";
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "rgba(255,255,255,0.15)";
+      ctx.stroke();
+      if (!isFs) {
+        text(ctx, "Phone tip: Enter fullscreen for best experience", tipX + tipW / 2, topY + 16, 12, "#ffe763");
+        text(ctx, "Landscape + fullscreen", tipX + tipW / 2, topY + 32, 10, "rgba(255,255,255,0.7)");
+        const btnW = 180, btnH = 32;
+        const btnX = tipX + tipW / 2 - btnW / 2;
+        const btnY = topY + 46;
+        const btnRect: Rect = { x: btnX, y: btnY, w: btnW, h: btnH };
+        this.mobileFullscreenBtn = btnRect;
+        button(ctx, btnRect, "FULLSCREEN", "#3fae60", hit(btnRect, this.mx, this.my), 13);
+      } else {
+        text(ctx, "Mobile: joystick to move | SPACE=Spread SHIFT=Defend", tipX + tipW / 2, topY + 18, 11, "#c9ffd6");
+        text(ctx, "Buttons on right also work", tipX + tipW / 2, topY + 36, 10, "rgba(255,255,255,0.65)");
+        this.mobileFullscreenBtn = null;
+      }
+      ctx.restore();
     }
   }
 
@@ -4664,8 +4893,11 @@ export class GameClient {
 
     if (isSelf) {
       const uiBusy = this.drag !== null;
-      spreadMode = this.mouseDown && !uiBusy;
-      contractMode = this.rightDown || this.keys.has("Space");
+      const isSpaceDown = this.keys.has("Space") || this.mobileSpreadActive;
+      const isShiftDown = this.keys.has("ShiftLeft") || this.keys.has("ShiftRight") || this.keys.has("Shift") || this.mobileContractActive;
+      // New mapping: Space = spread, Shift = contract (plus mouse for usability)
+      spreadMode = (this.mouseDown && !uiBusy) || isSpaceDown;
+      contractMode = this.rightDown || isShiftDown;
       const zoom = Math.min(1.15, Math.max(0.72, Math.min(this.w / 1280, this.h / 800) * 1.05));
       const worldMouseX = (this.mx - this.w / 2) / zoom + this.camX;
       const worldMouseY = (this.my - this.h / 2) / zoom + this.camY;
@@ -4746,6 +4978,60 @@ export class GameClient {
 
     // Dual-row quick-slot bar (main + secondary rows)
     this.quickSlot.draw(ctx);
+
+    // Mobile controls: joystick + Spread (Space) / Contract (Shift) buttons
+    if (this.isMobile && this.mobileControlsVisible) {
+      // Joystick base
+      const joy = this.mobileJoystick;
+      ctx.save();
+      ctx.globalAlpha = 0.38;
+      ctx.fillStyle = "rgba(0,0,0,0.35)";
+      ctx.beginPath();
+      ctx.arc(joy.centerX, joy.centerY, joy.radius + 14, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = joy.active ? 0.55 : 0.32;
+      ctx.strokeStyle = "rgba(255,255,255,0.5)";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(joy.centerX, joy.centerY, joy.radius, 0, Math.PI * 2);
+      ctx.stroke();
+      // Joystick knob
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = joy.active ? "#ffe763" : "rgba(255,255,255,0.65)";
+      ctx.beginPath();
+      ctx.arc(joy.currX, joy.currY, Math.max(18, joy.radius * 0.38), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.35)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.restore();
+
+      // Spread / Contract buttons (Space / Shift)
+      const drawMobileAction = (rect: Rect | null, label: string, active: boolean, sub: string) => {
+        if (!rect) return;
+        ctx.save();
+        roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 14);
+        ctx.fillStyle = active ? (label === "SPREAD" ? "#3fae60" : "#c9762b") : "rgba(18,24,32,0.72)";
+        ctx.fill();
+        ctx.lineWidth = active ? 3 : 2;
+        ctx.strokeStyle = active ? "#ffffff" : "rgba(255,255,255,0.25)";
+        ctx.stroke();
+        text(ctx, label, rect.x + rect.w / 2, rect.y + rect.h / 2 - 6, Math.max(11, rect.w * 0.18), "#ffffff");
+        text(ctx, sub, rect.x + rect.w / 2, rect.y + rect.h / 2 + 12, Math.max(9, rect.w * 0.12), active ? "#ffffff" : "rgba(255,255,255,0.6)");
+        ctx.restore();
+      };
+      drawMobileAction(this.mobileSpreadRect, "SPREAD", this.mobileSpreadActive, "[SPACE]");
+      drawMobileAction(this.mobileContractRect, "DEFEND", this.mobileContractActive, "[SHIFT]");
+    }
+
+    // Mobile hint: show controls help if mobile
+    if (this.isMobile && this.scene === "game" && this.w > 0) {
+      const hintY = 90;
+      ctx.save();
+      ctx.globalAlpha = 0.85;
+      text(ctx, "Move: joystick  |  SPACE: Spread  SHIFT: Defend", this.w / 2, hintY, 11, "rgba(255,255,255,0.75)");
+      ctx.restore();
+    }
   }
 
   private renderBag() {

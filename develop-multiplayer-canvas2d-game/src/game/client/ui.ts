@@ -1215,7 +1215,7 @@ export function drawMob(
     endGap = -4,
   ) => {
     const len = antennaLen * scale;
-    const width = Math.max(1, antennaWidth * scale);
+    const width = Math.max(1, antennaWidth * scale * 2);
     const startOffsetScaled = startOffset * scale;
     const endGapScaled = endGap * scale;
     const waveAngle = Math.sin(animationTimer * antennaWaveFreq) * (antennaWaveAmp * 0.3);
