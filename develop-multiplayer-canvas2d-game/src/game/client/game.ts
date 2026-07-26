@@ -17,6 +17,7 @@ import {
   MAPS,
   MAX_CRAFT_RARITY,
   MOBS,
+  ORACLE_SKIP,
   RARITIES,
   SECONDARY_SLOT_COUNT,
   SLOT_COUNT,
@@ -817,7 +818,9 @@ export class GameClient {
           const x = r.i16();
           const y = r.i16();
           const angle = (r.u16() / 65535) * Math.PI * 2;
-          const radius = r.u8();
+          // Mob radii use u16: the Eternal 10× size tier can exceed the
+          // previous 255px byte limit. Other entity kinds remain compact u8.
+          const radius = kind === ENT.MOB ? r.u16() : r.u8();
           const hp = r.u8() / 255;
           let name = "";
           if (kind === ENT.PLAYER) name = r.str();
@@ -3430,7 +3433,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
 
     text(
       ctx,
-      isOracle ? "Skip 2 rarities — guaranteed" : "Exchange for Coins",
+      isOracle ? "Upgrade 1 rarity — guaranteed" : "Exchange for Coins",
       layout.cx,
       r.y - 18,
       11,
@@ -3477,7 +3480,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
           text(ctx, "Cannot Oracle this rarity", layout.cx, y + 16, 11, "#ffbcbc");
         } else {
           text(ctx, `Need ${required} — have ${avail}`, layout.cx, y + 16, 11, avail >= required ? "#c9ffd6" : "#ffbcbc");
-          const target = sel.rarity + 2;
+          const target = sel.rarity + ORACLE_SKIP;
           if (target < RARITIES.length) {
             text(ctx, `→ ${RARITIES[target].name}`, layout.cx, y + 28, 11, RARITIES[target].color);
           }
