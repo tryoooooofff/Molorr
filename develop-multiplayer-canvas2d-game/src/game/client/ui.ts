@@ -760,7 +760,7 @@ export function drawItemIcon(
           if (isCircleEgg) {
             // Draw circle arrangement
             const overlapPercent = 0.15 + 0.05 * count;
-            const shapeRadius = size * 0.79475; // Eggs 15% smaller (was 0.935)
+            const shapeRadius = size * 0.79; // Eggs 15% smaller (was 0.935) — rounded to 2 s.f.
             const effectiveDiameter = shapeRadius * 2 * (1 - overlapPercent);
             let centerDistance = 0;
             if (count === 1) {
@@ -786,7 +786,7 @@ export function drawItemIcon(
           } else {
             // Draw narrow ellipse arrangement
             const overlapPercent = 0.15;
-            const shapeRadius = size * 1.0404; // Ellipse eggs 15% smaller (was 1.224)
+            const shapeRadius = size * 1.04; // Ellipse eggs 15% smaller (was 1.224) — rounded to 2 s.f.
             const rx = shapeRadius * 0.6; // 较短的半径
             const ry = shapeRadius;       // 较长的半径
             const angleStep = (Math.PI * 2) / count;
