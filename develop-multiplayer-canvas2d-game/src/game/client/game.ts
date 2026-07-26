@@ -2557,7 +2557,8 @@ export class GameClient {
     return [
       { id: "bag", rect: { x: 16, y: this.hudButtonRowY(0), w: bw, h: 38 }, label: "Inventory", color: "#3d8bd6" },
       { id: "craft", rect: { x: 16, y: this.hudButtonRowY(1), w: bw, h: 38 }, label: "Craft", color: "#c9762b" },
-      { id: "settings", rect: { x: 16 + bw + 8, y: this.hudButtonRowY(0), w: bw, h: 38 }, label: "Settings", color: "#7f8c8d" },
+      // Settings is a main-menu-only panel: it is deliberately absent from the
+      // in-game HUD (neither the button nor the panel is drawn while playing).
       { id: "menu", rect: { x: this.w - 108, y: this.hudButtonRowY(1), w: 92, h: 38 }, label: "Menu", color: "#8a4d4d" },
     ];
   }
@@ -2989,6 +2990,10 @@ export class GameClient {
     this.pendingScene = () => {
       this.scene = "game";
       this.alive = true;
+      // Settings is menu-only. Force it shut on entry, otherwise its own
+      // canvas listeners would keep swallowing clicks and wheel events over
+      // an invisible panel for the whole match.
+      this.settings.close();
       this.connect();
     };
   }
@@ -3009,9 +3014,6 @@ export class GameClient {
 
   // ------------------------------------------------------------ game input
   private gameClick(mx: number, my: number, shiftKey = false) {
-    if (this.settings.panelOpen) {
-      if (this.settings.handleClick(mx, my)) return;
-    }
     if (!this.alive) {
       const bw = 180;
       const cx = this.w / 2;      if (hit({ x: cx - bw - 10, y: this.h / 2 + 40, w: bw, h: 52 }, mx, my)) {
@@ -3028,7 +3030,6 @@ export class GameClient {
       if (!hit(b.rect, mx, my)) continue;
       if (b.id === "bag") this.toggleBag();
       if (b.id === "craft") this.toggleCraft();
-      if (b.id === "settings") this.settings.togglePanel();
       if (b.id === "menu") this.gotoMenu();
       return;
     }
@@ -3883,8 +3884,6 @@ export class GameClient {
       panel(ctx, { x: this.w / 2 - 120, y: 16, w: 240, h: 40 });
       text(ctx, "connecting to server...", this.w / 2, 36, 16, "#ffe763");
     }
-    // Draw Settings System panel
-    this.settings.draw(ctx, this.w / 2, this.h / 2);
   }
 
   buildWallEdgeCache() {    
@@ -4065,10 +4064,11 @@ export class GameClient {
     const top = cy - vh / 2;    
     const bottom = cy + vh / 2;    
     
-    // pattern固定世界    
-    if (this.wallPattern) {
-      this.wallPattern.setTransform(new DOMMatrix().translateSelf(-cx, -cy));    
-    }
+    // The caller already applied the camera transform (translate/scale in
+    // renderGame), so wall geometry is emitted in raw world coordinates and
+    // the pattern needs no counter-translation. Subtracting the camera here
+    // as well used to shift every wall a second time, pushing the whole map
+    // off-screen — which is why no walls were visible.
     
     const size = Math.sqrt(d.length) | 0;    
     const cellW = this.worldW / size;    
@@ -4093,9 +4093,9 @@ export class GameClient {
             maxY < top - pad || minY > bottom + pad) continue;    
     
         hasVisible = true;    
-        path.moveTo(loop[0].x - cx, loop[0].y - cy);    
+        path.moveTo(loop[0].x, loop[0].y);    
         for (let i = 1; i < loop.length; i++) {    
-            path.lineTo(loop[i].x - cx, loop[i].y - cy);    
+            path.lineTo(loop[i].x, loop[i].y);    
         }    
         path.closePath();    
     }    
@@ -4121,9 +4121,13 @@ export class GameClient {
     ctx.lineJoin = 'round';    
     ctx.lineCap = 'round';    
     
+    // Outlines are authored in screen pixels but stroked in world space, so
+    // divide by the zoom to keep their apparent thickness constant.
+    const outlineScale = 1 / viewScale;    
+    
     // 1) 先画一圈宽的浅色描边（这一圈是以 path 为中心，内外各占一半）    
     ctx.strokeStyle = lightColor;    
-    ctx.lineWidth = 36;    
+    ctx.lineWidth = 36 * outlineScale;    
     ctx.stroke(path);    
     
     // 2) 重新填充一次 —— fill 只会画在 path 内部，正好把浅色描边"往里"的那一半盖掉，    
@@ -4135,7 +4139,7 @@ export class GameClient {
     
     // 3) 再画一圈窄的深色描边，压在浅色边框的内侧    
     ctx.strokeStyle = darkColor;    
-    ctx.lineWidth = 12;    
+    ctx.lineWidth = 12 * outlineScale;    
     ctx.stroke(path);    
     
     // 4) 再填充一次，把深色描边"往里"的那一半也盖掉，    
@@ -4198,14 +4202,15 @@ export class GameClient {
     const groundColor = bgConfig?.ground_color || [80, 80, 80];    
     const lightColor = `rgba(${Math.min(255, groundColor[0] - 30)}, ${Math.min(255, groundColor[1] - 30)}, ${Math.min(255, groundColor[2] - 30)}, 0.4)`;    
     
-    // pattern 固定世界坐标    
-    if (this._wallPatternLegacy) {
-      this._wallPatternLegacy.setTransform(new DOMMatrix().translateSelf(-cx, -cy));    
-    }
-    
+    // renderGame already applied the camera transform, so cells are drawn at
+    // raw world coordinates (no second -camera offset) and the pattern stays
+    // aligned without a counter-translation.
     ctx.save();    
     ctx.lineJoin = 'round';    
     ctx.lineCap = 'round';    
+    
+    // Border widths are authored in screen pixels but stroked in world space.
+    const outlineScale = 1 / viewScale;    
     
     const startX = Math.max(0, Math.floor((left - pad) / cellW));    
     const endX = Math.min(size, Math.ceil((right + pad) / cellW));    
@@ -4216,12 +4221,12 @@ export class GameClient {
     // 步骤 1：第一圈粗边 —— 浅色外部框 (36px)    
     // ==========================================    
     ctx.strokeStyle = lightColor;    
-    ctx.lineWidth = 36;    
+    ctx.lineWidth = 36 * outlineScale;    
     for (let y = startY; y < endY; y++) {    
         for (let x = startX; x < endX; x++) {    
             if (wallData[y * size + x] === '1') {    
-                const px = x * cellW - cx;    
-                const py = y * cellH - cy;    
+                const px = x * cellW;    
+                const py = y * cellH;    
                 ctx.strokeRect(px, py, cellW, cellH);    
             }    
         }    
@@ -4236,8 +4241,8 @@ export class GameClient {
     for (let y = startY; y < endY; y++) {    
         for (let x = startX; x < endX; x++) {    
             if (wallData[y * size + x] === '1') {    
-                const px = x * cellW - cx;    
-                const py = y * cellH - cy;    
+                const px = x * cellW;    
+                const py = y * cellH;    
                 ctx.fillRect(px - 0.5, py - 0.5, cellW + 1, cellH + 1);    
             }    
         }    
@@ -4247,12 +4252,12 @@ export class GameClient {
     // 步骤 3：第二圈粗边 —— 深色内部框 (12px)    
     // ==========================================    
     ctx.strokeStyle = darkColor;    
-    ctx.lineWidth = 12;    
+    ctx.lineWidth = 12 * outlineScale;    
     for (let y = startY; y < endY; y++) {    
         for (let x = startX; x < endX; x++) {    
             if (wallData[y * size + x] === '1') {    
-                const px = x * cellW - cx;    
-                const py = y * cellH - cy;    
+                const px = x * cellW;    
+                const py = y * cellH;    
                 ctx.strokeRect(px, py, cellW, cellH);    
             }    
         }    
@@ -4264,8 +4269,8 @@ export class GameClient {
     for (let y = startY; y < endY; y++) {    
         for (let x = startX; x < endX; x++) {    
             if (wallData[y * size + x] === '1') {    
-                const px = x * cellW - cx;    
-                const py = y * cellH - cy;    
+                const px = x * cellW;    
+                const py = y * cellH;    
                 ctx.fillRect(px - 0.5, py - 0.5, cellW + 1, cellH + 1);    
             }    
         }    
@@ -4560,7 +4565,11 @@ export class GameClient {
 
   private drawPetalEnt(e: Ent) {
     const ctx = this.ctx;
-    drawItemIcon(ctx, e.type, e.x, e.y, e.radius, this.time * 3 + e.id, 0);
+    // Petal snapshots pack the cell rarity into the team byte (see sendState),
+    // so orbiting petals must pass it through. Without it every petal rendered
+    // at rarity 0 and rarity-scaled artwork (Stinger's extra triangles, Light's
+    // extra blobs) never appeared in the world, only on the card.
+    drawItemIcon(ctx, e.type, e.x, e.y, e.radius, this.time * 3 + e.id, e.team);
   }
 
   private drawMobEnt(e: Ent) {

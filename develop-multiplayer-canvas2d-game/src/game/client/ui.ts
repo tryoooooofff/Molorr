@@ -676,7 +676,7 @@ export function drawItemIcon(
       ctx.restore();
       break;
     }
-    case 35: { // Pincer — curved brown claw
+    case 27: { // Claw — curved brown claw
       const k = size / 100;
       ctx.save();
       ctx.scale(k, k);
@@ -751,6 +751,19 @@ export function drawItemIcon(
         }
         case "square": {
           roundRect(ctx, -size, -size, size * 2, size * 2, size * 0.3);
+          ctx.fill();
+          ctx.stroke();
+          break;
+        }
+        case "triangle": {
+          // Plain upward equilateral triangle, used by triangle-shaped items
+          // that have no bespoke artwork of their own (e.g. Pincer).
+          const R = size * 1.15;
+          ctx.beginPath();
+          ctx.moveTo(0, -R);
+          ctx.lineTo(-R * 0.866, R * 0.5);
+          ctx.lineTo(R * 0.866, R * 0.5);
+          ctx.closePath();
           ctx.fill();
           ctx.stroke();
           break;
@@ -1175,48 +1188,89 @@ export function drawMob(
   };
 
   /**
-   * Draw a matched pair of short, curved feelers from an ant head facing the
-   * local +X direction. The ant renderer rotates this local space to its
-   * target, so both antennae and body turn together rather than remaining
-   * fixed in world space.
+   * Draw a matched pair of bent feelers splayed around `angleToPlayer`.
+   *
+   * Each antenna is a quadratic curve: the base points ±30° off the facing
+   * direction, the control point is swung a further `bendFactor` radians
+   * outward at half length, and both the control point and the tip are pulled
+   * sideways by `endGap` so the two feelers hook away from each other. The ant
+   * renderer draws in a space already rotated to its target, so it passes
+   * angleToPlayer = 0 and the antennae turn with the body.
    */
-  const drawAntAntennae = (
+  const drawAntAntenna = (
     headX: number,
     headY: number,
-    headRadius: number,
-    animationTimer: number,
-    antennaColor: readonly number[] | string,
+    angleToPlayer: number,
+    scale = 1.0,
+    animationTimer = 0,
+    antennaColor: readonly number[] | string = [50, 50, 50],
+    antennaLen = 20,
+    antennaWidth = 2,
+    antennaWaveAmp = 0.2,
+    antennaWaveFreq = 10,
+    bendFactor = 0.9,
+    startOffset = 0,
+    endGap = -4,
   ) => {
-    const thickness = Math.max(1.25, headRadius * 0.115);
-    const tipRadius = Math.max(1.5, headRadius * 0.13);
-    const sway = Math.sin(animationTimer * 6) * headRadius * 0.07;
+    const len = antennaLen * scale;
+    const width = Math.max(1, antennaWidth * scale);
+    const startOffsetScaled = startOffset * scale;
+    const endGapScaled = endGap * scale;
+    const waveAngle = Math.sin(animationTimer * antennaWaveFreq) * (antennaWaveAmp * 0.3);
 
     ctx.save();
     ctx.strokeStyle = css(antennaColor);
-    ctx.fillStyle = css(antennaColor);
-    ctx.lineWidth = thickness;
+    ctx.lineWidth = width;
     ctx.lineCap = "round";
 
-    for (const side of [-1, 1]) {
-      // Start on the front edge, sweep outward, then curl slightly forward.
-      const startX = headX + headRadius * 0.48;
-      const startY = headY + side * headRadius * 0.28;
-      const controlX = headX + headRadius * 0.92;
-      const controlY = headY + side * headRadius * 0.86 + sway * side;
-      const endX = headX + headRadius * 1.45;
-      const endY = headY + side * headRadius * 1.02 + sway * side;
+    const getPerpOffset = (angle: number, gap: number) => ({
+      x: -Math.sin(angle) * gap,
+      y: Math.cos(angle) * gap,
+    });
 
-      ctx.beginPath();
-      ctx.moveTo(startX, startY);
-      ctx.quadraticCurveTo(controlX, controlY, endX, endY);
-      ctx.stroke();
+    // 左触角
+    const leftBaseAngle = angleToPlayer - Math.PI / 6 + waveAngle;
+    const leftStartX = headX + Math.cos(leftBaseAngle) * startOffsetScaled;
+    const leftStartY = headY + Math.sin(leftBaseAngle) * startOffsetScaled;
+    const leftEndBaseX = headX + Math.cos(leftBaseAngle) * len;
+    const leftEndBaseY = headY + Math.sin(leftBaseAngle) * len;
+    const leftShrink = -Math.min(endGapScaled, len * 0.3);
+    const leftPerp = getPerpOffset(leftBaseAngle, leftShrink);
+    const leftEndX = leftEndBaseX + leftPerp.x;
+    const leftEndY = leftEndBaseY + leftPerp.y;
+    const leftMidAngle = leftBaseAngle - bendFactor;
+    const leftMidDist = len * 0.5;
+    const leftMidShrink = -Math.min(endGapScaled * 0.5, len * 0.15);
+    const leftMidPerp = getPerpOffset(leftMidAngle, leftMidShrink);
+    const leftMidX = headX + Math.cos(leftMidAngle) * leftMidDist + leftMidPerp.x;
+    const leftMidY = headY + Math.sin(leftMidAngle) * leftMidDist + leftMidPerp.y;
 
-      // Small, restrained terminal bulb makes the feeler read clearly without
-      // looking like an oversized pincer.
-      ctx.beginPath();
-      ctx.arc(endX, endY, tipRadius, 0, Math.PI * 2);
-      ctx.fill();
-    }
+    ctx.beginPath();
+    ctx.moveTo(leftStartX, leftStartY);
+    ctx.quadraticCurveTo(leftMidX, leftMidY, leftEndX, leftEndY);
+    ctx.stroke();
+
+    // 右触角
+    const rightBaseAngle = angleToPlayer + Math.PI / 6 - waveAngle;
+    const rightStartX = headX + Math.cos(rightBaseAngle) * startOffsetScaled;
+    const rightStartY = headY + Math.sin(rightBaseAngle) * startOffsetScaled;
+    const rightEndBaseX = headX + Math.cos(rightBaseAngle) * len;
+    const rightEndBaseY = headY + Math.sin(rightBaseAngle) * len;
+    const rightShrink = Math.min(endGapScaled, len * 0.3);
+    const rightPerp = getPerpOffset(rightBaseAngle, rightShrink);
+    const rightEndX = rightEndBaseX + rightPerp.x;
+    const rightEndY = rightEndBaseY + rightPerp.y;
+    const rightMidAngle = rightBaseAngle + bendFactor;
+    const rightMidDist = len * 0.5;
+    const rightMidShrink = Math.min(endGapScaled * 0.5, len * 0.15);
+    const rightMidPerp = getPerpOffset(rightMidAngle, rightMidShrink);
+    const rightMidX = headX + Math.cos(rightMidAngle) * rightMidDist + rightMidPerp.x;
+    const rightMidY = headY + Math.sin(rightMidAngle) * rightMidDist + rightMidPerp.y;
+
+    ctx.beginPath();
+    ctx.moveTo(rightStartX, rightStartY);
+    ctx.quadraticCurveTo(rightMidX, rightMidY, rightEndX, rightEndY);
+    ctx.stroke();
     ctx.restore();
   };
 
@@ -1521,7 +1575,24 @@ export function drawMob(
     drawCircle(-bodyRadius * 0.8, 0, bodyRadius * 0.7, innerBodyColor);
     drawCircle(headX, 0, headRadius, bodyColor);
     drawCircle(headX, 0, headRadius * 0.7, innerBodyColor);
-    drawAntAntennae(headX, 0, headRadius, t, antennaColor);
+    // Local +X already points at the target (see the rotate() above), so the
+    // antennae are drawn with angleToPlayer = 0 and start on the head's rim.
+    const antennaScale = headRadius / 16;
+    drawAntAntenna(
+      headX,
+      0,
+      0,
+      antennaScale,
+      t,
+      antennaColor,
+      20,
+      2,
+      0.2,
+      10,
+      0.9,
+      headRadius * 0.9 / antennaScale,
+      -4,
+    );
     ctx.restore();
   };
 
