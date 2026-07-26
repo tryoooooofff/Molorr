@@ -541,8 +541,10 @@ export function drawItemIcon(
       ctx.restore();
       break;
     }
-    case 25: { // Lightning — a 10-point cyan star
-      const k = (size * 1.2) / 60;
+    case 25: { // Lightning — a slightly more compact 10-point cyan star
+      // Keep the sharp silhouette, but reduce its footprint by 10% so it
+      // reads closer in size to the surrounding petal icons.
+      const k = (size * 1.08) / 60;
       ctx.save();
       ctx.scale(k, k);
       const spikes = 10;
