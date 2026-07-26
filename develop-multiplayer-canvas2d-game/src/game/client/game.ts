@@ -2460,27 +2460,18 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
   }
 
   private drawDrop(e: Ent) {
-    const ctx = this.ctx;
-    const rarity = RARITIES[Math.min(e.team, RARITIES.length - 1)] ?? RARITIES[0];
+    // Drops use the exact same renderer as inventory, crafting, and the main
+    // quick-slot row: square rarity background, centered item icon, item name,
+    // and stack badge. Only the gentle world-space bob is unique to loot.
     const bob = Math.sin(this.time * 4 + e.id) * 3;
-    const w = 30;
-    const h = 36;
-    const x = e.x - w / 2;
-    const y = e.y - h / 2 + bob;
-    ctx.save();
-    ctx.globalAlpha = 0.9;
-    // Flat square drop card: light inner fill + dark rarity border (matches reference Card.draw).
-    ctx.fillStyle = rarity.color;
-    ctx.fillRect(x, y, w, h);
-    ctx.strokeStyle = rarity.border;
-    ctx.lineWidth = 3;
-    ctx.strokeRect(x, y, w, h);
-    drawItemIcon(ctx, e.type, e.x, e.y + bob, 9, this.time * 2, e.team || 0);
-    ctx.restore();
-    // Stacked drops (merged nearby copies) show how many cards they hand over.
-    // The server packs that count into the drop's otherwise-unused hp byte.
-    const stack = Math.round(e.hp * 255);
-    if (stack > 1) text(ctx, `x${stack}`, e.x, y + h - 3, 12, "#ffffff");
+    const size = 52;
+    const stack = Math.max(1, Math.round(e.hp * 255));
+    drawCard(
+      this.ctx,
+      { x: e.x - size / 2, y: e.y - size / 2 + bob, w: size, h: size },
+      { item: e.type, rarity: e.team, count: stack },
+      { dim: 0.94 },
+    );
   }
 
   private drawPetalEnt(e: Ent) {
@@ -2934,18 +2925,10 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     ctx.scale(pulse, pulse);
     ctx.translate(-rr.w / 2, -rr.h / 2);
 
-    roundRect(ctx, 0, 0, rr.w, rr.h, 8);
-    ctx.fillStyle = "#A8865A";
-    ctx.fill();
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = `rgb(${color[0]},${color[1]},${color[2]})`;
-    ctx.stroke();
-
-    // inner card
+    // Keep the result itself identical to every other item card; the glow is
+    // presentation only and does not introduce a second card skin.
     drawCard(ctx, { x: 0, y: 0, w: rr.w, h: rr.h }, this.craftPending, {
-      showName: false,
       hovered: true,
-      scale: 1.02,
     });
     ctx.restore();
 
@@ -3016,7 +2999,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
         if (isHovered) hoveredEntry = { slot: -1, cell };
         const picked = !!sel && sel.item === cell.item && sel.rarity === cell.rarity;
         const scale = isHovered ? 1.08 : picked ? 1.04 : 1;
-        drawCard(ctx, r, cell, { hovered: isHovered || picked, scale, dim: picked ? 1 : 0.92, showName: false });
+        drawCard(ctx, r, cell, { hovered: isHovered || picked, scale, dim: picked ? 1 : 0.92 });
         if (picked) {
           ctx.save();
           ctx.globalAlpha = 0.65 + Math.sin(this.time * 6) * 0.25;
@@ -3106,7 +3089,6 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
         ctx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2));
       }
       drawCard(ctx, { ...r, y: r.y + bob }, { item: sel!.item, rarity: sel!.rarity, count: Math.max(1, slotCount) }, {
-        showName: false,
         scale: this.craftSpin > 0 ? 1.06 : 1,
       });
       ctx.restore();
@@ -3191,7 +3173,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
         ctx.scale(fill.scale, fill.scale);
         ctx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2));
       }
-      drawCard(ctx, r, { item: sel.item, rarity: sel.rarity, count: avail }, { showName: false });
+      drawCard(ctx, r, { item: sel.item, rarity: sel.rarity, count: avail });
       ctx.restore();
     } else {
       text(ctx, "+", r.x + r.w / 2, r.y + r.h / 2, 22, "rgba(255,255,255,0.35)");
