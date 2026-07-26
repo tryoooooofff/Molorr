@@ -674,23 +674,25 @@ export function drawItemIcon(
       ctx.restore();
       break;
     }
-    case 35: { // Pincer — a curved claw blade
-      const k = size / 32;
+    case 35: { // Pincer — curved brown claw
+      const k = size / 100;
       ctx.save();
       ctx.scale(k, k);
-      // Shifts the claw's drawing-space coordinates so it's centered on (0,0).
-      ctx.translate(-92, -93);
+      // Center the supplied 66..168 × 30..110 authored path on the icon.
+      ctx.translate(-117, -70);
+      ctx.fillStyle = "#4a322d";
       ctx.beginPath();
-      ctx.moveTo(68, 76);
-      ctx.quadraticCurveTo(120, 30, 116, 125);
-      ctx.quadraticCurveTo(100, 72, 68, 76);
+      ctx.moveTo(68, 70);
+      ctx.quadraticCurveTo(115, 30, 168, 98);
+      ctx.quadraticCurveTo(125, 72, 148, 110);
+      ctx.quadraticCurveTo(105, 82, 66, 85);
+      ctx.quadraticCurveTo(80, 78, 68, 70);
       ctx.closePath();
-      ctx.fillStyle = "#2c353d";
-      ctx.lineWidth = 8;
-      ctx.strokeStyle = "#222222";
+      ctx.fill();
+      ctx.lineWidth = 10;
+      ctx.strokeStyle = "#3C261E";
       ctx.lineJoin = "round";
       ctx.stroke();
-      ctx.fill();
       ctx.restore();
       break;
     }
@@ -758,7 +760,7 @@ export function drawItemIcon(
           if (isCircleEgg) {
             // Draw circle arrangement
             const overlapPercent = 0.15 + 0.05 * count;
-            const shapeRadius = size * 0.55; // Proportional radius
+            const shapeRadius = size * 1.1; // Eggs are intentionally 2× larger
             const effectiveDiameter = shapeRadius * 2 * (1 - overlapPercent);
             let centerDistance = 0;
             if (count === 1) {
@@ -784,7 +786,7 @@ export function drawItemIcon(
           } else {
             // Draw narrow ellipse arrangement
             const overlapPercent = 0.15;
-            const shapeRadius = size * 0.72; // Proportional radius for nice fit
+            const shapeRadius = size * 1.44; // Ellipse eggs are intentionally 2× larger
             const rx = shapeRadius * 0.6; // 较短的半径
             const ry = shapeRadius;       // 较长的半径
             const angleStep = (Math.PI * 2) / count;
