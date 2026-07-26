@@ -3179,7 +3179,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     ctx.fillStyle = "rgba(8,10,14,0.66)";
     ctx.fillRect(0, 0, this.w, this.h);
     text(ctx, "You were shredded!", this.w / 2, this.h / 2 - 70, 42, "#ff8080");
-    text(ctx, `Level ${this.level} · ${this.xp} XP · you keep 75% on respawn`, this.w / 2, this.h / 2 - 20, 17, "#ffffff");
+    text(ctx, `Level ${this.level} · ${this.xp} XP · you keep 100% on respawn`, this.w / 2, this.h / 2 - 20, 17, "#ffffff");
     const bw = 180;
     const cx = this.w / 2;
     const r1 = { x: cx - bw - 10, y: this.h / 2 + 40, w: bw, h: 52 };

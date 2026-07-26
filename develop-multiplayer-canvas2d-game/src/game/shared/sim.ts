@@ -143,6 +143,10 @@ export class Mob {
   friendly: boolean;
   ownerId = 0;
   ownerSlot = -1;
+  /** Summon item id that hatched this friendly mob, or -1 for wild mobs. */
+  sourceItem = -1;
+  /** Rarity of the summon item that hatched this friendly mob. */
+  sourceRarity = 0;
   targetId = 0;
   wander = 0;
   hitCd = 0;
@@ -401,7 +405,6 @@ export class GameServer {
         const p = c.player;
         if (!p || p.alive) return;
         p.alive = true;
-        p.xp = Math.floor(p.xp * 0.75);
         this.applyLevel(p);
         p.hp = p.maxHp;
         this.spawnPlayer(p);
@@ -768,6 +771,17 @@ export class GameServer {
     }
   }
 
+  /** Immediately despawn every friendly mob tied to one summon slot. */
+  private despawnPets(p: Player, slot: number) {
+    const pets = p.pets[slot] || [];
+    if (pets.length <= 0) return;
+    for (const pet of pets) {
+      const world = this.worlds[pet.mapId];
+      if (world) world.mobs = world.mobs.filter((m) => m !== pet);
+    }
+    p.pets[slot] = [];
+  }
+
   private rebuildPetals(p: Player) {
     const petals: PetalState[] = [];
     for (let i = 0; i < SLOT_COUNT; i++) {
@@ -788,15 +802,16 @@ export class GameServer {
         y: p.y,
         hitCd: 0,
       });
-      // remove pet if slot no longer holds the same summon
+      // A summon's pets only live while the exact same egg stays equipped in
+      // that same main hotbar slot. Moving/removing/upgrading the egg despawns
+      // its old pets instantly; a freshly equipped egg can hatch new ones later.
       const pets = p.pets[i] || [];
-      if (pets.length > 0 && (!def || def.kind !== "summon" || ITEMS[cell!.item].petMob !== pets[0].type)) {
-        for (const pet of pets) {
-          const world = this.worlds[pet.mapId];
-          world.mobs = world.mobs.filter((m) => m !== pet);
-        }
-        p.pets[i] = [];
-      }
+      const sameSummon =
+        !!cell
+        && !!def
+        && def.kind === "summon"
+        && pets.every((pet) => pet.type === def.petMob && pet.sourceItem === cell.item && pet.sourceRarity === cell.rarity);
+      if (pets.length > 0 && !sameSummon) this.despawnPets(p, i);
     }
     p.petals = petals;
   }
@@ -920,23 +935,32 @@ export class GameServer {
 
       const dmg = def.damage * rarityMult(cell.rarity);
       const pr = def.radius * (1 + cell.rarity * 0.06);
+      let targetMob: Mob | null = null;
+      let targetDist = Infinity;
+      let totalIncoming = 0;
       for (const mob of world.mobs) {
         if (mob.friendly) continue;
         const d = Math.hypot(mob.x - st.x, mob.y - st.y);
-        if (d < mob.radius + pr && st.hitCd <= 0) {
-          mob.hp -= dmg;
-          mob.lastHitBy = p.id;
-          mob.targetId = p.id;
-          st.hp -= mob.damage * 0.5;
-          st.hitCd = 0.25;
-          const kb = 90 / (mob.radius / 20);
-          mob.vx += ((mob.x - st.x) / (d || 1)) * kb;
-          mob.vy += ((mob.y - st.y) / (d || 1)) * kb;
-          if (st.hp <= 0) {
-            st.alive = false;
-            st.timer = def.reload;
-          }
-          break;
+        if (d >= mob.radius + pr) continue;
+        totalIncoming += mob.damage * 0.5;
+        if (d < targetDist) {
+          targetDist = d;
+          targetMob = mob;
+        }
+      }
+      if (targetMob && st.hitCd <= 0) {
+        targetMob.hp -= dmg;
+        targetMob.lastHitBy = p.id;
+        targetMob.targetId = p.id;
+        st.hp -= totalIncoming;
+        st.hitCd = 0.25;
+        const kb = 90 / (targetMob.radius / 20);
+        targetMob.vx += ((targetMob.x - st.x) / (targetDist || 1)) * kb;
+        targetMob.vy += ((targetMob.y - st.y) / (targetDist || 1)) * kb;
+        if (st.hp <= 0) {
+          st.alive = false;
+          st.timer = def.reload;
+          if (isSummon) this.despawnPets(p, i);
         }
       }
     }
@@ -988,9 +1012,12 @@ export class GameServer {
       const m = new Mob(this.nextId++, def.petMob, p.mapId, x, y, rarity, true);
       m.ownerId = p.id;
       m.ownerSlot = slot;
+      m.sourceItem = cell.item;
+      m.sourceRarity = cell.rarity;
       m.maxHp = Math.round(m.maxHp * 1.4);
       m.hp = m.maxHp;
-      m.damage *= 1.3;
+      // Keep summon damage fair: a friendly mob hits exactly as hard as the
+      // same wild mob at the same rarity.
       m.speed = Math.max(70, m.speed * 1.5);
       m.spawnProtection = protection;
       this.worlds[p.mapId].mobs.push(m);
