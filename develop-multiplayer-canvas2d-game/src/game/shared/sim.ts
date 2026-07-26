@@ -27,6 +27,7 @@ import {
   MAX_DROPPED_CARDS,
   cloverDnaBonus,
   mapRarityToSummonRarity,
+  mobSizeMult,
   ORACLE_COOLDOWN_HOURS,
   ORACLE_SKIP,
   oracleRequiredCount,
@@ -204,7 +205,10 @@ export class Mob {
     this.friendly = friendly;
     this.maxHp = Math.round(def.health * m);
     this.hp = this.maxHp;
-    this.radius = def.radius * (1 + rarity * 0.08);
+    // Mob rarity controls physical size as well as its combat stats. Keeping
+    // this radius authoritative means rendering, wall collision, melee range,
+    // and mob-to-mob collision all agree on the requested size ladder.
+    this.radius = def.radius * mobSizeMult(rarity);
     this.damage = def.damage * enemyDamageMult(rarity);
     this.speed = def.speed;
   }
@@ -566,9 +570,9 @@ export class GameServer {
       return;
     }
 
-    // Regular chat message — broadcast to same map
-    const displayMsg = `${p.name}: ${trimmed}`;
-    this.broadcastChatToMap(p.mapId, displayMsg, p.name);
+    // Regular chat messages travel as body text only. The client renders the
+    // sender field itself, so prepending it here produced "name: name: hello".
+    this.broadcastChatToMap(p.mapId, trimmed, p.name);
   }
 
   private handleCommand(c: ClientState, p: Player, cmd: string) {
@@ -972,7 +976,7 @@ export class GameServer {
     p.dirty = true;
   }
 
-  /** Guaranteed rarity skip (no RNG) at the cost of many cards and a long cooldown. */
+  /** Guaranteed one-tier rarity upgrade (no RNG) at the cost of many cards and a long cooldown. */
   private oracle(c: ClientState, p: Player, item: number, rarity: number) {
     if (item >= ITEMS.length || ITEMS[item].kind === "trinket") return;
     const required = oracleRequiredCount(rarity);
@@ -1055,26 +1059,32 @@ export class GameServer {
     let rarity = 0;
     let x = 0;
     let y = 0;
-    let zone: string = "1";
+    let placed = false;
+
     for (let tries = 0; tries < 80; tries++) {
       x = 200 + Math.random() * (map.width - 400);
       y = 200 + Math.random() * (map.height - 400);
-      zone = getBlockAt(mapId, x, y);
-      // Only spawn in zone tiles (A-G); skip walls ('1').
-      // Spawn points are mapped to zone 'A' by getBlockAt.
-      if (zone === "1") continue;
-      const [cx, cy] = collideWalls(map.walls, x, y, MOBS[type].radius + 6);
-      if (Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01) break;
+      const zone = getBlockAt(mapId, x, y);
+      // Only spawn in zone tiles (A-G); skip walls ('1'). Spawn-point tiles
+      // are mapped to zone A by getBlockAt.
+      if (zone < "A" || zone > "G") continue;
+
+      // Roll the rarity before testing space: the collision check must use the
+      // real radius, including the 10× Eternal scale, not the base radius.
+      const candidateRarity = rollZoneRarity(zone);
+      const candidateRadius = MOBS[type].radius * mobSizeMult(candidateRarity);
+      const [cx, cy] = collideWalls(map.walls, x, y, candidateRadius + 6);
+      if (Math.abs(cx - x) >= 0.01 || Math.abs(cy - y) >= 0.01) continue;
+
+      rarity = candidateRarity;
+      placed = true;
+      break;
     }
-    // Roll rarity from the block zone system.
-    // getBlockAt maps spawn points ('2') → zone 'A', so only '1' or 'A'-'G'
-    // can appear here. The fallback handles the rare case where all 80 retries
-    // landed on walls and zone is still '1'.
-    if (zone >= "A" && zone <= "G") {
-      rarity = rollZoneRarity(zone);
-    } else {
-      rarity = 0;
-    }
+
+    // A huge high-rarity mob may not fit a narrow section of the map. Leave
+    // this spawn slot empty and retry next tick instead of creating it inside
+    // a wall with an incorrect collision box.
+    if (!placed) return;
     this.worlds[mapId].mobs.push(new Mob(this.nextId++, type, mapId, x, y, rarity));
   }
 
@@ -1816,7 +1826,9 @@ export class GameServer {
         .i16(Math.round(mob.x))
         .i16(Math.round(mob.y))
         .u16(Math.round((((mob.angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) / (Math.PI * 2)) * 65535))
-        .u8(Math.min(255, Math.round(mob.radius)))
+        // High-rarity mobs can be larger than 255px (e.g. a 28px Eternal
+        // Sandstorm is 280px), so mob radius uses u16 instead of truncating.
+        .u16(Math.min(65535, Math.round(mob.radius)))
         .u8(Math.max(0, Math.round((mob.hp / mob.maxHp) * 255)))
         .u8(mob.rarity);
       count++;

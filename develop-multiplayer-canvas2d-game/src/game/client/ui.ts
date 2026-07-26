@@ -541,8 +541,10 @@ export function drawItemIcon(
       ctx.restore();
       break;
     }
-    case 25: { // Lightning — a 10-point cyan star
-      const k = (size * 1.2) / 60;
+    case 25: { // Lightning — a slightly more compact 10-point cyan star
+      // Keep the sharp silhouette, but reduce its footprint by 10% so it
+      // reads closer in size to the surrounding petal icons.
+      const k = (size * 1.08) / 60;
       ctx.save();
       ctx.scale(k, k);
       const spikes = 10;
@@ -1160,8 +1162,6 @@ export function drawMob(
     if (rgb.length >= 4) return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${rgb[3]})`;
     return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`;
   };
-  const rarityName = RARITIES[Math.max(0, Math.min(RARITIES.length - 1, rarity))]?.name ?? "Common";
-
   const drawCircle = (cx: number, cy: number, r: number, fill: readonly number[], stroke?: readonly number[]) => {
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
@@ -1174,52 +1174,49 @@ export function drawMob(
     }
   };
 
-  const drawAntAntenna = (
-    ctx: CanvasRenderingContext2D,
+  /**
+   * Draw a matched pair of short, curved feelers from an ant head facing the
+   * local +X direction. The ant renderer rotates this local space to its
+   * target, so both antennae and body turn together rather than remaining
+   * fixed in world space.
+   */
+  const drawAntAntennae = (
     headX: number,
     headY: number,
-    scale: number,
+    headRadius: number,
     animationTimer: number,
     antennaColor: readonly number[] | string,
   ) => {
-    // Simple two-curve ant antennae: one quadratic curve to the right of the
-    // head, one mirrored to the left. A small `jawRotation` opens and closes
-    // them like mandibles; the `t` animation makes them wave gently.
-    const baseRotation = Math.PI / 5; // ~36° half-spread when idle
-    const swing = Math.sin(animationTimer * 8) * 0.08; // tiny breathing motion
-    const jawRotation = baseRotation + swing;
+    const thickness = Math.max(1.25, headRadius * 0.115);
+    const tipRadius = Math.max(1.5, headRadius * 0.13);
+    const sway = Math.sin(animationTimer * 6) * headRadius * 0.07;
 
-    // Antennae were previously 6x too long; shrink them to 1/6 of their
-    // original reach and snap every coordinate to a whole pixel.
-    // Increased by +50% per user request.
-    const ANTENNA_SHRINK = (1 / 6) * 1.5;
-    const ctrlX = Math.round(25 * scale * ANTENNA_SHRINK);
-    const ctrlY = Math.round(15 * scale * ANTENNA_SHRINK);
-    const tipX = Math.round(55 * scale * ANTENNA_SHRINK);
-    const tipY = Math.round(8 * scale * ANTENNA_SHRINK);
-
+    ctx.save();
     ctx.strokeStyle = css(antennaColor);
-    ctx.lineWidth = Math.max(1.5, 2.2 * scale);
+    ctx.fillStyle = css(antennaColor);
+    ctx.lineWidth = thickness;
     ctx.lineCap = "round";
 
-    // 1. Right antenna (rotated +jawRotation around the head).
-    ctx.save();
-    ctx.translate(headX, headY);
-    ctx.rotate(jawRotation);
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.quadraticCurveTo(ctrlX, ctrlY, tipX, tipY);
-    ctx.stroke();
-    ctx.restore();
+    for (const side of [-1, 1]) {
+      // Start on the front edge, sweep outward, then curl slightly forward.
+      const startX = headX + headRadius * 0.48;
+      const startY = headY + side * headRadius * 0.28;
+      const controlX = headX + headRadius * 0.92;
+      const controlY = headY + side * headRadius * 0.86 + sway * side;
+      const endX = headX + headRadius * 1.45;
+      const endY = headY + side * headRadius * 1.02 + sway * side;
 
-    // 2. Left antenna (mirrored).
-    ctx.save();
-    ctx.translate(headX, headY);
-    ctx.rotate(-jawRotation);
-    ctx.beginPath();
-    ctx.moveTo(0, 0);
-    ctx.quadraticCurveTo(ctrlX, -ctrlY, tipX, -tipY);
-    ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.quadraticCurveTo(controlX, controlY, endX, endY);
+      ctx.stroke();
+
+      // Small, restrained terminal bulb makes the feeler read clearly without
+      // looking like an oversized pincer.
+      ctx.beginPath();
+      ctx.arc(endX, endY, tipRadius, 0, Math.PI * 2);
+      ctx.fill();
+    }
     ctx.restore();
   };
 
@@ -1416,9 +1413,11 @@ export function drawMob(
     const bodyColor = friendly ? [255, 215, 0] : [230, 120, 80];
     const bodyStrokeColor = friendly ? [200, 160, 0] : [180, 80, 50];
     const limbColor = friendly ? [180, 140, 0] : [40, 40, 40];
-    const rarityMult = 1 + rarity * 0.15;
-    const legWidthMult = 0.65 + rarity * 0.15;
-    const clawSizeMult = 0.4 + rarity * 0.1;
+    // `radius` already carries the authoritative rarity size multiplier.
+    // Do not apply an extra per-rarity enlargement here or crabs would grow
+    // beyond the shared mob-size ladder.
+    const legWidthMult = 0.65;
+    const clawSizeMult = 0.4;
     const scale = (radius * 2) / 90;
     ctx.save();
     ctx.translate(x, y);
@@ -1431,7 +1430,7 @@ export function drawMob(
       const ly = dirX * sin + dirY * cos;
       ctx.beginPath();
       ctx.moveTo(baseX * scale, baseY * scale);
-      ctx.lineTo((baseX + lx * 0.7) * scale * rarityMult, (baseY + ly * 0.7) * scale * rarityMult);
+      ctx.lineTo((baseX + lx * 0.7) * scale, (baseY + ly * 0.7) * scale);
       ctx.strokeStyle = css(limbColor);
       ctx.lineWidth = 4 * scale * legWidthMult;
       ctx.lineCap = "round";
@@ -1468,16 +1467,16 @@ export function drawMob(
     const clawAngle = Math.sin(anim * 2.5) * 0.2;
     drawClaw(-visualScale * 25, -10, 1, clawAngle);
     drawClaw(visualScale * 25, -10, -1, clawAngle);
-    const wFront = 160 * scale * rarityMult / 3;
-    const wBack = 132 * scale * rarityMult / 3;
-    const H = 95 * scale * rarityMult / 3;
-    const r = 30 * scale * rarityMult / 3;
-    const arc = 24 * scale * rarityMult / 3;
+    const wFront = 160 * scale / 3;
+    const wBack = 132 * scale / 3;
+    const H = 95 * scale / 3;
+    const r = 30 * scale / 3;
+    const arc = 24 * scale / 3;
     const xFL = -wFront / 2, xFR = wFront / 2, xBL = -wBack / 2, xBR = wBack / 2;
     const yF = -H / 2, yB = H / 2;
     ctx.fillStyle = css(bodyColor);
     ctx.strokeStyle = css(bodyStrokeColor);
-    ctx.lineWidth = 5 * scale * rarityMult / 2;
+    ctx.lineWidth = 5 * scale / 2;
     ctx.beginPath();
     ctx.moveTo(xBL, yB - r);
     ctx.arcTo(xBL, yB, xBL + r, yB, r);
@@ -1492,9 +1491,9 @@ export function drawMob(
     ctx.fill();
     ctx.stroke();
     ctx.strokeStyle = "rgba(0,0,0,0.2)";
-    ctx.lineWidth = 4 * scale * rarityMult / 3;
+    ctx.lineWidth = 4 * scale / 3;
     [[-15, -20, -11, 8, -13, 22], [15, -20, 11, 8, 13, 22]].forEach(([ax, ay, bx, by, ex, ey]) => {
-      const s = scale * rarityMult / 3;
+      const s = scale / 3;
       ctx.beginPath();
       ctx.moveTo(ax * s, ay * s);
       ctx.bezierCurveTo(bx * s, (by / 2) * s, bx * s, by * s, ex * s, ey * s);
@@ -1510,15 +1509,19 @@ export function drawMob(
     const antennaColor = [51, 51, 51];
     const headRadius = scaledSize / 2.2;
     const bodyRadius = headRadius * 0.8;
-    const headX = Math.cos(angle) * headRadius * 0.3;
-    const headY = Math.sin(angle) * headRadius * 0.3;
+    const headX = headRadius * 0.3;
+
     ctx.save();
     ctx.translate(x, y);
-    drawAntAntenna(ctx, headX, headY, scaledSize / 22, t, antennaColor);
-    drawCircle(-Math.cos(angle) * bodyRadius * 0.8, -Math.sin(angle) * bodyRadius * 0.8, bodyRadius, bodyColor);
-    drawCircle(-Math.cos(angle) * bodyRadius * 0.8, -Math.sin(angle) * bodyRadius * 0.8, bodyRadius * 0.7, innerBodyColor);
-    drawCircle(headX, headY, headRadius, bodyColor);
-    drawCircle(headX, headY, headRadius * 0.7, innerBodyColor);
+    // Simulation angle is atan2(target.y - y, target.x - x), so local +X is
+    // the target direction. Rotating once here keeps the entire ant, including
+    // its redesigned antennae, facing the target.
+    ctx.rotate(angle);
+    drawCircle(-bodyRadius * 0.8, 0, bodyRadius, bodyColor);
+    drawCircle(-bodyRadius * 0.8, 0, bodyRadius * 0.7, innerBodyColor);
+    drawCircle(headX, 0, headRadius, bodyColor);
+    drawCircle(headX, 0, headRadius * 0.7, innerBodyColor);
+    drawAntAntennae(headX, 0, headRadius, t, antennaColor);
     ctx.restore();
   };
 
@@ -1817,8 +1820,8 @@ export function drawMob(
   };
 
   const drawStarfish = () => {
-    const scales: Record<string, number> = { Common: 1.0, Unusual: 1.2, Rare: 1.4, Epic: 1.6, Legendary: 1.8, Mythic: 2.0, Ultra: 2.3, Super: 2.6, Omega: 3.0, Eternal: 3.5 };
-    const baseScale = radius * 2.2 * (scales[rarityName] || 1.0);
+    // `radius` is already scaled once on the server for every mob shape.
+    const baseScale = radius * 2.2;
     const lightColor = friendly ? "rgb(255, 235, 120)" : "rgb(255, 150, 80)";
     const darkColor = friendly ? "rgb(255, 215, 0)" : "rgb(200, 90, 40)";
     ctx.save();

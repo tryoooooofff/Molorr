@@ -113,8 +113,9 @@ All packets are raw binary, big-endian, first byte = packet id.
 
 entity = `u8 kind` (0 player, 1 mob, 2 petal, 3 drop), `u16 id`, `u8 type`,
 `u8 team` (0 hostile, 1 friendly, 2 self — for drops this field carries the rarity),
-`i16 x`, `i16 y`, `u16 angle/65535`, `u8 radius`, `u8 hp*255`,
-then `str name` if player, `u8 rarity` if mob.
+`i16 x`, `i16 y`, `u16 angle/65535`, `radius` (`u16` for mobs, `u8` for every other entity), `u8 hp*255`,
+then `str name` if player, `u8 rarity` if mob. The wider mob radius preserves the
+10× Eternal size tier without truncating large mobs.
 
 ## C++ server
 

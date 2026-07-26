@@ -108,6 +108,31 @@ export const CRAFT_CARDS_PER_ATTEMPT = 3.5;
 export const MAX_RARITY = RARITIES.length - 1;
 /** Highest rarity reachable through the normal 5-combine crafting ladder (Eternal). Unique sits outside it. */
 export const MAX_CRAFT_RARITY = RARITIES.length - 2;
+
+/**
+ * Visual and collision-size multiplier for mobs at each rarity, in rarity
+ * order. Unique is outside the normal ladder, so it uses the Eternal cap.
+ */
+export const MOB_SIZE_MULTIPLIERS: readonly number[] = [
+  1,   // Common
+  1.2, // Unusual
+  1.5, // Rare
+  2,   // Epic
+  2.6, // Legendary
+  3.5, // Mythic
+  5,   // Ultra
+  6,   // Super
+  8,   // Omega
+  10,  // Eternal
+  10,  // Unique (uses the Eternal cap)
+];
+
+/** Returns the mob-size multiplier for a rarity index. */
+export function mobSizeMult(rarity: number): number {
+  const index = Math.max(0, Math.min(MOB_SIZE_MULTIPLIERS.length - 1, Math.floor(rarity)));
+  return MOB_SIZE_MULTIPLIERS[index];
+}
+
 /**
  * Wild mob drops never roll above this rarity. With the block zone system
  * allowing mobs up to Omega (zone G), the cap is raised so high-zone mobs
@@ -116,16 +141,20 @@ export const MAX_CRAFT_RARITY = RARITIES.length - 2;
  */
 export const MAX_WILD_DROP_RARITY = 8;
 
-/** Oracle skips this many rarity tiers in one guaranteed (non-random) conversion. */
-export const ORACLE_SKIP = 2;
+/**
+ * Oracle converts cards to exactly the next rarity in one guaranteed
+ * (non-random) conversion (for example, Common → Unusual).
+ */
+export const ORACLE_SKIP = 1;
 /** Hours between allowed Oracle uses, per player. */
 export const ORACLE_COOLDOWN_HOURS = 2;
 /** Hours between allowed Trade uses, per player. */
 export const TRADE_COOLDOWN_HOURS = 3;
 
 /**
- * Cards of `rarity` required to Oracle-skip straight to `rarity + ORACLE_SKIP`.
- * Returns undefined if that rarity can't be Oracled (too high, or skip would land past the craft ladder).
+ * Cards of `rarity` required for a guaranteed Oracle upgrade to
+ * `rarity + ORACLE_SKIP`. Returns undefined when the next tier would be past
+ * the craft ladder.
  */
 export function oracleRequiredCount(rarity: number): number | undefined {
   if (rarity < 0 || rarity + ORACLE_SKIP > MAX_CRAFT_RARITY) return undefined;
