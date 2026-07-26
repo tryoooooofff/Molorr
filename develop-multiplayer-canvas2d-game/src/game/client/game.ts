@@ -4365,20 +4365,32 @@ export class GameClient {
   drawBackgroundPattern(context: CanvasRenderingContext2D, cameraOffset: { x: number; y: number }, groundColor: [number, number, number]) {    
     const scale = this.viewZoom || 1;    
     const pattern = this.getOrCreatePattern(groundColor, scale);    
-    
-    const invScale = 1 / scale;    
-    const fillW = this.w * invScale;    
-    const fillH = this.h * invScale;    
-    const fillX = cameraOffset.x - (fillW - this.w) / 2;    
-    const fillY = cameraOffset.y - (fillH - this.h) / 2;    
-    
+    const [r, g, b] = groundColor;
+
+    // 1. Opaque base pass in screen space. This is what actually clears the
+    // previous frame — without it the translucent pattern just accumulates on
+    // top of the last frame and everything smears together.
+    context.save();
+    context.fillStyle = `rgb(${r}, ${g}, ${b})`;
+    context.fillRect(0, 0, this.w, this.h);
+    context.restore();
+
+    if (!pattern) return;
+
+    // 2. Decorative pattern pass in world space so it scrolls with the camera.
+    // The visible world rect is the screen rect divided by the zoom, centered
+    // on the camera; a small margin hides seams at fractional offsets.
+    const margin = 4;
+    const fillW = this.w / scale + margin * 2;
+    const fillH = this.h / scale + margin * 2;
+    const fillX = cameraOffset.x - fillW / 2;
+    const fillY = cameraOffset.y - fillH / 2;
+
     context.save();    
     context.translate(this.w / 2, this.h / 2);
     context.scale(scale, scale);
     context.translate(-cameraOffset.x, -cameraOffset.y);    
-    if (pattern) {
-      context.fillStyle = pattern;    
-    }
+    context.fillStyle = pattern;    
     context.fillRect(fillX, fillY, fillW, fillH);    
     context.restore();    
   }
@@ -4427,6 +4439,11 @@ export class GameClient {
     if (type === "Ocean" || type === "Desert") {    
         return this.createWavePattern(groundColor, currentScale, TILE_SIZE);    
     }    
+
+    // Opaque ground base inside the tile itself, so filling with this pattern
+    // always covers whatever was drawn last frame instead of blending with it.
+    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
+    ctx.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
     
     const getShapeRadius = (size: number, shapeType: string) => {    
         switch (shapeType) {    
