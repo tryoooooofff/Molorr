@@ -677,8 +677,9 @@ export function drawItemIcon(
       break;
     }
     case 27: { // Claw — curved brown claw
-      // Slightly oversized so the Claw reads clearly on small drop/inventory cards.
-      const k = size / 80;
+      // 50% larger than the previous oversized icon so the Claw reads clearly
+      // on small drop/inventory cards and in the world.
+      const k = (size / 80) * 1.5;
       ctx.save();
       ctx.scale(k, k);
       // Center the supplied 66..168 × 30..110 authored path on the icon.

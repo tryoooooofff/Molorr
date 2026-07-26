@@ -14,7 +14,6 @@ import {
   MAPS,
   MAX_CRAFT_RARITY,
   MAX_RARITY,
-  MAX_WILD_DROP_RARITY,
   MOBS,
   CLOVER_ITEM,
   orbitsAsPetal,
@@ -1613,7 +1612,6 @@ export class GameServer {
     if (mob.friendly) return;
 
     const def = MOBS[mob.type];
-    const map = MAPS[mapId];
     const world = this.worlds[mapId];
     const killerClient = mob.lastHitBy ? this.clientOf(mob.lastHitBy) : null;
     const killer = killerClient?.player ?? null;
@@ -1636,32 +1634,25 @@ export class GameServer {
     const dropCount = this.dropMultiplierFor(killer);
     const coreRarity = this.magicCoreRarity(killer);
 
-    // The map's rarity bias still nudges the mob's rarity a bit before we hand
-    // it to the per-item drop table, matching the old "rarer map = better drops"
-    // feel. We just don't bake the roll into a single number anymore.
-    const biasedRarityIndex = (() => {
-      let r = mob.rarity;
-      while (r < MAX_WILD_DROP_RARITY && Math.random() < 0.14 + map.rarityBias) r++;
-      if (Math.random() < 0.35 && r > 0) r--;
-      return Math.max(0, Math.min(MAX_RARITY, r));
-    })();
-    const mobRarityName = RARITIES[biasedRarityIndex].name;
+    // Drops follow the mob's actual rarity row exactly:
+    // RARITY_DROP_RATES["mob rarity"]["drop rarity"] = probability.
+    // No map-bias reroll and no item/drop-entry factor are applied here.
+    const mobRarityIndex = Math.max(0, Math.min(MAX_RARITY, mob.rarity));
+    const mobRarityName = RARITIES[mobRarityIndex].name;
 
     const rarityIndexOf = (name: string) =>
       Math.max(0, Math.min(MAX_RARITY, RARITIES.findIndex((r) => r.name === name)));
 
-    // Every entry of the mob's drop table drops on every kill — `chance` does
-    // not gate whether a card appears. Instead it is the per-entry drop factor
-    // handed to getDropRarityByItem: a low `chance` (Moon at 0.005) biases that
-    // card toward the floor of the mob's rarity row, so upgrading it is rare,
-    // while a 0.32 staple rolls close to the row's published odds.
+    // Every entry of the mob's drop table drops on every kill. `drop.chance` is
+    // kept in the data for compatibility, but rarity is rolled solely by the
+    // mob rarity table in getDropRarityByItem.
     const rolled: { item: number; rarity: number; dropNum: number }[] = [];
     for (const drop of def.drops) {
       for (let i = 0; i < dropCount; i++) {
-        // Normal item: rolled straight off the per-item table, untouched by any
-        // Magic Core the player may be holding.
+        // Normal item: rarity is rolled straight from the mob-rarity table,
+        // untouched by any Magic Core the player may be holding.
         let item = drop.item;
-        let rarity = rarityIndexOf(getDropRarityByItem(drop.item, mobRarityName, drop.chance));
+        let rarity = rarityIndexOf(getDropRarityByItem(drop.item, mobRarityName));
 
         // Magic variant: only reachable while a Magic Core is equipped, and only
         // when the variant's own roll beats Common. The Core then clamps the
@@ -1669,7 +1660,7 @@ export class GameServer {
         const magicItem = MAGIC_ITEM_MAP[drop.item];
         if (magicItem !== undefined && coreRarity >= 0) {
           const magicRarity = rarityIndexOf(
-            getDropRarityByItem(magicItem, mobRarityName, drop.chance),
+            getDropRarityByItem(magicItem, mobRarityName),
           );
           if (magicRarity > 0) {
             item = magicItem;

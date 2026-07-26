@@ -4023,6 +4023,88 @@ export class GameClient {
     this._wallEdgeBiome = this.currentBiome;    
   }
 
+  private wallExteriorPath(visibleWalls: Wall[], blockers: Wall[]): Path2D {
+    const path = new Path2D();
+    const EPS = 0.0001;
+
+    const subtractInterval = (
+      intervals: [number, number][],
+      cutA: number,
+      cutB: number,
+    ): [number, number][] => {
+      const a = Math.min(cutA, cutB);
+      const b = Math.max(cutA, cutB);
+      if (b <= a + EPS) return intervals;
+      const out: [number, number][] = [];
+      for (const [start, end] of intervals) {
+        if (b <= start + EPS || a >= end - EPS) {
+          out.push([start, end]);
+          continue;
+        }
+        if (a > start + EPS) out.push([start, Math.min(a, end)]);
+        if (b < end - EPS) out.push([Math.max(b, start), end]);
+      }
+      return out;
+    };
+
+    const addVertical = (x: number, intervals: [number, number][]) => {
+      for (const [y1, y2] of intervals) {
+        if (y2 <= y1 + EPS) continue;
+        path.moveTo(x, y1);
+        path.lineTo(x, y2);
+      }
+    };
+    const addHorizontal = (y: number, intervals: [number, number][]) => {
+      for (const [x1, x2] of intervals) {
+        if (x2 <= x1 + EPS) continue;
+        path.moveTo(x1, y);
+        path.lineTo(x2, y);
+      }
+    };
+
+    for (const w of visibleWalls) {
+      const left = w.x;
+      const right = w.x + w.w;
+      const top = w.y;
+      const bottom = w.y + w.h;
+
+      let leftIntervals: [number, number][] = [[top, bottom]];
+      let rightIntervals: [number, number][] = [[top, bottom]];
+      let topIntervals: [number, number][] = [[left, right]];
+      let bottomIntervals: [number, number][] = [[left, right]];
+
+      for (const o of blockers) {
+        if (o === w || o.w <= 0 || o.h <= 0) continue;
+        const oLeft = o.x;
+        const oRight = o.x + o.w;
+        const oTop = o.y;
+        const oBottom = o.y + o.h;
+
+        // If another wall touches or overlaps the outside of this side, that
+        // shared span is inside the wall union and must not receive a border.
+        if (oLeft < left - EPS && oRight >= left - EPS) {
+          leftIntervals = subtractInterval(leftIntervals, oTop, oBottom);
+        }
+        if (oLeft <= right + EPS && oRight > right + EPS) {
+          rightIntervals = subtractInterval(rightIntervals, oTop, oBottom);
+        }
+        if (oTop < top - EPS && oBottom >= top - EPS) {
+          topIntervals = subtractInterval(topIntervals, oLeft, oRight);
+        }
+        if (oTop <= bottom + EPS && oBottom > bottom + EPS) {
+          bottomIntervals = subtractInterval(bottomIntervals, oLeft, oRight);
+        }
+      }
+
+      addHorizontal(top, topIntervals);
+      addVertical(right, rightIntervals);
+      addHorizontal(bottom, bottomIntervals);
+      addVertical(left, leftIntervals);
+    }
+
+    return path;
+  }
+
   drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
     if (!this.walls.length) return;
 
@@ -4073,6 +4155,7 @@ export class GameClient {
 
     const path = new Path2D();
     for (const w of visibleWalls) path.rect(w.x, w.y, w.w, w.h);
+    const exteriorPath = this.wallExteriorPath(visibleWalls, this.walls);
 
     const bgConfig = BIOME_BACKGROUNDS[this.currentBiome];
     const wallColor = bgConfig?.wall_color || [80, 80, 80];
@@ -4083,7 +4166,10 @@ export class GameClient {
 
     ctx.save();
     ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
+    // Exterior sides are stroked as individual path segments after internal
+    // shared spans have been removed. Butt caps prevent rounded caps from
+    // showing at places where two neighbouring wall rectangles meet.
+    ctx.lineCap = 'butt';
 
     // Clip all decoration to the wall path. This prevents the art from
     // extending past the collision rectangles, which made Desert/Ocean walls
@@ -4095,12 +4181,12 @@ export class GameClient {
     if (!this.settings.lowQualityWall) {
       ctx.strokeStyle = lightColor;
       ctx.lineWidth = 28 * outlineScale;
-      ctx.stroke(path);
+      ctx.stroke(exteriorPath);
     }
 
     ctx.strokeStyle = darkColor;
     ctx.lineWidth = (this.settings.lowQualityWall ? 4 : 10) * outlineScale;
-    ctx.stroke(path);
+    ctx.stroke(exteriorPath);
 
     ctx.restore();
   }
