@@ -171,7 +171,7 @@ class ChatSystem {
   inputActive = false;
   visible = true;
   width = 380;
-  height = 130;
+  height = 65;
 
   addMessage(text: string, sender: string, isSystem = false, isCraftReport = false, isSelf = false) {
     this.messages.push({
@@ -204,7 +204,7 @@ class ChatSystem {
     const dpr = Math.min(2, (window.devicePixelRatio || 1));
     ctx.scale(dpr, dpr);
     const panelX = 15;
-    const panelY = screenHeight - this.height - 10;
+    const panelY = screenHeight - this.height - 2;
     const padding = 12;
     ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
     ctx.beginPath();
@@ -213,8 +213,8 @@ class ChatSystem {
     ctx.lineJoin = 'round';
     ctx.miterLimit = 2;
     ctx.textAlign = 'left';
-    const visibleMsgs = this.messages.slice(-12);
-    const lineHeight = 18;
+    const visibleMsgs = this.messages.slice(-6);
+    const lineHeight = 16;
     const baseX = panelX + padding;
     ctx.font = `16px ${FONT_FAMILY || 'Arial'}`;
     ctx.textBaseline = 'top';
@@ -788,7 +788,7 @@ export class GameClient {
         }
         this.ents.clear();
         this.mapFlash = 1;
-        this.chat.addMessage("Welcome! Press [Enter] to chat. Commands: /claim, /create_public_squad, /create_private_squad, /join_squad <code>, /leave_squad, /find_public_squad", "System", true);
+        this.chat.addMessage("Welcome! Press [Enter] to chat. Commands: /claim, /create_public_squad, /create_private_squad, /join_squad <CODE>, /leave_squad, /find_public_squad", "System", true);
         break;
       }
       case S2C.SNAPSHOT: {

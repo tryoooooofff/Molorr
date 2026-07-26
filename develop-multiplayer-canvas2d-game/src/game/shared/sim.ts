@@ -187,6 +187,8 @@ export class Mob {
   lastHitBy = 0;
   /** Seconds of post-spawn invulnerability. Freshly hatched pets get a moment to get clear. */
   spawnProtection = 0;
+  /** Accumulated damage dealt by each player (petal + friendly mob damage). */
+  damageByPlayer: Map<number, number> = new Map();
 
   constructor(id: number, type: number, mapId: number, x: number, y: number, rarity: number, friendly = false) {
     const def = MOBS[type];
@@ -205,9 +207,16 @@ export class Mob {
     this.damage = def.damage * enemyDamageMult(rarity);
     this.speed = def.speed;
   }
+
+  addDamage(playerId: number, amount: number) {
+    if (!playerId || amount <= 0) return;
+    this.damageByPlayer.set(playerId, (this.damageByPlayer.get(playerId) || 0) + amount);
+  }
 }
 
 export class Drop {
+  /** Set of playerIds allowed to loot this drop. null = anyone, empty = no one (unlootable). */
+  allowedPlayerIds: Set<number> | null = null;
   constructor(
     public id: number,
     public mapId: number,
@@ -1251,6 +1260,7 @@ export class GameServer {
         targetMob.hp -= dmg;
         targetMob.lastHitBy = p.id;
         targetMob.targetId = p.id;
+        targetMob.addDamage(p.id, dmg);
         st.hp -= totalIncoming;
         st.hitCd = 0.25;
         const kb = 90 / (targetMob.radius / 20);
@@ -1455,8 +1465,12 @@ export class GameServer {
             const victim = mob.friendly ? other : mob;
             // A just-hatched pet can't be chipped down before it gets moving.
             if (victim.spawnProtection <= 0) {
-              victim.hp -= attacker.damage * 0.6;
+              const dmg = attacker.damage * 0.6;
+              victim.hp -= dmg;
               victim.lastHitBy = attacker.ownerId;
+              if (!victim.friendly && attacker.friendly && attacker.ownerId) {
+                victim.addDamage(attacker.ownerId, dmg);
+              }
             }
             if (attacker.spawnProtection <= 0) attacker.hp -= victim.damage * 0.3;
             mob.hitCd = 0.5;
@@ -1545,6 +1559,31 @@ export class GameServer {
     return best;
   }
 
+  private computeEligibleLooters(mob: Mob): Set<number> {
+    const eligible = new Set<number>();
+    const maxHp = mob.maxHp > 0 ? mob.maxHp : 1;
+    const perPlayerThreshold = maxHp * 0.05;
+    const playerToSquadCode = new Map<number, string>();
+    for (const [code, squad] of this.squads.entries()) {
+      for (const pid of squad.members.keys()) playerToSquadCode.set(pid, code);
+    }
+    for (const squad of this.squads.values()) {
+      const memberIds = Array.from(squad.members.keys());
+      if (memberIds.length === 0) continue;
+      let total = 0;
+      for (const pid of memberIds) total += mob.damageByPlayer.get(pid) || 0;
+      const required = perPlayerThreshold * memberIds.length;
+      if (total >= required) {
+        for (const pid of memberIds) eligible.add(pid);
+      }
+    }
+    for (const [pid, dmg] of mob.damageByPlayer.entries()) {
+      if (playerToSquadCode.has(pid)) continue;
+      if (dmg >= perPlayerThreshold) eligible.add(pid);
+    }
+    return eligible;
+  }
+
   private onMobKilled(mob: Mob, mapId: number) {
     // Friendly pets never drop loot — they just despawn.
     if (mob.friendly) return;
@@ -1616,6 +1655,10 @@ export class GameServer {
       }
     }
 
+    const eligibleLooters = this.computeEligibleLooters(mob);
+    // If no one met the 5% threshold (or squad pooled threshold), no loot spawns — enforces the damage requirement
+    if (eligibleLooters.size === 0) return;
+
     const spread = rolled.length > 1 ? 26 : 0;
     const baseAngle = Math.random() * Math.PI * 2;
     rolled.forEach((roll, idx) => {
@@ -1623,25 +1666,44 @@ export class GameServer {
       const dist = spread * (1 + Math.floor(idx / def.drops.length) * 0.5);
       const x = mob.x + Math.cos(a) * dist + (Math.random() - 0.5) * 10;
       const y = mob.y + Math.sin(a) * dist + (Math.random() - 0.5) * 10;
-      this.spawnDrop(mapId, roll.item, roll.rarity, x, y, killer ? killer.id : 0);
+      this.spawnDrop(mapId, roll.item, roll.rarity, x, y, killer ? killer.id : 0, eligibleLooters);
     });
+  }
+
+  private setsEqual(a: Set<number> | null, b: Set<number> | null): boolean {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    if (a.size !== b.size) return false;
+    for (const v of a) if (!b.has(v)) return false;
+    return true;
   }
 
   /**
    * Drops one card, merging it into a nearby identical card when possible so a
    * busy field reads as a few stacked cards instead of a carpet of singles.
    */
-  private spawnDrop(mapId: number, item: number, rarity: number, x: number, y: number, ownerId: number) {
+  private spawnDrop(mapId: number, item: number, rarity: number, x: number, y: number, ownerId: number, allowed: Set<number> | null = null) {
     const world = this.worlds[mapId];
     for (const d of world.drops) {
       if (d.item !== item || d.rarity !== rarity || d.count >= DROP_STACK_MAX) continue;
       if (Math.hypot(d.x - x, d.y - y) > DROP_STACK_RADIUS) continue;
+      // Only merge if loot permissions are identical (prevents leaking loot to non-eligible)
+      if (!this.setsEqual(d.allowedPlayerIds, allowed)) continue;
       d.count++;
-      d.ttl = Math.max(d.ttl, 45); // refresh so a growing stack doesn't expire mid-fight
-      if (d.ownerId !== ownerId) d.ownerId = 0; // contested stack: nobody gets vacuum priority
+      d.ttl = Math.max(d.ttl, 45);
+      if (d.ownerId !== ownerId) d.ownerId = 0;
       return;
     }
-    world.drops.push(new Drop(this.nextId++, mapId, x, y, item, rarity, ownerId));
+    const nd = new Drop(this.nextId++, mapId, x, y, item, rarity, ownerId);
+    nd.allowedPlayerIds = allowed ? new Set(allowed) : (allowed === null ? null : new Set());
+    // If eligible set is empty (no one met 5%), drop is unlootable and will expire; we still keep it but with empty allowed set to enforce rule.
+    // If eligible is non-empty, only those players can pick; if null (shouldn't happen here), anyone can.
+    // For this implementation, when eligible is empty we store empty set, making it unlootable.
+    // When eligible is from computeEligibleLooters, it may be empty; we store that empty set.
+    if (allowed && allowed.size === 0) {
+      nd.allowedPlayerIds = new Set();
+    }
+    world.drops.push(nd);
   }
 
   private killPlayer(p: Player) {
@@ -1661,6 +1723,11 @@ export class GameServer {
     let lootedThisTick = 0;
     for (let i = world.drops.length - 1; i >= 0; i--) {
       const d = world.drops[i];
+      // Enforce 5% damage rule (and squad pooled rule). If drop has an allow-list, only those playerIds may loot.
+      // null = legacy / anyone can loot, empty Set = no one (fails threshold, will expire)
+      if (d.allowedPlayerIds !== null && d.allowedPlayerIds !== undefined) {
+        if (!d.allowedPlayerIds.has(p.id)) continue;
+      }
       const dist = Math.hypot(d.x - p.x, d.y - p.y);
       if (dist < 46) {
         // A stacked card hands over every merged copy at once.
