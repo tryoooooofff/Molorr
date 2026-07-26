@@ -213,10 +213,10 @@ export interface ItemDef {
   speed?: number; // % move speed bonus
   petMob?: number; // mob type spawned when this is a summon
   /**
-   * Drop-rarity bias factor in the (0, 1] range (1.0 = neutral). Lower values
-   * make this item skew its drops toward higher rarities, and disable
-   * "Super"-tier rolls for normal mobs. Default is 0.8 if unset; "Moon" uses
-   * 0.002 because it should be effectively impossible at any non-Omega mob.
+   * Fallback drop-rarity bias in the (0, 1] range (1.0 = neutral) used only
+   * when a caller does not pass the drop entry's own `chance`. Lower values
+   * skew toward higher rarities and disable "Super"-tier rolls for normal
+   * mobs. Default is 0.8 if unset.
    */
   dropFactor?: number;
   /**
@@ -297,6 +297,12 @@ export interface MobDef {
   damage: number;
   speed: number;
   xp: number;
+  /**
+   * Loot table. Every entry drops on every kill; `chance` is NOT a gate on
+   * whether the card appears. It is the drop-rarity bias for that entry — a
+   * low value pushes the roll toward the top of the mob's rarity row, a high
+   * value keeps it near the floor. See `getDropRarityByItem`.
+   */
   drops: { item: number; chance: number }[];
 }
 
@@ -1097,12 +1103,24 @@ const ITEM_BASE_FACTOR: Record<number, number> = (() => {
 
 /**
  * Pick the rarity of a single drop for `itemType` from a mob of rarity
- * `mobRarity`. Each item has its own bias (`dropFactor`) so e.g. "Moon"
- * (factor 0.002) almost never lands on a low tier while a generic petal
- * (factor 0.8) lands on the row's lowest available tier.
+ * `mobRarity`.
+ *
+ * The bias comes from `factorOverride` when supplied — that is the drop
+ * entry's own `chance` value from the mob's table. A LOW value biases the
+ * roll toward the HIGH end of the mob's row, so a 0.005 entry (Moon off a
+ * Rock) still drops every kill but lands near the top of what that mob can
+ * give, while a 0.32 staple sits near the row's floor. When no override is
+ * passed we fall back to the item's own `dropFactor`.
  */
-export function getDropRarityByItem(itemType: number, mobRarity: string): string {
-  const factor = ITEM_BASE_FACTOR[itemType] ?? DEFAULT_DROP_FACTOR;
+export function getDropRarityByItem(
+  itemType: number,
+  mobRarity: string,
+  factorOverride?: number,
+): string {
+  const factor =
+    factorOverride !== undefined && factorOverride > 0
+      ? factorOverride
+      : ITEM_BASE_FACTOR[itemType] ?? DEFAULT_DROP_FACTOR;
   const base = RARITY_DROP_RATES[mobRarity];
 
   if (!base) return "Common";
@@ -1125,22 +1143,21 @@ export function getDropRarityByItem(itemType: number, mobRarity: string): string
     modifiedBase["Super"] = 0;
   }
 
-  // Cap drops at the highest wild-rollable tier (Legendary) — anything past
-  // it is crafting-only and must never come off a mob.
+  // Cap drops at the highest wild-rollable tier (Omega, MAX_WILD_DROP_RARITY)
+  // — anything past it is crafting-only and must never come off a mob.
   const availableRarities = RARITY_ORDER.filter(
     (r) => modifiedBase[r] > 0 && (RARITY_INDEX[r] ?? 0) <= MAX_WILD_DROP_RARITY,
   );
   if (availableRarities.length === 0) return "Common";
 
-  // Pick a "lowest available tier + one below" fallback. The drop table's
-  // minimum tier for the mob is the lowest we can ever roll; if the math
-  // leaves us with nothing, we drop one further.
+  // Safety net for floating-point residue in the cumulative walk below. It has
+  // to be a tier the mob can actually give, so it is the row's LOWEST available
+  // tier — never one below it, which would hand out a rarity the table says is
+  // impossible (e.g. a Mythic mob paying out "Rare").
   const sortedAvailable = availableRarities.slice().sort(
     (a, b) => RARITY_INDEX[a] - RARITY_INDEX[b],
   );
-  const lowestAvailable = sortedAvailable[0];
-  const lowestIndex = RARITY_INDEX[lowestAvailable];
-  const fallbackRarity = lowestIndex > 0 ? RARITY_ORDER[lowestIndex - 1] : lowestAvailable;
+  const fallbackRarity = sortedAvailable[0];
 
   // Build the weighted distribution. factor < 1 boosts higher-tier weights.
   const weights: Record<string, number> = {};

@@ -1650,25 +1650,27 @@ export class GameServer {
     const rarityIndexOf = (name: string) =>
       Math.max(0, Math.min(MAX_RARITY, RARITIES.findIndex((r) => r.name === name)));
 
-    // Every entry of the mob's drop table drops on every kill — the per-item
-    // `chance` no longer gates whether a card appears, it only ever influenced
-    // *if* you got the item, never *which* rarity. Rarity is still rolled per
-    // item by getDropRarityByItem, so a mob's rare entries stay rare in tier
-    // even though the item itself is now guaranteed.
+    // Every entry of the mob's drop table drops on every kill — `chance` does
+    // not gate whether a card appears. Instead it is the per-entry drop factor
+    // handed to getDropRarityByItem: a low `chance` (Moon at 0.005) biases that
+    // card toward the top of the mob's rarity row, a high one (a 0.32 staple)
+    // keeps it near the row's floor.
     const rolled: { item: number; rarity: number; dropNum: number }[] = [];
     for (const drop of def.drops) {
       for (let i = 0; i < dropCount; i++) {
         // Normal item: rolled straight off the per-item table, untouched by any
         // Magic Core the player may be holding.
         let item = drop.item;
-        let rarity = rarityIndexOf(getDropRarityByItem(drop.item, mobRarityName));
+        let rarity = rarityIndexOf(getDropRarityByItem(drop.item, mobRarityName, drop.chance));
 
         // Magic variant: only reachable while a Magic Core is equipped, and only
         // when the variant's own roll beats Common. The Core then clamps the
         // result down to its own rarity — it can never push a drop higher.
         const magicItem = MAGIC_ITEM_MAP[drop.item];
         if (magicItem !== undefined && coreRarity >= 0) {
-          const magicRarity = rarityIndexOf(getDropRarityByItem(magicItem, mobRarityName));
+          const magicRarity = rarityIndexOf(
+            getDropRarityByItem(magicItem, mobRarityName, drop.chance),
+          );
           if (magicRarity > 0) {
             item = magicItem;
             rarity = Math.min(magicRarity, coreRarity);
