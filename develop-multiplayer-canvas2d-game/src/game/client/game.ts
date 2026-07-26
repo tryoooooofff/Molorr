@@ -1942,30 +1942,198 @@ export class GameClient {
   };
 
   // ------------------------------------------------------------ menu logic
+  
+  // Floating petals for menu animation
+  private menuPetals: { x: number; y: number; size: number; speedX: number; speedY: number; rotation: number; rotationSpeed: number; opacity: number }[] = [];
+  private menuBgColor: [number, number, number] = [26, 26, 46];
+  private menuTargetBgColor: [number, number, number] = [26, 26, 46];
+  private menuHoveredButton: string | null = null;
+  
+  // Biome colors for the 3 maps
+  private BIOME_COLORS: Record<string, [number, number, number]> = {
+    "Garden": [102, 187, 106],
+    "Desert": [255, 202, 128],
+    "Ocean": [64, 164, 223],
+  };
+  
+  private BIOME_HOVER_COLORS: Record<string, [number, number, number]> = {
+    "Garden": [67, 160, 71],
+    "Desert": [255, 167, 38],
+    "Ocean": [0, 105, 148],
+  };
+  
+  private BIOME_BG_COLORS: Record<string, [number, number, number]> = {
+    "Garden": [36, 80, 36],
+    "Desert": [90, 70, 20],
+    "Ocean": [20, 50, 100],
+  };
+  
+  private initMenuPetals() {
+    this.menuPetals = [];
+    for (let i = 0; i < 20; i++) {
+      this.menuPetals.push({
+        x: Math.random() * this.w,
+        y: Math.random() * this.h,
+        size: 50 + Math.random() * 40,
+        speedX: 20 + Math.random() * 35,
+        speedY: 5 + Math.random() * 12,
+        rotation: Math.random() * Math.PI * 2,
+        rotationSpeed: (Math.random() - 0.5) * 1.5,
+        opacity: 0.35 + Math.random() * 0.4,
+      });
+    }
+  }
+  
+  private updateMenuPetals(dt: number) {
+    for (const p of this.menuPetals) {
+      p.x += p.speedX * dt;
+      p.y += p.speedY * dt;
+      p.rotation += p.rotationSpeed * dt;
+      
+      if (p.x > this.w + p.size) {
+        p.x = -p.size;
+        p.y = Math.random() * this.h;
+      }
+      if (p.y > this.h + p.size) p.y = -p.size;
+      else if (p.y < -p.size) p.y = this.h + p.size;
+    }
+  }
+  
+  private updateMenuBgColor(dt: number) {
+    for (let i = 0; i < 3; i++) {
+      const diff = this.menuTargetBgColor[i] - this.menuBgColor[i];
+      if (Math.abs(diff) > 0.1) {
+        this.menuBgColor[i] += diff * 2.5 * dt;
+      }
+    }
+  }
+  
+  private drawMenuGrid(ctx: CanvasRenderingContext2D, r: number, g: number, b: number) {
+    const cell = 48;
+    const lr = Math.min(255, r + 18);
+    const lg = Math.min(255, g + 18);
+    const lb = Math.min(255, b + 18);
+    
+    ctx.save();
+    ctx.strokeStyle = `rgba(${lr},${lg},${lb},0.40)`;
+    ctx.lineWidth = 1;
+    
+    for (let x = 0; x <= this.w; x += cell) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, this.h);
+      ctx.stroke();
+    }
+    for (let y = 0; y <= this.h; y += cell) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(this.w, y);
+      ctx.stroke();
+    }
+    
+    ctx.fillStyle = `rgba(${lr},${lg},${lb},0.28)`;
+    for (let x = 0; x <= this.w; x += cell) {
+      for (let y = 0; y <= this.h; y += cell) {
+        ctx.beginPath();
+        ctx.arc(x, y, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+  
+  private drawMenuPetal(ctx: CanvasRenderingContext2D, petal: typeof this.menuPetals[0]) {
+    ctx.save();
+    ctx.globalAlpha = petal.opacity;
+    ctx.translate(petal.x, petal.y);
+    ctx.rotate(petal.rotation);
+    
+    // Draw a simple petal shape
+    const s = petal.size / 2;
+    ctx.fillStyle = `rgba(${this.menuBgColor[0] + 40}, ${this.menuBgColor[1] + 40}, ${this.menuBgColor[2] + 40}, 1)`;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, s * 0.3, s * 0.6, 0, 0, Math.PI * 2);
+    ctx.fill();
+    
+    ctx.restore();
+  }
+  
   private menuLayout() {
-    const cw = Math.min(620, this.w - 40);
-    const ch = Math.min(430, this.h - 140);
-    const x = (this.w - cw) / 2;
-    const y = Math.max(90, (this.h - ch) / 2 + 20);
-    return { x, y, w: cw, h: ch };
+    // New layout: biome buttons in 3-column grid centered
+    const COLS = 3;
+    const BIOME_W = 180;
+    const BIOME_H = 45;
+    const BIOME_GAP = 15;
+    const gridYOffset = 80;
+    
+    const gridW = COLS * BIOME_W + (COLS - 1) * BIOME_GAP;
+    const gridX = this.w / 2 - gridW / 2;
+    const gridY = this.h / 2 - gridYOffset;
+    
+    return { gridX, gridY, gridW, BIOME_W, BIOME_H, BIOME_GAP };
   }
 
-  /** Rects for the main-menu actions, including the daily loot bonus. */
+  /** Rects for biome buttons in grid layout */
+  private menuBiomeButtons() {
+    const layout = this.menuLayout();
+    const buttons: Record<number, { x: number; y: number; w: number; h: number }> = {};
+    
+    const COLS = 3;
+    const totalRows = Math.ceil(MAPS.length / COLS);
+    
+    MAPS.forEach((map, i) => {
+      const row = Math.floor(i / COLS);
+      const itemsInRow = row === totalRows - 1 ? MAPS.length - row * COLS : COLS;
+      const rowOffset = (COLS - itemsInRow) * (layout.BIOME_W + layout.BIOME_GAP) / 2;
+      const col = i % COLS;
+      
+      buttons[map.id] = {
+        x: layout.gridX + rowOffset + col * (layout.BIOME_W + layout.BIOME_GAP),
+        y: layout.gridY + row * (layout.BIOME_H + layout.BIOME_GAP),
+        w: layout.BIOME_W,
+        h: layout.BIOME_H,
+      };
+    });
+    
+    return buttons;
+  }
+
+  /** Rects for the main-menu actions (top bar and left sidebar) */
   private menuActionRects() {
-    const box = this.menuLayout();
-    const playW = 180;
-    const sideW = 105;
-    const h = 52;
-    const gap = 10;
-    const totalW = sideW * 3 + playW + gap * 3;
-    const startX = box.x + box.w / 2 - totalW / 2;
-    const y = box.y + box.h - 74;
-    return {
-      inventory: { x: startX, y, w: sideW, h },
-      bonus: { x: startX + sideW + gap, y, w: sideW, h },
-      play: { x: startX + (sideW + gap) * 2, y, w: playW, h },
-      craft: { x: startX + (sideW + gap) * 2 + playW + gap, y, w: sideW, h },
-    };
+    const W = this.w;
+    const H = this.h;
+    
+    // Top bar buttons (centered)
+    const TOP_Y = 14;
+    const BTN_SIZE = 48;
+    const BTN_GAP = 8;
+    const TOP_KEYS = ['inventory', 'craft', 'bonus'];
+    const totalTopW = TOP_KEYS.length * BTN_SIZE + (TOP_KEYS.length - 1) * BTN_GAP;
+    const topStartX = (W - totalTopW) / 2;
+    
+    const buttons: Record<string, { x: number; y: number; w: number; h: number }> = {};
+    
+    TOP_KEYS.forEach((key, i) => {
+      buttons[key] = {
+        x: topStartX + i * (BTN_SIZE + BTN_GAP),
+        y: TOP_Y,
+        w: BTN_SIZE,
+        h: BTN_SIZE,
+      };
+    });
+    
+    // Left sidebar buttons
+    const LEFT_X = 14;
+    const LEFT_W = 90;
+    const LEFT_H = 45;
+    const LEFT_GAP = 10;
+    const leftMidY = H / 2 - (LEFT_H * 3 + LEFT_GAP * 2) / 2;
+    
+    buttons['left_inventory'] = { x: LEFT_X, y: leftMidY, w: LEFT_W, h: LEFT_H };
+    buttons['left_craft'] = { x: LEFT_X, y: leftMidY + LEFT_H + LEFT_GAP, w: LEFT_W, h: LEFT_H };
+    buttons['left_bonus'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 2, w: LEFT_W, h: LEFT_H };
+    
+    return buttons;
   }
 
   private menuClick(mx: number, my: number) {
@@ -1982,20 +2150,52 @@ export class GameClient {
     if (this.craftAnim > 0.4 && this.handleCraftClick(mx, my)) return;
     if (this.bagAnim > 0.4 && this.handleBagClick(mx, my)) return;
 
-    const box = this.menuLayout();
-    const nameRect = { x: box.x + 30, y: box.y + 20, w: box.w - 60, h: 42 };
+    // Name field (above biome buttons)
+    const layout = this.menuLayout();
+    const nameFieldW = Math.min(300, this.w * 0.4);
+    const nameFieldH = 42;
+    const nameFieldX = this.w / 2 - nameFieldW / 2;
+    const nameFieldY = layout.gridY - 70;
+    const nameRect = { x: nameFieldX, y: nameFieldY, w: nameFieldW, h: nameFieldH };
     this.focus = hit(nameRect, mx, my) ? "name" : null;
-    const cardW = (box.w - 80) / 3;
-    for (let i = 0; i < MAPS.length; i++) {
-      const r = { x: box.x + 30 + i * (cardW + 10), y: box.y + 84, w: cardW, h: 130 };
-      if (hit(r, mx, my)) this.selectedMap = i;
+
+    // Biome buttons
+    const biomeButtons = this.menuBiomeButtons();
+    for (const map of MAPS) {
+      const r = biomeButtons[map.id];
+      if (r && hit(r, mx, my)) {
+        this.selectedMap = map.id;
+        // Update target background color for smooth transition
+        this.menuTargetBgColor = [...this.BIOME_BG_COLORS[map.name]];
+        return;
+      }
     }
 
+    // Action buttons (top bar and left sidebar)
     const actions = this.menuActionRects();
-    if (hit(actions.play, mx, my)) this.startGame();
-    if (hit(actions.bonus, mx, my)) this.bonusOpen = true;
-    if (hit(actions.inventory, mx, my)) this.toggleBag();
-    if (hit(actions.craft, mx, my)) this.toggleCraft();
+    
+    // Top bar buttons
+    if (actions.inventory && hit(actions.inventory, mx, my)) this.toggleBag();
+    if (actions.craft && hit(actions.craft, mx, my)) this.toggleCraft();
+    if (actions.bonus && hit(actions.bonus, mx, my)) this.bonusOpen = true;
+    
+    // Left sidebar buttons (same functions)
+    if (actions.left_inventory && hit(actions.left_inventory, mx, my)) this.toggleBag();
+    if (actions.left_craft && hit(actions.left_craft, mx, my)) this.toggleCraft();
+    if (actions.left_bonus && hit(actions.left_bonus, mx, my)) this.bonusOpen = true;
+    
+    // Play button (big button below biome grid)
+    const playBtnRect = this.menuPlayButtonRect();
+    if (playBtnRect && hit(playBtnRect, mx, my)) this.startGame();
+  }
+  
+  private menuPlayButtonRect(): Rect | null {
+    const layout = this.menuLayout();
+    const totalRows = Math.ceil(MAPS.length / 3);
+    const playBtnY = layout.gridY + totalRows * (layout.BIOME_H + layout.BIOME_GAP) + 30;
+    const playBtnW = 180;
+    const playBtnH = 52;
+    return { x: this.w / 2 - playBtnW / 2, y: playBtnY, w: playBtnW, h: playBtnH };
   }
 
   private startGame() {
@@ -2518,77 +2718,251 @@ export class GameClient {
   private renderMenu(dt: number) {
     const ctx = this.ctx;
     const t = this.time;
-    // animated gradient background
-    const g = ctx.createLinearGradient(0, 0, this.w, this.h);
-    g.addColorStop(0, "#123c2c");
-    g.addColorStop(0.5, "#15544a");
-    g.addColorStop(1, "#1d3b58");
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, this.w, this.h);
-    for (let i = 0; i < 26; i++) {
-      const px = ((i * 397) % this.w) + Math.sin(t * 0.5 + i) * 40;
-      const py = (((i * 251) % this.h) + t * (12 + (i % 5) * 6)) % (this.h + 60);
-      ctx.save();
-      ctx.globalAlpha = 0.25;
-drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 + (i % 3) * 0.2), 0);
-      ctx.restore();
+    const W = this.w;
+    const H = this.h;
+    
+    // Initialize petals if empty
+    if (this.menuPetals.length === 0) this.initMenuPetals();
+    
+    // Update background color transition
+    this.updateMenuBgColor(dt);
+    
+    // Update floating petals
+    this.updateMenuPetals(dt);
+    
+    // ─── Background ───
+    const bg = this.menuBgColor;
+    const r = Math.round(bg[0]), g = Math.round(bg[1]), b = Math.round(bg[2]);
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.fillRect(0, 0, W, H);
+    
+    // Grid background
+    this.drawMenuGrid(ctx, r, g, b);
+    
+    // Floating petals
+    for (const petal of this.menuPetals) {
+      this.drawMenuPetal(ctx, petal);
     }
-
-    const bob = Math.sin(t * 1.6) * 6;
-    drawFlower(ctx, this.w / 2, 62 + bob, 30, true, 0);
-    text(ctx, "PETALIA.IO", this.w / 2, 130 + bob * 0.4, Math.min(58, this.w / 10), "#ffe763");
-    text(ctx, "a florr-like arena: garden / desert / ocean", this.w / 2, 166, 15, "rgba(255,255,255,0.8)");
-
-    const box = this.menuLayout();
-    panel(ctx, box);
-
-    this.field(box.x + 30, box.y + 20, box.w - 60, 42, this.playerName, "Flower name", this.focus === "name");
-    const cardW = (box.w - 80) / 3;
-    for (const map of MAPS) {
-      const r = { x: box.x + 30 + map.id * (cardW + 10), y: box.y + 84, w: cardW, h: 130 };
-      const selected = this.selectedMap === map.id;
-      const hovered = hit(r, this.mx, this.my);
-      ctx.save();
-      const pulse = selected ? 1 + Math.sin(t * 5) * 0.015 : 1;
-      ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
-      ctx.scale(pulse, pulse);
-      ctx.translate(-r.x - r.w / 2, -r.y - r.h / 2);
-      roundRect(ctx, r.x, r.y, r.w, r.h, 12);
-      ctx.fillStyle = map.bg;
+    
+    // ─── Helpers ───
+    const adj = (rgb: number[], f: number) => rgb.map(c => Math.max(0, Math.min(255, Math.floor(c * f))));
+    
+    const drawBtn = (rect: { x: number; y: number; w: number; h: number }, baseColor: number[], whiteStroke = false) => {
+      const { x, y, w, h } = rect;
+      
+      roundRect(ctx, x, y, w, h, 8);
+      ctx.fillStyle = `rgb(${baseColor[0]},${baseColor[1]},${baseColor[2]})`;
       ctx.fill();
-      ctx.lineWidth = selected ? 5 : 3;
-      ctx.strokeStyle = selected ? "#ffe763" : hovered ? "#ffffff" : "rgba(0,0,0,0.35)";
-      ctx.stroke();
+      
       ctx.save();
-      roundRect(ctx, r.x, r.y, r.w, r.h, 12);
+      roundRect(ctx, x, y, w, h, 8);
       ctx.clip();
-      ctx.fillStyle = map.grid;
-      for (let i = 0; i < 10; i++) ctx.fillRect(r.x + i * 26 - ((t * 12) % 26), r.y, 13, r.h);
-      const mobIds = map.mobs.slice(0, 3);
-      mobIds.forEach((mid, i) => {
-        drawMob(ctx, mid, r.x + r.w * (0.25 + i * 0.25), r.y + r.h * 0.55 + Math.sin(t * 2 + i) * 5, 15, Math.sin(t + i) * 0.6, t, false);
-      });
+      ctx.fillStyle = `rgb(${adj(baseColor, 0.78)[0]},${adj(baseColor, 0.78)[1]},${adj(baseColor, 0.78)[2]})`;
+      ctx.fillRect(x, y, w, h / 2);
       ctx.restore();
-      text(ctx, map.name, r.x + r.w / 2, r.y + 20, 20, "#ffffff");
-      text(ctx, `${map.mobs.length} species`, r.x + r.w / 2, r.y + r.h - 16, 13, "rgba(255,255,255,0.9)");
-      ctx.restore();
+      
+      if (whiteStroke) {
+        ctx.strokeStyle = 'rgba(255,255,255,0.92)';
+        ctx.lineWidth = 3;
+        roundRect(ctx, x - 3, y - 3, w + 6, h + 6, 10);
+        ctx.stroke();
+      }
+      
+      ctx.strokeStyle = `rgb(${adj(baseColor, 0.48)[0]},${adj(baseColor, 0.48)[1]},${adj(baseColor, 0.48)[2]})`;
+      ctx.lineWidth = 3;
+      roundRect(ctx, x, y, w, h, 8);
+      ctx.stroke();
+    };
+    
+    const drawBtnLabel = (rect: { x: number; y: number; w: number; h: number }, txt: string, fontSize: number) => {
+      const { x, y, w, h } = rect;
+      ctx.font = `bold ${fontSize}px ${FONT_FAMILY}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      ctx.lineWidth = 3;
+      ctx.lineJoin = 'round';
+      ctx.strokeText(txt, x + w / 2, y + h / 2);
+      ctx.fillStyle = 'white';
+      ctx.fillText(txt, x + w / 2, y + h / 2);
+    };
+    
+    // ─── Title ───
+    const titleSize = Math.max(28, Math.min(60, W * 0.07));
+    const bob = Math.sin(t * 1.6) * 6;
+    const titleY = Math.max(60, this.h * 0.12);
+    
+    drawFlower(ctx, this.w / 2, titleY - 30 + bob, 30, true, 0);
+    
+    ctx.font = `bold ${titleSize}px ${FONT_FAMILY}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'alphabetic';
+    ctx.strokeStyle = 'black';
+    ctx.lineWidth = 8;
+    ctx.strokeText('PETALIA.IO', W / 2, titleY + bob * 0.4);
+    ctx.fillStyle = '#ffe763';
+    ctx.fillText('PETALIA.IO', W / 2, titleY + bob * 0.4);
+    
+    // ─── Name Field (above biome buttons) ───
+    const layout = this.menuLayout();
+    const nameFieldW = Math.min(300, W * 0.4);
+    const nameFieldH = 42;
+    const nameFieldX = W / 2 - nameFieldW / 2;
+    const nameFieldY = layout.gridY - 70;
+    
+    // Draw name field
+    roundRect(ctx, nameFieldX, nameFieldY, nameFieldW, nameFieldH, 8);
+    ctx.fillStyle = this.focus === 'name' ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.35)';
+    ctx.fill();
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = this.focus === 'name' ? '#ffe763' : 'rgba(255,255,255,0.3)';
+    ctx.stroke();
+    
+    const caret = this.focus === 'name' && Math.floor(t * 2) % 2 === 0 ? '|' : '';
+    const nameText = this.playerName || 'Flower name';
+    const nameColor = this.playerName ? '#ffffff' : 'rgba(255,255,255,0.45)';
+    ctx.font = `18px ${FONT_FAMILY}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+    ctx.lineWidth = 3;
+    ctx.lineJoin = 'round';
+    ctx.strokeText(nameText + caret, nameFieldX + 14, nameFieldY + nameFieldH / 2);
+    ctx.fillStyle = nameColor;
+    ctx.fillText(nameText + caret, nameFieldX + 14, nameFieldY + nameFieldH / 2);
+    
+    // ─── Biome Buttons (3-column grid) ───
+    const biomeButtons = this.menuBiomeButtons();
+    
+    // Update hover state
+    this.menuHoveredButton = null;
+    for (const map of MAPS) {
+      const rect = biomeButtons[map.id];
+      if (rect && hit(rect, this.mx, this.my)) {
+        this.menuHoveredButton = `biome_${map.id}`;
+      }
     }
-
+    
+    for (const map of MAPS) {
+      const rect = biomeButtons[map.id];
+      if (!rect) continue;
+      
+      const isHovered = this.menuHoveredButton === `biome_${map.id}`;
+      const isSelected = this.selectedMap === map.id;
+      const baseColor = isHovered ? this.BIOME_HOVER_COLORS[map.name] : this.BIOME_COLORS[map.name];
+      
+      drawBtn(rect, baseColor, isSelected);
+      drawBtnLabel(rect, map.name, 16);
+    }
+    
+    // ─── Play Button (below biome grid) ───
+    const playBtnRect = this.menuPlayButtonRect();
+    if (playBtnRect) {
+      const isPlayHovered = hit(playBtnRect, this.mx, this.my);
+      const playColor: [number, number, number] = isPlayHovered ? [50, 190, 80] : [63, 174, 96];
+      drawBtn(playBtnRect, playColor);
+      
+      ctx.font = `bold 26px ${FONT_FAMILY}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      ctx.lineWidth = 3;
+      ctx.lineJoin = 'round';
+      ctx.strokeText('PLAY', playBtnRect.x + playBtnRect.w / 2, playBtnRect.y + playBtnRect.h / 2);
+      ctx.fillStyle = 'white';
+      ctx.fillText('PLAY', playBtnRect.x + playBtnRect.w / 2, playBtnRect.y + playBtnRect.h / 2);
+    }
+    
+    // ─── Top Bar Buttons ───
     const actions = this.menuActionRects();
-    button(ctx, actions.inventory, "Inventory", "#3d8bd6", hit(actions.inventory, this.mx, this.my), 15);
-    button(ctx, actions.bonus, this.bonus.isActive ? `Bonus x${this.bonus.currentMultiplier}` : "Daily Bonus", "#d99a26", hit(actions.bonus, this.mx, this.my), 14);
-    button(ctx, actions.play, "PLAY", "#3fae60", hit(actions.play, this.mx, this.my), 26);
-    button(ctx, actions.craft, "Craft", "#9b59b6", hit(actions.craft, this.mx, this.my), 15);
-    text(ctx, this.authStatus, box.x + box.w / 2, box.y + box.h - 96, 13, "rgba(255,255,255,0.75)");
-
-    text(
-      ctx,
-      "Move mouse away from center to move · WASD / arrows also work · hold left mouse to attack · right mouse to defend · E bag · C craft",
-      this.w / 2,
-      this.h - 24,
-      14,
-      "rgba(255,255,255,0.7)",
-    );
+    const topBarColors: Record<string, [number, number, number]> = {
+      inventory: [52, 152, 219],
+      craft: [155, 89, 182],
+      bonus: [217, 154, 38],
+    };
+    const topBarHoverColors: Record<string, [number, number, number]> = {
+      inventory: [41, 128, 185],
+      craft: [142, 68, 173],
+      bonus: [195, 130, 30],
+    };
+    
+    for (const key of ['inventory', 'craft', 'bonus']) {
+      const rect = actions[key];
+      if (!rect) continue;
+      const isHov = hit(rect, this.mx, this.my);
+      const color = isHov ? topBarHoverColors[key] : topBarColors[key];
+      drawBtn(rect, color);
+      
+      // Draw icons
+      ctx.font = `bold 11px ${FONT_FAMILY}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      ctx.lineWidth = 2;
+      ctx.lineJoin = 'round';
+      const labels: Record<string, string> = { inventory: 'BAG', craft: 'CRAFT', bonus: 'BONUS' };
+      ctx.strokeText(labels[key] || key, rect.x + rect.w / 2, rect.y + rect.h / 2);
+      ctx.fillStyle = 'white';
+      ctx.fillText(labels[key] || key, rect.x + rect.w / 2, rect.y + rect.h / 2);
+    }
+    
+    // ─── Left Sidebar Buttons ───
+    const leftBtnColors: Record<string, [number, number, number]> = {
+      left_inventory: [52, 152, 219],
+      left_craft: [155, 89, 182],
+      left_bonus: [217, 154, 38],
+    };
+    const leftBtnHoverColors: Record<string, [number, number, number]> = {
+      left_inventory: [41, 128, 185],
+      left_craft: [142, 68, 173],
+      left_bonus: [195, 130, 30],
+    };
+    
+    for (const key of ['left_inventory', 'left_craft', 'left_bonus']) {
+      const rect = actions[key];
+      if (!rect) continue;
+      const isHov = hit(rect, this.mx, this.my);
+      const color = isHov ? leftBtnHoverColors[key] : leftBtnColors[key];
+      drawBtn(rect, color);
+      
+      ctx.font = `bold 11px ${FONT_FAMILY}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+      ctx.lineWidth = 2;
+      ctx.lineJoin = 'round';
+      const labels: Record<string, string> = { left_inventory: '[I]nventory', left_craft: '[C]raft', left_bonus: 'Bonus' };
+      ctx.strokeText(labels[key] || '', rect.x + rect.w / 2, rect.y + rect.h / 2);
+      ctx.fillStyle = 'white';
+      ctx.fillText(labels[key] || '', rect.x + rect.w / 2, rect.y + rect.h / 2);
+    }
+    
+    // ─── Version text ───
+    ctx.font = `14px ${FONT_FAMILY}`;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'alphabetic';
+    ctx.strokeStyle = 'black';
+    ctx.lineWidth = 3;
+    ctx.strokeText('v0.4.3', W - 10, H - 10);
+    ctx.fillStyle = 'rgba(255,255,255,0.7)';
+    ctx.fillText('v0.4.3', W - 10, H - 10);
+    
+    // ─── Instructions ───
+    ctx.textAlign = 'center';
+    ctx.font = `14px ${FONT_FAMILY}`;
+    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
+    ctx.lineWidth = 3;
+    ctx.lineJoin = 'round';
+    const instrText = 'Select a biome and press PLAY to enter the world';
+    ctx.strokeText(instrText, W / 2, H - 30);
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.fillText(instrText, W / 2, H - 30);
+    
+    // ─── Auth status ───
+    ctx.font = `13px ${FONT_FAMILY}`;
+    ctx.strokeText(this.authStatus, W / 2, H - 50);
+    ctx.fillStyle = 'rgba(255,255,255,0.65)';
+    ctx.fillText(this.authStatus, W / 2, H - 50);
 
     // Craft / Inventory panels can be opened right from the main menu, reusing
     // the same in-game panel drawers.
