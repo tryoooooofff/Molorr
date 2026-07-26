@@ -127,10 +127,30 @@ export const MOB_SIZE_MULTIPLIERS: readonly number[] = [
   10,  // Unique (uses the Eternal cap)
 ];
 
+export const FRIENDLY_MOB_SIZE_MULTIPLIERS: readonly number[] = [
+  1,   // Common
+  1.1, // Unusual
+  1.2, // Rare
+  1.4, // Epic
+  1.8, // Legendary
+  2.5, // Mythic
+  3.8, // Ultra
+  5,   // Super
+  6.5, // Omega
+  8,   // Eternal
+  8,   // Unique
+];
+
 /** Returns the mob-size multiplier for a rarity index. */
 export function mobSizeMult(rarity: number): number {
   const index = Math.max(0, Math.min(MOB_SIZE_MULTIPLIERS.length - 1, Math.floor(rarity)));
   return MOB_SIZE_MULTIPLIERS[index];
+}
+
+/** Returns the friendly mob-size multiplier for a rarity index. */
+export function friendlyMobSizeMult(rarity: number): number {
+  const index = Math.max(0, Math.min(FRIENDLY_MOB_SIZE_MULTIPLIERS.length - 1, Math.floor(rarity)));
+  return FRIENDLY_MOB_SIZE_MULTIPLIERS[index];
 }
 
 /**

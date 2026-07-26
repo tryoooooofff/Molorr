@@ -153,6 +153,791 @@ function emptyCells(n: number): (Cell | null)[] {
   return new Array(n).fill(null);
 }
 
+function generateWallData(worldW: number, worldH: number, walls: {x: number, y: number, w: number, h: number}[]) {
+  const size = Math.round(worldW / 64);
+  const cellW = worldW / size;
+  const cellH = worldH / size;
+  const grid = new Array(size * size).fill('0');
+  for (const wall of walls) {
+    const startX = Math.floor(wall.x / cellW);
+    const endX = Math.ceil((wall.x + wall.w) / cellW);
+    const startY = Math.floor(wall.y / cellH);
+    const endY = Math.ceil((wall.y + wall.h) / cellH);
+    for (let y = Math.max(0, startY); y < Math.min(size, endY); y++) {
+      for (let x = Math.max(0, startX); x < Math.min(size, endX); x++) {
+        grid[y * size + x] = '1';
+      }
+    }
+  }
+  return grid.join('');
+}
+
+const BIOME_BACKGROUNDS: Record<string, { wall_color: [number, number, number], ground_color: [number, number, number] }> = {
+  Garden: {
+    wall_color: [14, 87, 49],
+    ground_color: [30, 174, 99],
+  },
+  Desert: {
+    wall_color: [160, 110, 40],
+    ground_color: [224, 171, 69],
+  },
+  Ocean: {
+    wall_color: [15, 60, 100],
+    ground_color: [42, 115, 166],
+  }
+};
+
+class SettingsSystem {
+    showHitbox: boolean = false;
+    showRarity: boolean = true;
+    showDamage: boolean = true;
+    showParticles: boolean = true;
+    showEnhancedHealthBar: boolean = true;
+    showEnemyPanel: boolean = true;
+    showDamageNumbers: boolean = true;
+    showFPS: boolean = true;
+    showProjectileHitbox: boolean = false;
+    showAdvancedDPS: boolean = false;
+    showMovementHelper: boolean = true;  // 移动指示器
+    maxMagicAnts: number = 20;
+    maxParticles: number = 200;
+    performanceMode: string = "auto";
+    photoHardware: boolean = false;
+    collisionUpdateSkip: number = 0;
+    lowQualityWall: boolean = false;
+
+    // UI状态
+    panelOpen: boolean = false;
+    panelRect: [number, number, number, number] | null = null;
+    onChange: (() => void) | null = null;
+
+    // 滚动相关
+    scrollOffset: number = 0;
+    maxScrollOffset: number = 0;
+    isDraggingScroll: boolean = false;
+    dragStartY: number = 0;
+    dragStartOffset: number = 0;
+
+    // 保存 canvas 标识
+    canvasId: string;
+    _eventsInitialized: boolean = false; // 防重复绑定锁
+
+    _onHandleDownAction: ((e: any) => void) | null = null;
+    _onHandleMouseMove: ((e: any) => void) | null = null;
+    _onHandleTouchMove: ((e: any) => void) | null = null;
+    _onHandleUpAction: ((e: any) => void) | null = null;
+    _onHandleWheel: ((e: any) => void) | null = null;
+
+    _minusRect: [number, number, number, number] | null = null;
+    _plusRect: [number, number, number, number] | null = null;
+    _sliderRect: [number, number, number, number] | null = null;
+    _particleSliderRect: [number, number, number, number] | null = null;
+    _scrollBarRect: [number, number, number, number] | null = null;
+    _scrollThumbRect: [number, number, number, number] | null = null;
+
+    constructor(onChangeCallback: (() => void) | null = null, canvasId: string = 'gameCanvas') {
+        this.canvasId = canvasId;
+        this.onChange = onChangeCallback;
+        this.load();
+        this._initEventBindings();
+    }
+
+    _initEventBindings() {
+        if (typeof window === 'undefined') return;
+        const canvas = document.getElementById(this.canvasId) as HTMLCanvasElement | null;
+        if (!canvas) {
+            window.addEventListener('DOMContentLoaded', () => this._initEventBindings());
+            return;
+        }
+
+        const getCanvasMousePos = (e: any) => {
+            const currentCanvas = document.getElementById(this.canvasId) as HTMLCanvasElement | null;
+            if (!currentCanvas) return { x: 0, y: 0 };
+            const rect = currentCanvas.getBoundingClientRect();
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            return {
+                x: (clientX - rect.left) * (currentCanvas.width / rect.width),
+                y: (clientY - rect.top) * (currentCanvas.height / rect.height)
+            };
+        };
+
+        // 临时变量
+        let touchStartY = 0;
+        let touchStartOffset = 0;
+
+        // 按下事件
+        this._onHandleDownAction = (e: any) => {
+            if (!this.panelOpen) return;
+            const pos = getCanvasMousePos(e);
+
+            let insidePanel = false;
+            if (this.panelRect) {
+                const [px, py, pw, ph] = this.panelRect;
+                if (pos.x >= px && pos.x <= px + pw && pos.y >= py && pos.y <= py + ph) {
+                    insidePanel = true;
+                    const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+                    touchStartY = clientY;
+                    touchStartOffset = this.scrollOffset;
+                }
+            }
+
+            if (insidePanel) {
+                if (e.cancelable) e.preventDefault();
+                e.stopPropagation();
+            }
+        };
+
+        // 鼠标移动
+        this._onHandleMouseMove = (e: any) => {
+            if (!this.panelOpen || !this.isDraggingScroll) return;
+            const pos = getCanvasMousePos(e);
+            this.handleMouseMove(pos.x, pos.y);
+        };
+
+        // 触屏滑动
+        this._onHandleTouchMove = (e: any) => {
+            if (!this.panelOpen || !this.panelRect || !e.touches) return;
+            const pos = getCanvasMousePos(e);
+            const [px, py, pw, ph] = this.panelRect;
+
+            if (pos.x >= px && pos.x <= px + pw && pos.y >= py && pos.y <= py + ph) {
+                if (e.cancelable) e.preventDefault();
+                e.stopPropagation();
+
+                const rect = canvas.getBoundingClientRect();
+                const deltaY = e.touches[0].clientY - touchStartY;
+                const scaleY = canvas.height / rect.height;
+
+                this.scrollOffset = Math.max(0, Math.min(
+                    this.maxScrollOffset,
+                    touchStartOffset - deltaY * scaleY
+                ));
+                this._forceRedraw();
+            }
+        };
+
+        // 弹起
+        this._onHandleUpAction = (e: any) => {
+            if (!this.panelOpen) return;
+            if (this.handleMouseUp()) {
+                e.stopPropagation();
+            }
+        };
+
+        // 滚轮
+        this._onHandleWheel = (e: any) => {
+            if (!this.panelOpen || !this.panelRect) return;
+            const pos = getCanvasMousePos(e);
+            const [px, py, pw, ph] = this.panelRect;
+
+            if (pos.x >= px && pos.x <= px + pw && pos.y >= py && pos.y <= py + ph) {
+                if (e.cancelable) e.preventDefault();
+                e.stopPropagation();
+                this.handleWheel(e.deltaY);
+            }
+        };
+
+        // 核心防御：移除旧事件
+        if (this._onHandleDownAction) {
+            canvas.removeEventListener('mousedown', this._onHandleDownAction);
+            canvas.removeEventListener('touchstart', this._onHandleDownAction);
+        }
+        if (this._onHandleMouseMove) {
+            window.removeEventListener('mousemove', this._onHandleMouseMove);
+        }
+        if (this._onHandleTouchMove) {
+            canvas.removeEventListener('touchmove', this._onHandleTouchMove);
+        }
+        if (this._onHandleUpAction) {
+            window.removeEventListener('mouseup', this._onHandleUpAction);
+            canvas.removeEventListener('touchend', this._onHandleUpAction);
+        }
+        if (this._onHandleWheel) {
+            canvas.removeEventListener('wheel', this._onHandleWheel);
+        }
+
+        canvas.addEventListener('mousedown', this._onHandleDownAction);
+        canvas.addEventListener('touchstart', this._onHandleDownAction, { passive: false });
+        window.addEventListener('mousemove', this._onHandleMouseMove);
+        window.addEventListener('mouseup', this._onHandleUpAction);
+        canvas.addEventListener('touchend', this._onHandleUpAction);
+
+        canvas.addEventListener('touchmove', this._onHandleTouchMove, { passive: false });
+        canvas.addEventListener('wheel', this._onHandleWheel, { passive: false });
+    }
+
+    load() {
+        if (typeof window === 'undefined') return;
+        try {
+            const saved = localStorage.getItem('game_settings');
+            if (saved) {
+                const data = JSON.parse(saved);
+                this.showHitbox = data.showHitbox || false;
+                this.showRarity = data.showRarity !== undefined ? data.showRarity : true;
+                this.showDamage = data.showDamage !== undefined ? data.showDamage : true;
+                this.showParticles = data.showParticles !== undefined ? data.showParticles : true;
+                this.showEnhancedHealthBar = data.showEnhancedHealthBar !== undefined ? data.showEnhancedHealthBar : true;
+                this.showEnemyPanel = data.showEnemyPanel !== undefined ? data.showEnemyPanel : true;
+                this.showDamageNumbers = data.showDamageNumbers !== undefined ? data.showDamageNumbers : true;
+                this.showFPS = data.showFPS !== undefined ? data.showFPS : true;
+                this.maxMagicAnts = data.maxMagicAnts !== undefined ? data.maxMagicAnts : 20;
+                this.maxParticles = data.maxParticles !== undefined ? data.maxParticles : 200;
+                this.showProjectileHitbox = data.showProjectileHitbox || false;
+                this.performanceMode = data.performanceMode || "auto";
+                this.showAdvancedDPS = data.showAdvancedDPS !== undefined ? data.showAdvancedDPS : false;
+                this.photoHardware = data.photoHardware || false;
+                this.lowQualityWall = data.lowQualityWall !== undefined ? data.lowQualityWall : false;
+                this.showMovementHelper = data.showMovementHelper !== undefined ? data.showMovementHelper : true;
+            }
+        } catch(e) {}
+        this._forceRedraw();
+    }
+
+    save() {
+        if (typeof window === 'undefined') return;
+        try {
+            localStorage.setItem('game_settings', JSON.stringify({
+                showHitbox: this.showHitbox,
+                showRarity: this.showRarity,
+                showDamage: this.showDamage,
+                showParticles: this.showParticles,
+                showEnhancedHealthBar: this.showEnhancedHealthBar,
+                showEnemyPanel: this.showEnemyPanel,
+                showDamageNumbers: this.showDamageNumbers,
+                showFPS: this.showFPS,
+                showProjectileHitbox: this.showProjectileHitbox,
+                maxMagicAnts: this.maxMagicAnts,
+                maxParticles: this.maxParticles,
+                showAdvancedDPS: this.showAdvancedDPS,
+                photoHardware: this.photoHardware,
+                lowQualityWall: this.lowQualityWall,
+                performanceMode: this.performanceMode,
+                showMovementHelper: this.showMovementHelper
+            }));
+        } catch(e) {}
+        this._forceRedraw();
+    }
+
+    _forceRedraw() {
+        this.forceRedraw();
+    }
+
+    forceRedraw() {
+        if (this.onChange) this.onChange();
+        if (typeof window === 'undefined') return;
+        const canvas = document.getElementById(this.canvasId) as HTMLCanvasElement | null;
+        if (canvas && canvas.getContext) {
+            const ctx = canvas.getContext('2d');
+            const game = (window as any).gameInstance;
+            if (ctx && game) {
+              if (game.draw) game.draw(ctx);
+              else if (game.renderGame) {
+                // If it's the main gameInstance, trigger a draw update
+              }
+            }
+        }
+    }
+
+    toggle(key: string) {
+        if ((this as any)[key] !== undefined) {
+            (this as any)[key] = !(this as any)[key];
+            this.save();
+            const game = (window as any).gameInstance;
+            if (game) {
+                game[key] = (this as any)[key];
+                if (game.mainMenu) game.mainMenu[key] = (this as any)[key];
+            }
+            this.forceRedraw();
+            return true;
+        }
+        return false;
+    }
+
+    togglePhotoHardware() {
+        this.photoHardware = !this.photoHardware;
+        this.save();
+        if (this.onChange) this.onChange();
+        return this.photoHardware;
+    }
+
+    getCollisionUpdateInterval() {
+        return this.photoHardware ? 2 : 0;
+    }
+
+    setMaxMagicAnts(value: number) {
+        this.maxMagicAnts = Math.max(1, Math.min(100, value));
+        this.save();
+        const game = (window as any).gameInstance;
+        if (game?.player) {
+            for (const petal of game.player.petals) {
+                if (petal.magicSoldierAntList) petal.maxMagicSoldierAnts = this.maxMagicAnts;
+            }
+        }
+        this._forceRedraw();
+        return this.maxMagicAnts;
+    }
+
+    setMaxParticles(value: number) {
+        this.maxParticles = Math.max(50, Math.min(500, value));
+        this.save();
+        const game = (window as any).gameInstance;
+        if (game) game.maxParticles = this.maxParticles;
+        this._forceRedraw();
+        return this.maxParticles;
+    }
+
+    setPerformanceMode(mode: string) {
+        const modes = ["auto", "low", "medium", "high"];
+        if (!modes.includes(mode)) return false;
+        this.performanceMode = mode;
+        this.save();
+        const game = (window as any).gameInstance;
+        if (game) {
+            switch(mode) {
+                case "low": game.maxParticles = 50; game.enemyUpdateSkip = 2; break;
+                case "medium": game.maxParticles = 100; game.enemyUpdateSkip = 1; break;
+                case "high": game.maxParticles = 200; game.enemyUpdateSkip = 0; break;
+                case "auto": game.maxParticles = this.maxParticles; game.enemyUpdateSkip = 0; break;
+            }
+        }
+        this._forceRedraw();
+        return true;
+    }
+
+    draw(ctx: CanvasRenderingContext2D, x: number, y: number) {
+        if (!this.panelOpen) return;
+
+        const panelW = 320, panelH = 480;
+        const panelX = x - panelW / 2, panelY = y - 20;
+        this.panelRect = [panelX, panelY, panelW, panelH];
+
+        const totalContentHeight = 880;
+        const contentY = panelY + 70;
+        const contentH = panelH - 90;
+        this.maxScrollOffset = Math.max(0, totalContentHeight - contentH);
+
+        ctx.save();
+        ctx.lineJoin = "round";
+
+        // 背景
+        ctx.fillStyle = 'rgba(180, 180, 180, 0.95)';
+        ctx.beginPath();
+        if (ctx.roundRect) {
+            ctx.roundRect(panelX, panelY, panelW, panelH, 15);
+        } else {
+            ctx.rect(panelX, panelY, panelW, panelH);
+        }
+        ctx.fill();
+        ctx.strokeStyle = '#888888';
+        ctx.lineWidth = 4;
+        ctx.stroke();
+
+        // 标题
+        const drawStrokeText = (text: string, tx: number, ty: number, fontSize = 20, textAlign: CanvasTextAlign = 'center') => {
+            const fontFamily = typeof FONT_FAMILY !== 'undefined' ? FONT_FAMILY : 'sans-serif';
+            ctx.font = `${fontSize}px ${fontFamily}`;
+            ctx.textAlign = textAlign;
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 5;
+            ctx.strokeText(text, tx, ty);
+            ctx.fillStyle = '#FFFFFF';
+            ctx.fillText(text, tx, ty);
+        };
+
+        drawStrokeText('Settings', panelX + panelW / 2, panelY + 35, 28);
+
+        // 裁剪区域
+        const contentX = panelX + 10;
+        const contentW = panelW - 20;
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(contentX, contentY, contentW, contentH);
+        ctx.clip();
+
+        // 内容偏移
+        ctx.save();
+        ctx.translate(0, -this.scrollOffset);
+
+        let curY = contentY;
+
+        // 分隔线 Game
+        ctx.strokeStyle = '#aaaaaa';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(panelX + 20, curY); ctx.lineTo(panelX + panelW - 20, curY);
+        ctx.stroke();
+        drawStrokeText('Game', panelX + panelW / 2, curY + 8, 20);
+        curY += 35;
+
+        // 复选框部分
+        const items = ['showHitbox', 'showRarity', 'showDamageNumbers', 'showParticles',
+                       'showEnhancedHealthBar', 'showEnemyPanel', 'showFPS',
+                       'showProjectileHitbox', 'showAdvancedDPS', 'photoHardware',
+                       'showMovementHelper','lowQualityWall'];
+        const labels = ['Show Hitbox', 'Show Rarity', 'Show Damage', 'Show Particles',
+                        'Health Bar', 'Enemy Panel', 'Show FPS', 'Show Projectile Hitbox',
+                        'Show Advanced DPS', 'Potato Hardware', 'Movement Helper','Low Quality Wall'];
+
+        items.forEach((item, i) => {
+            const itemY = curY + i * 32;
+            const checkX = panelX + 25, checkSize = 20;
+
+            ctx.fillStyle = '#555555';
+            ctx.beginPath();
+            if (ctx.roundRect) {
+                ctx.roundRect(checkX, itemY - 8, checkSize, checkSize, 4);
+            } else {
+                ctx.rect(checkX, itemY - 8, checkSize, checkSize);
+            }
+            ctx.fill();
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            if ((this as any)[item]) {
+                ctx.fillStyle = '#cccccc';
+                ctx.fillRect(checkX + 4, itemY - 4, checkSize - 8, checkSize - 8);
+            }
+
+            drawStrokeText(labels[i], checkX + 32, itemY + 4, 16, 'left');
+        });
+
+        curY += items.length * 32 + 15;
+
+        // 分隔线 Performance
+        ctx.strokeStyle = '#aaaaaa';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(panelX + 20, curY); ctx.lineTo(panelX + panelW - 20, curY);
+        ctx.stroke();
+        drawStrokeText('Performance', panelX + panelW / 2, curY + 8, 20);
+        curY += 35;
+
+        // 1. Magic Ants
+        drawStrokeText(`Magic Ants: ${this.maxMagicAnts}`, panelX + 25, curY, 16, 'left');
+        const sliderW = panelW - 130, sliderH = 12;
+        const sx = panelX + 25, sy = curY + 10;
+
+        ctx.fillStyle = '#444444';
+        ctx.beginPath();
+        if (ctx.roundRect) {
+            ctx.roundRect(sx, sy, sliderW, sliderH, 6);
+        } else {
+            ctx.rect(sx, sy, sliderW, sliderH);
+        }
+        ctx.fill();
+
+        const antPct = (this.maxMagicAnts - 1) / 99;
+        ctx.fillStyle = '#3498db';
+        ctx.beginPath();
+        if (ctx.roundRect) {
+            ctx.roundRect(sx, sy, sliderW * antPct, sliderH, 6);
+        } else {
+            ctx.rect(sx, sy, sliderW * antPct, sliderH);
+        }
+        ctx.fill();
+
+        const bx = sx + sliderW + 10, by = sy - 5;
+
+        this._minusRect = [bx, by - this.scrollOffset, 22, 22];
+        this._plusRect = [bx + 30, by - this.scrollOffset, 22, 22];
+
+        [bx, bx + 30].forEach((rx, idx) => {
+            ctx.fillStyle = idx === 0 ? '#e74c3c' : '#2ecc71';
+            ctx.beginPath();
+            if (ctx.roundRect) {
+                ctx.roundRect(rx, by, 22, 22, 5);
+            } else {
+                ctx.rect(rx, by, 22, 22);
+            }
+            ctx.fill();
+            ctx.strokeStyle = '#000000';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            drawStrokeText(idx === 0 ? '-' : '+', rx + 11, by + 13, 18);
+        });
+
+        this._sliderRect = [sx, sy - this.scrollOffset, sliderW, sliderH];
+
+        curY += 55;
+
+        // 2. Particles
+        drawStrokeText(`Particles: ${this.maxParticles}`, panelX + 25, curY, 16, 'left');
+        const psx = panelX + 25, psy = curY + 10, psw = panelW - 50;
+
+        ctx.fillStyle = '#444444';
+        ctx.beginPath();
+        if (ctx.roundRect) {
+            ctx.roundRect(psx, psy, psw, sliderH, 6);
+        } else {
+            ctx.rect(psx, psy, psw, sliderH);
+        }
+        ctx.fill();
+
+        const partPct = (this.maxParticles - 50) / 450;
+        ctx.fillStyle = '#9b59b6';
+        ctx.beginPath();
+        if (ctx.roundRect) {
+            ctx.roundRect(psx, psy, psw * partPct, sliderH, 6);
+        } else {
+            ctx.rect(psx, psy, psw * partPct, sliderH);
+        }
+        ctx.fill();
+
+        this._particleSliderRect = [psx, psy - this.scrollOffset, psw, sliderH];
+
+        curY += 55;
+
+        // 分隔线 About
+        ctx.strokeStyle = '#aaaaaa';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(panelX + 20, curY); ctx.lineTo(panelX + panelW - 20, curY);
+        ctx.stroke();
+        drawStrokeText('About', panelX + panelW / 2, curY + 8, 20);
+        curY += 35;
+
+        // 1. 版本号
+        drawStrokeText('Version 0.3.2', panelX + panelW / 2, curY + 10, 16, 'center');
+        curY += 40;
+
+        const aboutText = "Hi there! Welcome to Flwrr.pro, a game inspired by zorr.pro, which is developed since November 2025. Welcome to give advise by multi-player mode or just tell me directly.";
+
+        const maxWidth = panelW - 50;
+        const lineHeight = 23;
+        const fontFamily = typeof FONT_FAMILY !== 'undefined' ? FONT_FAMILY : 'sans-serif';
+        ctx.font = `15px ${fontFamily}`;
+        ctx.textAlign = 'center';
+
+        // 自动换行
+        let words = aboutText.split(' ');
+        let currentLine = '';
+
+        for (let n = 0; n < words.length; n++) {
+            let testLine = currentLine + words[n] + ' ';
+            let metrics = ctx.measureText(testLine);
+            let testWidth = metrics.width;
+
+            if (testWidth > maxWidth && n > 0) {
+                drawStrokeText(currentLine.trim(), panelX + panelW / 2, curY, 14, 'center');
+                currentLine = words[n] + ' ';
+                curY += lineHeight;
+            } else {
+                currentLine = testLine;
+            }
+        }
+        if (currentLine.length > 0) {
+            drawStrokeText(currentLine.trim(), panelX + panelW / 2, curY, 14, 'center');
+            curY += lineHeight;
+        }
+
+        curY += 20;
+        ctx.restore(); // 弹出 translate 偏移
+        ctx.restore(); // 弹出 clip
+
+        // 滚动条
+        if (this.maxScrollOffset > 0) {
+            const scrollBarX = panelX + panelW - 12;
+            const scrollBarY = contentY + 4;
+            const scrollBarH = contentH - 8;
+            const thumbH = Math.max(25, (contentH / totalContentHeight) * scrollBarH);
+            const thumbY = scrollBarY + (this.scrollOffset / this.maxScrollOffset) * (scrollBarH - thumbH);
+
+            ctx.fillStyle = 'rgba(255,255,255,0.15)';
+            ctx.beginPath();
+            if (ctx.roundRect) {
+                ctx.roundRect(scrollBarX, scrollBarY, 5, scrollBarH, 3);
+            } else {
+                ctx.rect(scrollBarX, scrollBarY, 5, scrollBarH);
+            }
+            ctx.fill();
+
+            ctx.fillStyle = 'rgba(255,255,255,0.5)';
+            ctx.beginPath();
+            if (ctx.roundRect) {
+                ctx.roundRect(scrollBarX, thumbY, 5, thumbH, 3);
+            } else {
+                ctx.rect(scrollBarX, thumbY, 5, thumbH);
+            }
+            ctx.fill();
+
+            this._scrollBarRect = [scrollBarX, scrollBarY, 5, scrollBarH];
+            this._scrollThumbRect = [scrollBarX, thumbY, 5, thumbH];
+        }
+
+        // 关闭按钮
+        const closeX = panelX + panelW - 35, closeY = panelY + 10, closeSize = 25;
+        ctx.fillStyle = '#e74c3c';
+        ctx.beginPath();
+        if (ctx.roundRect) {
+            ctx.roundRect(closeX, closeY, closeSize, closeSize, 6);
+        } else {
+            ctx.rect(closeX, closeY, closeSize, closeSize);
+        }
+        ctx.fill();
+        ctx.strokeStyle = '#000000';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        drawStrokeText('×', closeX + 12, closeY + 13, 18);
+
+        ctx.restore();
+    }
+
+    handleClick(x: number, y: number) {
+        if (!this.panelOpen || !this.panelRect) return false;
+
+        const [px, py, pw, ph] = this.panelRect;
+
+        // 1. 关闭按钮
+        const closeX = px + pw - 35, closeY = py + 10, closeSize = 25;
+        if (x >= closeX && x <= closeX + closeSize && y >= closeY && y <= closeY + closeSize) {
+            this.panelOpen = false;
+            this._forceRedraw();
+            return true;
+        }
+
+        // 2. 滚动条点击
+        if (this._scrollBarRect) {
+            const [sx, sy, sw, sh] = this._scrollBarRect;
+            if (x >= sx && x <= sx + sw && y >= sy && y <= sy + sh) {
+                const relativeY = y - sy;
+                const ratio = relativeY / sh;
+                this.scrollOffset = Math.max(0, Math.min(this.maxScrollOffset, ratio * this.maxScrollOffset));
+                this._forceRedraw();
+                return true;
+            }
+        }
+
+        // 3. 滚动条拖拽开始
+        if (this._scrollThumbRect) {
+            const [tx, ty, tw, th] = this._scrollThumbRect;
+            if (x >= tx && x <= tx + tw && y >= ty && y <= ty + th) {
+                this.isDraggingScroll = true;
+                this.dragStartY = y;
+                this.dragStartOffset = this.scrollOffset;
+                return true;
+            }
+        }
+
+        // 4. 复选框
+        const contentY = py + 70;
+        const checkYStart = contentY + 35;
+        const itemH = 32;
+
+        const items = ['showHitbox', 'showRarity', 'showDamageNumbers', 'showParticles',
+                       'showEnhancedHealthBar', 'showEnemyPanel', 'showFPS',
+                       'showProjectileHitbox', 'showAdvancedDPS', 'photoHardware',
+                       'showMovementHelper','lowQualityWall'];
+
+        for (let i = 0; i < items.length; i++) {
+            const itemY = checkYStart + i * itemH - this.scrollOffset;
+            const checkX = px + 25;
+            const checkSize = 20;
+
+            const hitX = checkX - 8;
+            const hitY = itemY - 10;
+            const hitW = checkSize + 16;
+            const hitH = itemH + 8;
+
+            const isHit = x >= hitX && x <= hitX + hitW && y >= hitY && y <= hitY + hitH;
+
+            if (isHit) {
+                this.toggle(items[i]);
+                this._forceRedraw();
+                return true;
+            }
+        }
+
+        // 5. 减号按钮
+        if (this._minusRect) {
+            const [rx, ry, rw, rh] = this._minusRect;
+            if (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh) {
+                this.setMaxMagicAnts(this.maxMagicAnts - 5);
+                return true;
+            }
+        }
+
+        // 6. 加号按钮
+        if (this._plusRect) {
+            const [rx, ry, rw, rh] = this._plusRect;
+            if (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh) {
+                this.setMaxMagicAnts(this.maxMagicAnts + 5);
+                return true;
+            }
+        }
+
+        // 7. Magic Ants 滑块
+        if (this._sliderRect) {
+            const [rx, ry, rw, rh] = this._sliderRect;
+            if (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh) {
+                const percent = (x - rx) / rw;
+                this.setMaxMagicAnts(Math.floor(1 + percent * 99));
+                return true;
+            }
+        }
+
+        // 8. Particles 滑块
+        if (this._particleSliderRect) {
+            const [rx, ry, rw, rh] = this._particleSliderRect;
+            if (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh) {
+                const percent = (x - rx) / rw;
+                this.setMaxParticles(Math.floor(50 + percent * 450));
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    handleMouseMove(x: number, y: number) {
+        if (!this.panelOpen) return;
+        if (this.isDraggingScroll && this._scrollThumbRect && this._scrollBarRect) {
+            const th = this._scrollThumbRect[3];
+            const scrollBarH = this._scrollBarRect[3];
+            const dy = y - this.dragStartY;
+
+            const maxTrack = scrollBarH - th;
+            if (maxTrack > 0) {
+                const ratio = dy / maxTrack;
+                this.scrollOffset = Math.max(0, Math.min(this.maxScrollOffset, this.dragStartOffset + ratio * this.maxScrollOffset));
+                this._forceRedraw();
+            }
+        }
+    }
+
+    handleMouseUp() {
+        if (this.isDraggingScroll) {
+            this.isDraggingScroll = false;
+            return true;
+        }
+        return false;
+    }
+
+    handleWheel(deltaY: number) {
+        if (!this.panelOpen) return;
+        const scrollSpeed = deltaY > 0 ? 22 : -22;
+        this.scrollOffset = Math.max(0, Math.min(this.maxScrollOffset, this.scrollOffset + scrollSpeed));
+        this._forceRedraw();
+    }
+
+    open() {
+        this.panelOpen = true;
+        this.scrollOffset = 0;
+        this._forceRedraw();
+    }
+    close() {
+        this.panelOpen = false;
+        this._forceRedraw();
+    }
+    togglePanel() {
+        this.panelOpen = !this.panelOpen;
+        if (this.panelOpen) this.scrollOffset = 0;
+        this._forceRedraw();
+    }
+}
+
 // =====================================================================
 // Chat System
 // =====================================================================
@@ -434,6 +1219,18 @@ export class GameClient {
    *  fixed-size overlays (health bars, rarity tags, damage overlays) constant on screen. */
   private viewZoom = 1;
 
+  // Settings and wall rendering caching
+  private settings: SettingsSystem;
+  private currentBiome = "Garden";
+  wallNoisyLoops: { x: number; y: number }[][] = [];
+  wallMaxJitterPx = 0;
+  _wallEdgeBiome = "";
+  _wallPatternBiome = "";
+  wallPattern: CanvasPattern | null = null;
+  _wallPatternLegacy: CanvasPattern | null = null;
+  _wallPatternLegacyBiome = "";
+  private _patternCache: Record<string, CanvasPattern> = {};
+
   // player state
   private hp = 100;
   private maxHp = 100;
@@ -542,6 +1339,12 @@ export class GameClient {
     if (!ctx) throw new Error("canvas2d unavailable");
     this.ctx = ctx;
     this.quickSlot = new QuickSlot(this.quickSlotHost());
+    this.settings = new SettingsSystem(() => {
+      // onChange callback
+    }, 'gameCanvas');
+    if (typeof window !== "undefined") {
+      (window as any).gameInstance = this;
+    }
     this.loadLocal();
   }
 
@@ -1754,6 +2557,7 @@ export class GameClient {
     return [
       { id: "bag", rect: { x: 16, y: this.hudButtonRowY(0), w: bw, h: 38 }, label: "Inventory", color: "#3d8bd6" },
       { id: "craft", rect: { x: 16, y: this.hudButtonRowY(1), w: bw, h: 38 }, label: "Craft", color: "#c9762b" },
+      { id: "settings", rect: { x: 16 + bw + 8, y: this.hudButtonRowY(0), w: bw, h: 38 }, label: "Settings", color: "#7f8c8d" },
       { id: "menu", rect: { x: this.w - 108, y: this.hudButtonRowY(1), w: 92, h: 38 }, label: "Menu", color: "#8a4d4d" },
     ];
   }
@@ -2103,40 +2907,27 @@ export class GameClient {
     const W = this.w;
     const H = this.h;
     
-    // Top bar buttons (centered)
-    const TOP_Y = 14;
-    const BTN_SIZE = 48;
-    const BTN_GAP = 8;
-    const TOP_KEYS = ['inventory', 'craft', 'bonus'];
-    const totalTopW = TOP_KEYS.length * BTN_SIZE + (TOP_KEYS.length - 1) * BTN_GAP;
-    const topStartX = (W - totalTopW) / 2;
-    
-    const buttons: Record<string, { x: number; y: number; w: number; h: number }> = {};
-    
-    TOP_KEYS.forEach((key, i) => {
-      buttons[key] = {
-        x: topStartX + i * (BTN_SIZE + BTN_GAP),
-        y: TOP_Y,
-        w: BTN_SIZE,
-        h: BTN_SIZE,
-      };
-    });
-    
     // Left sidebar buttons
     const LEFT_X = 14;
     const LEFT_W = 90;
     const LEFT_H = 45;
     const LEFT_GAP = 10;
-    const leftMidY = H / 2 - (LEFT_H * 3 + LEFT_GAP * 2) / 2;
+    const leftMidY = H / 2 - (LEFT_H * 4 + LEFT_GAP * 3) / 2;
+    
+    const buttons: Record<string, { x: number; y: number; w: number; h: number }> = {};
     
     buttons['left_inventory'] = { x: LEFT_X, y: leftMidY, w: LEFT_W, h: LEFT_H };
     buttons['left_craft'] = { x: LEFT_X, y: leftMidY + LEFT_H + LEFT_GAP, w: LEFT_W, h: LEFT_H };
     buttons['left_bonus'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 2, w: LEFT_W, h: LEFT_H };
+    buttons['left_settings'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 3, w: LEFT_W, h: LEFT_H };
     
     return buttons;
   }
 
   private menuClick(mx: number, my: number) {
+    if (this.settings.panelOpen) {
+      if (this.settings.handleClick(mx, my)) return;
+    }
     if (this.bonusOpen) {
       const modal = this.bonusModalRect();
       const claim = { x: modal.x + 28, y: modal.y + modal.h - 66, w: modal.w - 56, h: 40 };
@@ -2174,15 +2965,11 @@ export class GameClient {
     // Action buttons (top bar and left sidebar)
     const actions = this.menuActionRects();
     
-    // Top bar buttons
-    if (actions.inventory && hit(actions.inventory, mx, my)) this.toggleBag();
-    if (actions.craft && hit(actions.craft, mx, my)) this.toggleCraft();
-    if (actions.bonus && hit(actions.bonus, mx, my)) this.bonusOpen = true;
-    
     // Left sidebar buttons (same functions)
     if (actions.left_inventory && hit(actions.left_inventory, mx, my)) this.toggleBag();
     if (actions.left_craft && hit(actions.left_craft, mx, my)) this.toggleCraft();
     if (actions.left_bonus && hit(actions.left_bonus, mx, my)) this.bonusOpen = true;
+    if (actions.left_settings && hit(actions.left_settings, mx, my)) this.settings.togglePanel();
     
     // Play button (big button below biome grid)
     const playBtnRect = this.menuPlayButtonRect();
@@ -2222,6 +3009,9 @@ export class GameClient {
 
   // ------------------------------------------------------------ game input
   private gameClick(mx: number, my: number, shiftKey = false) {
+    if (this.settings.panelOpen) {
+      if (this.settings.handleClick(mx, my)) return;
+    }
     if (!this.alive) {
       const bw = 180;
       const cx = this.w / 2;      if (hit({ x: cx - bw - 10, y: this.h / 2 + 40, w: bw, h: 52 }, mx, my)) {
@@ -2238,6 +3028,7 @@ export class GameClient {
       if (!hit(b.rect, mx, my)) continue;
       if (b.id === "bag") this.toggleBag();
       if (b.id === "craft") this.toggleCraft();
+      if (b.id === "settings") this.settings.togglePanel();
       if (b.id === "menu") this.gotoMenu();
       return;
     }
@@ -2792,8 +3583,6 @@ export class GameClient {
     const bob = Math.sin(t * 1.6) * 6;
     const titleY = Math.max(60, this.h * 0.12);
     
-    drawFlower(ctx, this.w / 2, titleY - 30 + bob, 30, true, 0);
-    
     ctx.font = `bold ${titleSize}px ${FONT_FAMILY}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'alphabetic';
@@ -2873,52 +3662,22 @@ export class GameClient {
       ctx.fillText('PLAY', playBtnRect.x + playBtnRect.w / 2, playBtnRect.y + playBtnRect.h / 2);
     }
     
-    // ─── Top Bar Buttons ───
-    const actions = this.menuActionRects();
-    const topBarColors: Record<string, [number, number, number]> = {
-      inventory: [52, 152, 219],
-      craft: [155, 89, 182],
-      bonus: [217, 154, 38],
-    };
-    const topBarHoverColors: Record<string, [number, number, number]> = {
-      inventory: [41, 128, 185],
-      craft: [142, 68, 173],
-      bonus: [195, 130, 30],
-    };
-    
-    for (const key of ['inventory', 'craft', 'bonus']) {
-      const rect = actions[key];
-      if (!rect) continue;
-      const isHov = hit(rect, this.mx, this.my);
-      const color = isHov ? topBarHoverColors[key] : topBarColors[key];
-      drawBtn(rect, color);
-      
-      // Draw icons
-      ctx.font = `bold 11px ${FONT_FAMILY}`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-      ctx.lineWidth = 2;
-      ctx.lineJoin = 'round';
-      const labels: Record<string, string> = { inventory: 'BAG', craft: 'CRAFT', bonus: 'BONUS' };
-      ctx.strokeText(labels[key] || key, rect.x + rect.w / 2, rect.y + rect.h / 2);
-      ctx.fillStyle = 'white';
-      ctx.fillText(labels[key] || key, rect.x + rect.w / 2, rect.y + rect.h / 2);
-    }
-    
     // ─── Left Sidebar Buttons ───
+    const actions = this.menuActionRects();
     const leftBtnColors: Record<string, [number, number, number]> = {
       left_inventory: [52, 152, 219],
       left_craft: [155, 89, 182],
       left_bonus: [217, 154, 38],
+      left_settings: [127, 140, 141],
     };
     const leftBtnHoverColors: Record<string, [number, number, number]> = {
       left_inventory: [41, 128, 185],
       left_craft: [142, 68, 173],
       left_bonus: [195, 130, 30],
+      left_settings: [100, 110, 110],
     };
     
-    for (const key of ['left_inventory', 'left_craft', 'left_bonus']) {
+    for (const key of ['left_inventory', 'left_craft', 'left_bonus', 'left_settings']) {
       const rect = actions[key];
       if (!rect) continue;
       const isHov = hit(rect, this.mx, this.my);
@@ -2931,7 +3690,12 @@ export class GameClient {
       ctx.strokeStyle = 'rgba(0,0,0,0.8)';
       ctx.lineWidth = 2;
       ctx.lineJoin = 'round';
-      const labels: Record<string, string> = { left_inventory: '[I]nventory', left_craft: '[C]raft', left_bonus: 'Bonus' };
+      const labels: Record<string, string> = { 
+        left_inventory: '[I]nventory', 
+        left_craft: '[C]raft', 
+        left_bonus: 'Bonus',
+        left_settings: 'Settings'
+      };
       ctx.strokeText(labels[key] || '', rect.x + rect.w / 2, rect.y + rect.h / 2);
       ctx.fillStyle = 'white';
       ctx.fillText(labels[key] || '', rect.x + rect.w / 2, rect.y + rect.h / 2);
@@ -2969,6 +3733,7 @@ export class GameClient {
     this.renderBag();
     this.renderCraft();
     if (this.bonusOpen) this.renderBonusModal();
+    this.settings.draw(ctx, W / 2, H / 2);
     if (this.drag) {
       const size = 60;
       drawCard(ctx, { x: this.dragX - size / 2, y: this.dragY - size / 2, w: size, h: size }, this.drag.cell, {
@@ -3028,33 +3793,37 @@ export class GameClient {
   private renderGame(dt: number) {
     const ctx = this.ctx;
     const map = MAPS[this.mapId] ?? MAPS[0];
-    ctx.fillStyle = map.bg;
-    ctx.fillRect(0, 0, this.w, this.h);
+
+    // Ensure biome and WALL_DATA are set up
+    const mapName = map.name || "Garden";
+    if (this.currentBiome !== mapName) {
+      this.currentBiome = mapName;
+    }
+    if (typeof window !== "undefined") {
+      (window as any).WALL_DATA = (window as any).WALL_DATA || {};
+      if (!(window as any).WALL_DATA[mapName]) {
+        (window as any).WALL_DATA[mapName] = generateWallData(this.worldW, this.worldH, this.walls);
+      }
+    }
 
     const zoom = Math.min(1.15, Math.max(0.72, Math.min(this.w / 1280, this.h / 800) * 1.05));
     this.viewZoom = zoom;
+
+    // Draw background
+    const groundColor = BIOME_BACKGROUNDS[this.currentBiome]?.ground_color || [30, 174, 99];
+    if (this.currentBiome === "Ocean" || this.currentBiome === "Desert") {
+      this.drawWavesDirect(ctx, { x: this.camX, y: this.camY }, groundColor);
+    } else {
+      this.drawBackgroundPattern(ctx, { x: this.camX, y: this.camY }, groundColor);
+    }
+
     ctx.save();
     ctx.translate(this.w / 2, this.h / 2);
     ctx.scale(zoom, zoom);
     ctx.translate(-this.camX, -this.camY);
 
-    // grid
     const viewW = this.w / zoom;
     const viewH = this.h / zoom;
-    const gx0 = Math.floor((this.camX - viewW / 2) / 64) * 64;
-    const gy0 = Math.floor((this.camY - viewH / 2) / 64) * 64;
-    ctx.strokeStyle = map.grid;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    for (let x = gx0; x < this.camX + viewW / 2 + 64; x += 64) {
-      ctx.moveTo(x, this.camY - viewH / 2);
-      ctx.lineTo(x, this.camY + viewH / 2);
-    }
-    for (let y = gy0; y < this.camY + viewH / 2 + 64; y += 64) {
-      ctx.moveTo(this.camX - viewW / 2, y);
-      ctx.lineTo(this.camX + viewW / 2, y);
-    }
-    ctx.stroke();
 
     // out-of-bounds shading
     ctx.fillStyle = "rgba(0,0,0,0.28)";
@@ -3065,17 +3834,7 @@ export class GameClient {
     ctx.fillRect(this.worldW, this.camY - viewH, ob, viewH * 2);
 
     // walls
-    for (const wall of this.walls) {
-      roundRect(ctx, wall.x, wall.y + 6, wall.w, wall.h, 10);
-      ctx.fillStyle = "rgba(0,0,0,0.25)";
-      ctx.fill();
-      roundRect(ctx, wall.x, wall.y, wall.w, wall.h, 10);
-      ctx.fillStyle = shade(map.bg, -58);
-      ctx.fill();
-      ctx.lineWidth = 4;
-      ctx.strokeStyle = shade(map.bg, -84);
-      ctx.stroke();
-    }
+    this.drawWallsFromData(ctx, { x: this.camX, y: this.camY });
 
     // entities
     const list = [...this.ents.values()].sort((a, b) => a.kind - b.kind || a.y - b.y);
@@ -3124,6 +3883,664 @@ export class GameClient {
       panel(ctx, { x: this.w / 2 - 120, y: 16, w: 240, h: 40 });
       text(ctx, "connecting to server...", this.w / 2, 36, 16, "#ffe763");
     }
+    // Draw Settings System panel
+    this.settings.draw(ctx, this.w / 2, this.h / 2);
+  }
+
+  buildWallEdgeCache() {    
+    const d = (window as any).WALL_DATA?.[this.currentBiome];    
+    if (!d) return;    
+    
+    const size = Math.sqrt(d.length) | 0;    
+    const cellW = this.worldW / size;    
+    const cellH = this.worldH / size;    
+    
+    const W = (x: number, y: number) =>    
+        x >= 0 && y >= 0 && x < size && y < size &&    
+        d[y * size + x] === '1';    
+    
+    // =========================    
+    // 1. 栅格 → 有向边    
+    // =========================    
+    const edgeMap = new Map<number, { x: number; y: number }>();    
+    const keyOf = (x: number, y: number) => x * (size + 1) + y;    
+    
+    for (let y = 0; y < size; y++) {    
+        for (let x = 0; x < size; x++) {    
+            if (!W(x, y)) continue;    
+            if (!W(x, y - 1)) edgeMap.set(keyOf(x, y), { x: x + 1, y: y });    
+            if (!W(x + 1, y)) edgeMap.set(keyOf(x + 1, y), { x: x + 1, y: y + 1 });    
+            if (!W(x, y + 1)) edgeMap.set(keyOf(x + 1, y + 1), { x: x, y: y + 1 });    
+            if (!W(x - 1, y)) edgeMap.set(keyOf(x, y + 1), { x: x, y: y });    
+        }    
+    }    
+    
+    // =========================    
+    // 2. 串成闭合多边形    
+    // =========================    
+    const rawLoops: { x: number; y: number }[][] = [];    
+    const visited = new Set<number>();    
+    
+    for (const startKey of edgeMap.keys()) {    
+        if (visited.has(startKey)) continue;    
+        const loop: { x: number; y: number }[] = [];    
+        let curKey = startKey;    
+        let guard = 0;    
+        while (!visited.has(curKey) && guard++ < size * size * 4) {    
+            visited.add(curKey);    
+            loop.push({ x: Math.floor(curKey / (size + 1)), y: curKey % (size + 1) });    
+            const next = edgeMap.get(curKey);    
+            if (!next) break;    
+            curKey = keyOf(next.x, next.y);    
+        }    
+        if (loop.length >= 3) rawLoops.push(loop);    
+    }    
+    
+    // =========================    
+    // 3. 简化    
+    // =========================    
+    const simplify = (loop: { x: number; y: number }[]) => {    
+        const n = loop.length;    
+        const out: { x: number; y: number }[] = [];    
+        for (let i = 0; i < n; i++) {    
+            const p0 = loop[(i - 1 + n) % n];    
+            const p1 = loop[i];    
+            const p2 = loop[(i + 1) % n];    
+            const collinear = (p1.x - p0.x) * (p2.y - p1.y) === (p1.y - p0.y) * (p2.x - p1.x);    
+            if (!collinear) out.push(p1);    
+        }    
+        return out.length >= 3 ? out : loop;    
+    };    
+    const simplified = rawLoops.map(simplify);    
+    
+    // =========================    
+    // 4. 噪声（幅度调小，更平滑）    
+    // =========================    
+    const noise = (x: number, y: number, seed: number) => {    
+        let h = seed * 374761393 + x * 668265263 + y * 1274126177;    
+        h = (h ^ (h >> 13)) * 1274126177;    
+        h = h ^ (h >> 16);    
+        return (h & 0x7fffffff) / 0x7fffffff;    
+    };    
+    const PTS_PER_CELL = 3;    
+    const BIG_AMP = 0.1;    
+    const FINE_AMP = 0.04;    
+    const BIG_FREQ = 0.2;    
+    const FINE_FREQ = 2.9;    
+    
+    this.wallNoisyLoops = simplified.map((loop, loopIdx) => {    
+        const pts: { x: number; y: number }[] = [];    
+        const n = loop.length;    
+        const seed = loopIdx * 0.7 + 1;    
+    
+        for (let i = 0; i < n; i++) {    
+            const p1 = loop[i];    
+            const p2 = loop[(i + 1) % n];    
+            const horizontal = p1.y === p2.y;    
+            const len = horizontal ? Math.abs(p2.x - p1.x) : Math.abs(p2.y - p1.y);    
+            const steps = Math.max(1, Math.round(len * PTS_PER_CELL));    
+    
+            for (let s2 = 0; s2 < steps; s2++) {    
+                const t = s2 / steps;    
+                const wx = p1.x + (p2.x - p1.x) * t;    
+                const wy = p1.y + (p2.y - p1.y) * t;    
+    
+                let j = 0;    
+                if (s2 !== 0) {    
+                    const big = (noise(wx * BIG_FREQ, wy * BIG_FREQ, seed + 11) - 0.5) * 2 * BIG_AMP;    
+                    const fine = (noise(wx * FINE_FREQ, wy * FINE_FREQ, seed + 53) - 0.5) * 2 * FINE_AMP;    
+                    j = big + fine;    
+                }    
+    
+                pts.push({    
+                    x: (wx + (horizontal ? 0 : j)) * cellW,    
+                    y: (wy + (horizontal ? j : 0)) * cellH    
+                });    
+            }    
+        }    
+        return pts;    
+    });    
+    
+    this.wallMaxJitterPx = (BIG_AMP + FINE_AMP) * Math.min(cellW, cellH);    
+    this._wallEdgeBiome = this.currentBiome;    
+  }
+
+  drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {    
+    const d = (window as any).WALL_DATA?.[this.currentBiome];    
+    if (!d) return;    
+    
+    // ⭐ 低质量模式：绘制原始直线墙壁    
+    if (this.settings.lowQualityWall) {    
+        this._drawWallsLegacy(ctx, c, d);    
+        return;    
+    }    
+    
+    // =========================    
+    // pattern（高质量模式）    
+    // =========================    
+    if (!this.wallPattern || this._wallPatternBiome !== this.currentBiome) {    
+        const s = 512, cv = document.createElement('canvas');    
+        cv.width = cv.height = s;    
+    
+        const g = cv.getContext('2d');    
+        if (g) {
+          const b = BIOME_BACKGROUNDS[this.currentBiome]?.wall_color || [80, 80, 80];    
+    
+          g.fillStyle = `rgb(${b[0]},${b[1]},${b[2]})`;    
+          g.fillRect(0, 0, s, s);    
+    
+          g.fillStyle = `rgba(${Math.max(0, b[0] - 25)}, ${Math.max(0, b[1] - 25)}, ${Math.max(0, b[2] - 25)}, .5)`;    
+    
+          for (let i = 0; i < 17; i++) {    
+              const r = 5 + Math.random() * 10;    
+              const x = Math.random() * s;    
+              const y = Math.random() * s;    
+    
+              g.beginPath();    
+              g.arc(x, y, r, 0, Math.PI * 2);    
+              g.fill();    
+          }    
+        }
+    
+        this.wallPattern = ctx.createPattern(cv, 'repeat');    
+        this._wallPatternBiome = this.currentBiome;    
+    }    
+    
+    if (this._wallEdgeBiome !== this.currentBiome)    
+        this.buildWallEdgeCache();    
+    
+    // =========================    
+    // camera + scale    
+    // =========================    
+    const cx = c.x;    
+    const cy = c.y;    
+    
+    const viewScale = this.viewZoom || 1;    
+    
+    const vw = this.w / viewScale;    
+    const vh = this.h / viewScale;    
+    
+    const left = cx - vw / 2;    
+    const right = cx + vw / 2;    
+    const top = cy - vh / 2;    
+    const bottom = cy + vh / 2;    
+    
+    // pattern固定世界    
+    if (this.wallPattern) {
+      this.wallPattern.setTransform(new DOMMatrix().translateSelf(-cx, -cy));    
+    }
+    
+    const size = Math.sqrt(d.length) | 0;    
+    const cellW = this.worldW / size;    
+    const BUFFER_BLOCKS = 11;    
+    const pad = cellW * BUFFER_BLOCKS * viewScale;    
+    
+    // =========================    
+    // 一次性把所有可见轮廓拼进一个 Path2D    
+    // =========================    
+    const path = new Path2D();    
+    let hasVisible = false;    
+    
+    for (const loop of this.wallNoisyLoops) {    
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;    
+        for (const p of loop) {    
+            if (p.x < minX) minX = p.x;    
+            if (p.x > maxX) maxX = p.x;    
+            if (p.y < minY) minY = p.y;    
+            if (p.y > maxY) maxY = p.y;    
+        }    
+        if (maxX < left - pad || minX > right + pad ||    
+            maxY < top - pad || minY > bottom + pad) continue;    
+    
+        hasVisible = true;    
+        path.moveTo(loop[0].x - cx, loop[0].y - cy);    
+        for (let i = 1; i < loop.length; i++) {    
+            path.lineTo(loop[i].x - cx, loop[i].y - cy);    
+        }    
+        path.closePath();    
+    }    
+    
+    if (!hasVisible) return;    
+    
+    if (this.wallPattern) {
+      ctx.fillStyle = this.wallPattern;    
+    }
+    ctx.fill(path, 'evenodd');    
+    
+    const bgConfig = BIOME_BACKGROUNDS[this.currentBiome];    
+    const wallColor = bgConfig?.wall_color || [80, 80, 80];    
+    const darkColor = `rgb(${Math.max(0, wallColor[0] - 50)}, ${Math.max(0, wallColor[1] - 50)}, ${Math.max(0, wallColor[2] - 50)})`;    
+    const groundColor = bgConfig?.ground_color || [80, 80, 80];    
+    const lightColor = `rgba(${Math.min(255, groundColor[0] - 30)}, ${Math.min(255, groundColor[1] - 30)}, ${Math.min(255, groundColor[2] - 30)}, 0.4)`;    
+    
+    if (this.wallPattern) {
+      ctx.fillStyle = this.wallPattern;    
+    }
+    ctx.fill(path, 'evenodd');    
+    
+    ctx.lineJoin = 'round';    
+    ctx.lineCap = 'round';    
+    
+    // 1) 先画一圈宽的浅色描边（这一圈是以 path 为中心，内外各占一半）    
+    ctx.strokeStyle = lightColor;    
+    ctx.lineWidth = 36;    
+    ctx.stroke(path);    
+    
+    // 2) 重新填充一次 —— fill 只会画在 path 内部，正好把浅色描边"往里"的那一半盖掉，    
+    //    只留下贴着外面（草地那一侧）的浅色边框    
+    if (this.wallPattern) {
+      ctx.fillStyle = this.wallPattern;    
+    }
+    ctx.fill(path, 'evenodd');    
+    
+    // 3) 再画一圈窄的深色描边，压在浅色边框的内侧    
+    ctx.strokeStyle = darkColor;    
+    ctx.lineWidth = 12;    
+    ctx.stroke(path);    
+    
+    // 4) 再填充一次，把深色描边"往里"的那一半也盖掉，    
+    //    只留下贴着浅色边框内侧的一圈深色细线，再往里就是正常的墙体填充    
+    if (this.wallPattern) {
+      ctx.fillStyle = this.wallPattern;    
+    }
+    ctx.fill(path, 'evenodd');    
+  }
+
+  _drawWallsLegacy(ctx: CanvasRenderingContext2D, cameraOffset: { x: number; y: number }, wallData: string) {    
+    const size = Math.sqrt(wallData.length) | 0;    
+    const cellW = this.worldW / size;    
+    const cellH = this.worldH / size;    
+    
+    const cx = cameraOffset.x;    
+    const cy = cameraOffset.y;    
+    
+    const viewScale = this.viewZoom || 1;    
+    const vw = this.w / viewScale;    
+    const vh = this.h / viewScale;    
+    
+    const left = cx - vw / 2;    
+    const right = cx + vw / 2;    
+    const top = cy - vh / 2;    
+    const bottom = cy + vh / 2;    
+    
+    const BUFFER_BLOCKS = 12;    
+    const pad = cellW * BUFFER_BLOCKS * viewScale;    
+    
+    const bgConfig = BIOME_BACKGROUNDS[this.currentBiome];    
+    const wallColor = bgConfig?.wall_color || [80, 80, 80];    
+    
+    // 初始化 Pattern    
+    if (!this._wallPatternLegacy || this._wallPatternLegacyBiome !== this.currentBiome) {    
+        const s = 512, cv = document.createElement('canvas');    
+        cv.width = cv.height = s;    
+        const g = cv.getContext('2d');    
+        if (g) {
+          g.fillStyle = `rgb(${wallColor[0]},${wallColor[1]},${wallColor[2]})`;    
+          g.fillRect(0, 0, s, s);    
+    
+          g.fillStyle = `rgba(${Math.max(0, wallColor[0] - 25)}, ${Math.max(0, wallColor[1] - 25)}, ${Math.max(0, wallColor[2] - 25)}, .5)`;    
+          for (let i = 0; i < 17; i++) {    
+              const r = 5 + Math.random() * 10;    
+              const x = Math.random() * s;    
+              const y = Math.random() * s;    
+              g.beginPath();    
+              g.arc(x, y, r, 0, Math.PI * 2);    
+              g.fill();    
+          }    
+        }
+    
+        this._wallPatternLegacy = ctx.createPattern(cv, 'repeat');    
+        this._wallPatternLegacyBiome = this.currentBiome;    
+    }    
+    
+    // 计算颜色（匹配高质量模式）    
+    const darkColor = `rgb(${Math.max(0, wallColor[0] - 50)}, ${Math.max(0, wallColor[1] - 50)}, ${Math.max(0, wallColor[2] - 50)})`;    
+    const groundColor = bgConfig?.ground_color || [80, 80, 80];    
+    const lightColor = `rgba(${Math.min(255, groundColor[0] - 30)}, ${Math.min(255, groundColor[1] - 30)}, ${Math.min(255, groundColor[2] - 30)}, 0.4)`;    
+    
+    // pattern 固定世界坐标    
+    if (this._wallPatternLegacy) {
+      this._wallPatternLegacy.setTransform(new DOMMatrix().translateSelf(-cx, -cy));    
+    }
+    
+    ctx.save();    
+    ctx.lineJoin = 'round';    
+    ctx.lineCap = 'round';    
+    
+    const startX = Math.max(0, Math.floor((left - pad) / cellW));    
+    const endX = Math.min(size, Math.ceil((right + pad) / cellW));    
+    const startY = Math.max(0, Math.floor((top - pad) / cellH));    
+    const endY = Math.min(size, Math.ceil((bottom + pad) / cellH));    
+    
+    // ==========================================    
+    // 步骤 1：第一圈粗边 —— 浅色外部框 (36px)    
+    // ==========================================    
+    ctx.strokeStyle = lightColor;    
+    ctx.lineWidth = 36;    
+    for (let y = startY; y < endY; y++) {    
+        for (let x = startX; x < endX; x++) {    
+            if (wallData[y * size + x] === '1') {    
+                const px = x * cellW - cx;    
+                const py = y * cellH - cy;    
+                ctx.strokeRect(px, py, cellW, cellH);    
+            }    
+        }    
+    }    
+    
+    // ==========================================    
+    // 步骤 2：第一遍填充 —— 盖掉向内侵入的浅色边    
+    // ==========================================    
+    if (this._wallPatternLegacy) {
+      ctx.fillStyle = this._wallPatternLegacy;    
+    }
+    for (let y = startY; y < endY; y++) {    
+        for (let x = startX; x < endX; x++) {    
+            if (wallData[y * size + x] === '1') {    
+                const px = x * cellW - cx;    
+                const py = y * cellH - cy;    
+                ctx.fillRect(px - 0.5, py - 0.5, cellW + 1, cellH + 1);    
+            }    
+        }    
+    }    
+    
+    // ==========================================    
+    // 步骤 3：第二圈粗边 —— 深色内部框 (12px)    
+    // ==========================================    
+    ctx.strokeStyle = darkColor;    
+    ctx.lineWidth = 12;    
+    for (let y = startY; y < endY; y++) {    
+        for (let x = startX; x < endX; x++) {    
+            if (wallData[y * size + x] === '1') {    
+                const px = x * cellW - cx;    
+                const py = y * cellH - cy;    
+                ctx.strokeRect(px, py, cellW, cellH);    
+            }    
+        }    
+    }    
+    
+    // ==========================================    
+    // 步骤 4：最终填充 —— 盖掉向内侵入的深色边，留下纯正图案    
+    // ==========================================    
+    for (let y = startY; y < endY; y++) {    
+        for (let x = startX; x < endX; x++) {    
+            if (wallData[y * size + x] === '1') {    
+                const px = x * cellW - cx;    
+                const py = y * cellH - cy;    
+                ctx.fillRect(px - 0.5, py - 0.5, cellW + 1, cellH + 1);    
+            }    
+        }    
+    }    
+    
+    ctx.restore();    
+  }
+
+  drawWavesDirect(context: CanvasRenderingContext2D, cameraOffset: { x: number; y: number }, groundColor: [number, number, number]) {  
+    const [r, g, b] = groundColor;  
+  
+    // 基础颜色  
+    const baseColor = `rgb(${r}, ${g}, ${b})`;  
+    const stripeColor = `rgba(${Math.min(255, r + 20)}, ${Math.min(255, g + 35)}, ${Math.min(255, b + 60)}, 0.45)`;  
+    const darkSpotColor = `rgba(${Math.max(0, r - 35)}, ${Math.max(0, g - 25)}, ${Math.max(0, b - 15)}, 0.35)`;  
+    const lightBlurColor = `rgba(${Math.min(255, r + 15)}, ${Math.min(255, g + 25)}, ${Math.min(255, b + 45)}, 0.2)`;  
+  
+    context.save();  
+    // 1. 底色  
+    context.restore();
+    context.save();
+    context.fillStyle = baseColor;  
+    context.fillRect(0, 0, this.w, this.h);  
+  
+    context.translate(this.w / 2, this.h / 2);
+    context.scale(this.viewZoom || 1, this.viewZoom || 1);
+    context.translate(-cameraOffset.x, -cameraOffset.y);  
+  
+    // 2. 绘制带独立波动的斜条纹  
+    const stripeWidth = 150;  
+    const spacing = 300;  
+    const tilt = 0.75;  
+    const freq = 0.006;  
+    const amp = 30;  
+  
+    context.lineCap = 'round';  
+    context.strokeStyle = stripeColor;  
+    context.lineWidth = stripeWidth;  
+  
+    for (let baseY = -this.worldH; baseY < this.worldH * 2; baseY += spacing) {
+        context.beginPath();
+    
+        const phase = (baseY * 0.123);
+    
+        for (let wx = 0; wx <= this.worldW; wx += 30) {
+            const wave = Math.sin(wx * freq + phase) * amp;
+            const wy = baseY + (wx * tilt) + wave;
+    
+            if (wx === 0) context.moveTo(wx, wy);
+            else context.lineTo(wx, wy);
+        }
+        context.stroke();
+    }
+    
+    // 3. 背景大色块
+    const bigSpotCount = 60;
+    for (let i = 0; i < bigSpotCount; i++) {
+        const bx = (i * 3571) % this.worldW;
+        const by = (i * 2467) % this.worldH;
+    
+        if (bx > cameraOffset.x - 200 && bx < cameraOffset.x + this.w / (this.viewZoom || 1) + 200 &&
+            by > cameraOffset.y - 200 && by < cameraOffset.y + this.h / (this.viewZoom || 1) + 200) {
+    
+            const size = 50 + (i % 4) * 15;
+            context.beginPath();
+            context.arc(bx, by, size, 0, Math.PI * 2);
+            context.fillStyle = lightBlurColor;
+            context.fill();
+        }
+    }
+    
+    // 4. 深色细碎斑点
+    const smallSpotCount = 180;
+    for (let i = 0; i < smallSpotCount; i++) {
+        const sx = (i * 1234) % this.worldW;
+        const sy = (i * 5678) % this.worldH;
+    
+        if (sx > cameraOffset.x - 50 && sx < cameraOffset.x + this.w / (this.viewZoom || 1) + 50 &&
+            sy > cameraOffset.y - 50 && sy < cameraOffset.y + this.h / (this.viewZoom || 1) + 50) {
+    
+            const radius = 2 + (i % 3);
+            context.beginPath();
+            context.arc(sx, sy, radius, 0, Math.PI * 2);
+            context.fillStyle = darkSpotColor;
+            context.fill();
+        }
+    }
+    
+    context.restore();
+  }
+
+  drawBackgroundPattern(context: CanvasRenderingContext2D, cameraOffset: { x: number; y: number }, groundColor: [number, number, number]) {    
+    const scale = this.viewZoom || 1;    
+    const pattern = this.getOrCreatePattern(groundColor, scale);    
+    
+    const invScale = 1 / scale;    
+    const fillW = this.w * invScale;    
+    const fillH = this.h * invScale;    
+    const fillX = cameraOffset.x - (fillW - this.w) / 2;    
+    const fillY = cameraOffset.y - (fillH - this.h) / 2;    
+    
+    context.save();    
+    context.translate(this.w / 2, this.h / 2);
+    context.scale(scale, scale);
+    context.translate(-cameraOffset.x, -cameraOffset.y);    
+    if (pattern) {
+      context.fillStyle = pattern;    
+    }
+    context.fillRect(fillX, fillY, fillW, fillH);    
+    context.restore();    
+  }
+
+  getOrCreatePattern(groundColor: [number, number, number], scale: number) {    
+    const key = `${this.currentBiome}_fixed`;    
+    
+    if (!this._patternCache) this._patternCache = {};    
+    if (this._patternCache[key]) return this._patternCache[key];    
+    
+    console.log(`🔄 生成固定图案: ${key}`);    
+    const pattern = this.createTilePattern(groundColor, 1.0);  // 始终用 1.0 创建    
+    if (pattern) {
+      this._patternCache[key] = pattern;    
+    }
+    
+    return pattern;    
+  }
+
+  createWavePattern(groundColor: [number, number, number], scale: number, tileSize: number): CanvasPattern | null {
+    const canvas = document.createElement("canvas");
+    canvas.width = tileSize;
+    canvas.height = tileSize;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.fillStyle = `rgb(${groundColor[0]}, ${groundColor[1]}, ${groundColor[2]})`;
+    ctx.fillRect(0, 0, tileSize, tileSize);
+    return ctx.createPattern(canvas, "repeat");
+  }
+
+  createTilePattern(groundColor: [number, number, number], scale: number) {    
+    const currentScale = scale || this.viewZoom || 1;    
+    const TILE_SIZE = 800 * Math.max(0.5, currentScale);    
+    
+    const canvas = document.createElement("canvas");    
+    canvas.width = TILE_SIZE;    
+    canvas.height = TILE_SIZE;    
+    const ctx = canvas.getContext("2d");    
+    if (!ctx) return null;
+
+    const r = groundColor[0];    
+    const g = groundColor[1];    
+    const b = groundColor[2];    
+    const type = this.currentBiome;    
+    
+    if (type === "Ocean" || type === "Desert") {    
+        return this.createWavePattern(groundColor, currentScale, TILE_SIZE);    
+    }    
+    
+    const getShapeRadius = (size: number, shapeType: string) => {    
+        switch (shapeType) {    
+            case "Plain":    
+            case "Random":    
+            case "Jungle":    
+                return Math.max(size * 0.8, size * 0.6);    
+            case "Bio":    
+            case "Sewer":    
+                return size;    
+            default:    
+                return size * 0.5;    
+        }    
+    };    
+    
+    const drawShape = (ctx: CanvasRenderingContext2D, size: number, shapeType: string) => {    
+        switch (shapeType) {    
+            case "Plain":    
+            case "Random":    
+            case "Jungle":    
+                ctx.beginPath();    
+                ctx.ellipse(0, 0, size * 0.8, size * 0.6, 0, 0, Math.PI * 2);    
+                ctx.fill();    
+                break;    
+            case "Bio":    
+            case "Sewer":    
+                ctx.beginPath();    
+                ctx.moveTo(-size, 0);    
+                ctx.bezierCurveTo(    
+                    -size * 0.8, -size * 1.5,    
+                    size * 0.8, size * 1.5,    
+                    size, 0    
+                );    
+                ctx.lineWidth = size * 0.4;    
+                ctx.strokeStyle = ctx.fillStyle;    
+                ctx.stroke();    
+                break;    
+            default:    
+                ctx.beginPath();    
+                ctx.arc(0, 0, size * 0.5, 0, Math.PI * 2);    
+                ctx.fill();    
+        }    
+    };    
+    
+    const dark = `rgb(${r*0.85}, ${g*0.85}, ${b*0.85})`;    
+    const light = `rgb(${r*1.1}, ${g*1.1}, ${b*1.1})`;    
+    
+    const GRID_SIZE = TILE_SIZE / 6;    
+    const ROW_SPACING = GRID_SIZE;    
+    const COL_SPACING = GRID_SIZE;    
+    const DIAGONAL_OFFSET = COL_SPACING / 2;    
+    
+    const rows = Math.ceil(TILE_SIZE / ROW_SPACING) + 1;    
+    const cols = Math.ceil(TILE_SIZE / COL_SPACING) + 1;    
+    
+    let drawnCount = 0;    
+    const MAX_DRAW = 50;    
+    
+    for (let row = 0; row < rows && drawnCount < MAX_DRAW; row++) {    
+        for (let col = 0; col < cols && drawnCount < MAX_DRAW; col++) {    
+            const offsetX = (row % 2 === 0) ? 0 : DIAGONAL_OFFSET;    
+    
+            let x = col * COL_SPACING + offsetX;    
+            let y = row * ROW_SPACING;    
+    
+            const jitter = GRID_SIZE * 0.25;    
+            x += (Math.random() - 0.5) * jitter;    
+            y += (Math.random() - 0.5) * jitter;    
+    
+            const size = (25 + Math.random() * 12) * currentScale;    
+            const radius = getShapeRadius(size, type);    
+            const margin = radius + 5;    
+    
+            if (x < margin || x > TILE_SIZE - margin ||    
+                y < margin || y > TILE_SIZE - margin) {    
+                continue;    
+            }    
+    
+            ctx.save();    
+            ctx.translate(x, y);    
+            ctx.rotate((Math.random() - 0.5) * Math.PI * 0.3);    
+            ctx.globalAlpha = 0.2 + Math.random() * 0.25;    
+            ctx.fillStyle = Math.random() > 0.5 ? dark : light;    
+    
+            drawShape(ctx, size, type);    
+    
+            ctx.restore();    
+            drawnCount++;    
+        }    
+    }    
+    
+    if (drawnCount < 100) {    
+        const extra = Math.min(5, 25 - drawnCount);    
+        for (let i = 0; i < extra; i++) {    
+            let placed = false;    
+            for (let attempt = 0; attempt < 20 && !placed; attempt++) {    
+                const x = Math.random() * TILE_SIZE;    
+                const y = Math.random() * TILE_SIZE;    
+                const radius = 8 * currentScale;    
+                const margin = radius + 3;    
+    
+                if (x > margin && x < TILE_SIZE - margin &&    
+                    y > margin && y < TILE_SIZE - margin) {    
+    
+                    ctx.save();    
+                    ctx.translate(x, y);    
+                    ctx.globalAlpha = 0.15;    
+                    ctx.fillStyle = Math.random() > 0.5 ? dark : light;    
+                    ctx.beginPath();    
+                    ctx.arc(0, 0, radius, 0, Math.PI * 2);    
+                    ctx.fill();    
+                    ctx.restore();    
+                    placed = true;    
+                }    
+            }    
+        }    
+    }    
+    
+    return ctx.createPattern(canvas, "repeat");    
   }
 
   private drawDrop(e: Ent) {
