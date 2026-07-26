@@ -16,6 +16,7 @@ export default function GameCanvas() {
 
   return (
     <canvas
+      id="gameCanvas"
       ref={ref}
       style={{
         position: "fixed",

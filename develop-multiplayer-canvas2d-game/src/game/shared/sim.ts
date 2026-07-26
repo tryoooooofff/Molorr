@@ -28,6 +28,7 @@ import {
   cloverDnaBonus,
   mapRarityToSummonRarity,
   mobSizeMult,
+  friendlyMobSizeMult,
   ORACLE_COOLDOWN_HOURS,
   ORACLE_SKIP,
   oracleRequiredCount,
@@ -208,7 +209,7 @@ export class Mob {
     // Mob rarity controls physical size as well as its combat stats. Keeping
     // this radius authoritative means rendering, wall collision, melee range,
     // and mob-to-mob collision all agree on the requested size ladder.
-    this.radius = def.radius * mobSizeMult(rarity);
+    this.radius = def.radius * (friendly ? friendlyMobSizeMult(rarity) : mobSizeMult(rarity));
     this.damage = def.damage * enemyDamageMult(rarity);
     this.speed = def.speed;
   }
