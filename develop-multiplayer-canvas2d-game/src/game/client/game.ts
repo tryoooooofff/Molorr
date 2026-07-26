@@ -36,10 +36,12 @@ import {
   craftBurst,
   craftPad,
   drawCard,
+  drawDamageOverlay,
   drawDefaultSkin,
   drawFlower,
   drawItemIcon,
   drawMob,
+  drawMobHealthLabel,
   dropdownField,
   dropdownList,
   ease,
@@ -67,6 +69,8 @@ interface Ent {
   angle: number;
   radius: number;
   hp: number;
+  /** Lagging health used to draw the "damage taken" flash on mob health bars. */
+  displayHp: number;
   rarity: number;
   name: string;
   seen: number;
@@ -182,6 +186,9 @@ export class GameClient {
   private ents = new Map<number, Ent>();
   private camX = 0;
   private camY = 0;
+  /** Current world->screen zoom, refreshed once per frame in renderGame(). Used to keep
+   *  fixed-size overlays (health bars, rarity tags, damage overlays) constant on screen. */
+  private viewZoom = 1;
 
   // player state
   private hp = 100;
@@ -555,7 +562,7 @@ export class GameClient {
           if (!e) {
             e = {
               id, kind, type: etype, team, x, y, tx: x, ty: y, angle,
-              radius, hp, rarity, name, seen: this.time, hurt: 0, spawn: 0,
+              radius, hp, displayHp: hp, rarity, name, seen: this.time, hurt: 0, spawn: 0,
             };
             this.ents.set(id, e);
           }
@@ -750,6 +757,10 @@ export class GameClient {
       e.x += (e.tx - e.x) * k;
       e.y += (e.ty - e.y) * k;
       e.hurt = Math.max(0, e.hurt - dt);
+      // Lagging health buffer: eases toward the real health so damage shows
+      // as a brief red trail draining off the bar instead of an instant cut.
+      if (e.displayHp === undefined) e.displayHp = e.hp;
+      e.displayHp += (e.hp - e.displayHp) * Math.min(1, dt * 6);
       if (this.time - e.seen > 0.6) this.ents.delete(e.id);
     }
     for (let i = this.floaters.length - 1; i >= 0; i--) {
@@ -2299,6 +2310,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     ctx.fillRect(0, 0, this.w, this.h);
 
     const zoom = Math.min(1.15, Math.max(0.72, Math.min(this.w / 1280, this.h / 800) * 1.05));
+    this.viewZoom = zoom;
     ctx.save();
     ctx.translate(this.w / 2, this.h / 2);
     ctx.scale(zoom, zoom);
@@ -2349,7 +2361,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
       if (e.kind === ENT.DROP) this.drawDrop(e);
     }
     for (const e of list) {
-      if (e.kind === ENT.PETAL) drawItemIcon(ctx, e.type, e.x, e.y, e.radius, this.time * 3 + e.id, 0);
+      if (e.kind === ENT.PETAL) this.drawPetalEnt(e);
       else if (e.kind === ENT.MOB) this.drawMobEnt(e);
       else if (e.kind === ENT.PLAYER) this.drawPlayerEnt(e);
     }
@@ -2413,6 +2425,19 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     if (stack > 1) text(ctx, `x${stack}`, e.x, y + h - 3, 12, "#ffffff");
   }
 
+  private drawPetalEnt(e: Ent) {
+    const ctx = this.ctx;
+    drawItemIcon(ctx, e.type, e.x, e.y, e.radius, this.time * 3 + e.id, 0);
+    // Damage overlay: chips away from the bottom of the petal's icon as it
+    // loses health, so its remaining health reads at a glance without a
+    // separate health bar cluttering the world.
+    const damageRatio = 1 - Math.max(0, Math.min(1, e.hp));
+    if (damageRatio > 0) {
+      const size = Math.max(1, Math.round(e.radius * 2));
+      drawDamageOverlay(ctx, e.x - size / 2, e.y - size / 2, size, damageRatio);
+    }
+  }
+
   private drawMobEnt(e: Ent) {
     const ctx = this.ctx;
     const def = MOBS[e.type];
@@ -2427,8 +2452,15 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
       ctx.fill();
       ctx.restore();
     }
-    if (e.hp < 0.999) healthBar(ctx, e.x - e.radius, e.y + e.radius + 6, e.radius * 2, 8, e.hp, e.team === TEAM.HOSTILE ? "#ff7070" : "#7dffa0");
-    text(ctx, def.name, e.x, e.y - e.radius - 12, 12, "rgba(255,255,255,0.9)");
+    // Fixed-size name/health-bar/rarity tag: sizes stay constant on screen
+    // regardless of the world camera zoom.
+    drawMobHealthLabel(ctx, e.x, e.y, e.radius, this.viewZoom, {
+      name: def.name,
+      hpPct: e.hp,
+      displayHpPct: e.displayHp ?? e.hp,
+      rarity: e.rarity,
+      friendly: e.team !== TEAM.HOSTILE,
+    });
   }
 
   private drawPlayerEnt(e: Ent) {

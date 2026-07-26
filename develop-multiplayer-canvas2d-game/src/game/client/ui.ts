@@ -54,6 +54,9 @@ export function getFixedPetalCount(itemId: number): number {
 // 基础绘图工具
 // ============================================
 
+/** Shared UI font stack (kept as a constant so every label/health-bar/tag matches). */
+export const FONT_FAMILY = '"Trebuchet MS", "Segoe UI", sans-serif';
+
 export function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
   const rad = Math.min(r, w / 2, h / 2);
   ctx.beginPath();
@@ -2049,6 +2052,187 @@ export function healthBar(
     ctx.fillStyle = color;
     ctx.fill();
   }
+}
+
+// ============================================
+// 花瓣受损遮罩 (petal damage overlay)
+// ============================================
+
+/**
+ * Draws a "chipped away" damage overlay on top of a petal icon: the more
+ * health the petal has lost, the taller the dark cover that creeps up from
+ * the bottom of its sprite, with a subtle horizontal hatching so the
+ * remaining health reads clearly at a glance.
+ *
+ * `damageRatio` is 0 (undamaged, no overlay) .. 1 (fully depleted, entirely
+ * covered). `x`/`y` are the top-left corner of the square `size`x`size` area
+ * the petal icon occupies.
+ */
+export function drawDamageOverlay(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  damageRatio: number,
+) {
+  const ratio = Math.max(0, Math.min(1, damageRatio));
+  if (ratio <= 0 || size <= 0) return;
+
+  const overlay = document.createElement("canvas");
+  overlay.width = size;
+  overlay.height = size;
+  const overlayCtx = overlay.getContext("2d");
+  if (!overlayCtx) return;
+
+  const coverHeight = Math.floor(size * ratio);
+  if (coverHeight > 0) {
+    overlayCtx.fillStyle = "rgba(100, 100, 100, 0.5)";
+    overlayCtx.fillRect(0, size - coverHeight, size, coverHeight);
+    for (let i = 0; i < coverHeight; i++) {
+      const alpha = 0.6 - (i * 0.4) / coverHeight;
+      overlayCtx.strokeStyle = `rgba(0, 0, 0, ${alpha})`;
+      overlayCtx.lineWidth = 1;
+      overlayCtx.beginPath();
+      overlayCtx.moveTo(0, size - i);
+      overlayCtx.lineTo(size, size - i);
+      overlayCtx.stroke();
+    }
+  }
+  ctx.drawImage(overlay, x, y);
+}
+
+// ============================================
+// 生物血条 / 稀有度标签 (fixed on-screen size)
+// ============================================
+
+export interface MobHealthLabelInfo {
+  /** Label shown above the bar (mob/pet display name). */
+  name: string;
+  /** Current health, 0..1. */
+  hpPct: number;
+  /** Lagging "buffer" health used for the red damage-taken flash, 0..1. */
+  displayHpPct: number;
+  /** Index into `RARITIES`. */
+  rarity: number;
+  /** Friendly (player-owned) mobs use a gold fill instead of green. */
+  friendly: boolean;
+}
+
+/**
+ * Draws a name tag, capsule health bar (background + lagging red "damage
+ * taken" buffer + current health fill + percentage readout) and a colored
+ * rarity tag above a mob. Everything is sized in constant screen pixels: the
+ * caller's world-space camera zoom is undone locally so the bar/text never
+ * grow or shrink as the player zooms in or out.
+ */
+export function drawMobHealthLabel(
+  ctx: CanvasRenderingContext2D,
+  worldX: number,
+  worldY: number,
+  radius: number,
+  viewScale: number,
+  info: MobHealthLabelInfo,
+) {
+  const zoom = viewScale > 0 ? viewScale : 1;
+  const rarityIndex = Math.max(0, Math.min(RARITIES.length - 1, info.rarity | 0));
+  const rarity = RARITIES[rarityIndex];
+
+  const healthWidth = 60 + rarityIndex * 5;
+  const healthHeight = 16;
+  const pillRadius = healthHeight / 2;
+
+  ctx.save();
+  // Re-anchor on the mob's screen position, then undo the camera zoom so
+  // every size below is expressed in fixed screen pixels.
+  ctx.translate(worldX, worldY);
+  ctx.scale(1 / zoom, 1 / zoom);
+
+  const healthX = -healthWidth / 2;
+  const healthY = radius * zoom + 10;
+
+  // Name label.
+  const fullName = info.name;
+  let nameFontSize = 13;
+  ctx.font = `${nameFontSize}px ${FONT_FAMILY}`;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "bottom";
+  const maxNameWidth = healthWidth;
+  if (ctx.measureText(fullName).width > maxNameWidth) {
+    nameFontSize = Math.max(7, nameFontSize * (maxNameWidth / ctx.measureText(fullName).width));
+    ctx.font = `${nameFontSize}px ${FONT_FAMILY}`;
+  }
+  ctx.strokeStyle = "#000000";
+  ctx.lineWidth = 2;
+  ctx.strokeText(fullName, healthX, healthY - 2);
+  ctx.fillStyle = "#FFFFFF";
+  ctx.fillText(fullName, healthX, healthY - 2);
+
+  // Health bar background.
+  roundRect(ctx, healthX, healthY, healthWidth, healthHeight, pillRadius);
+  ctx.fillStyle = "#000000";
+  ctx.fill();
+  ctx.strokeStyle = "#000000";
+  ctx.lineWidth = 5;
+  ctx.stroke();
+
+  // Fill layers, clipped to the capsule shape.
+  ctx.save();
+  roundRect(ctx, healthX, healthY, healthWidth, healthHeight, pillRadius);
+  ctx.clip();
+
+  const bufferPct = Math.max(0, Math.min(1, info.displayHpPct));
+  const actualPct = Math.max(0, Math.min(1, info.hpPct));
+
+  // Lagging red buffer (shows the chunk of health just lost).
+  if (bufferPct > 0) {
+    ctx.fillStyle = "#ff4444";
+    roundRect(ctx, healthX, healthY, healthWidth * bufferPct, healthHeight, pillRadius);
+    ctx.fill();
+  }
+  // Current health.
+  if (actualPct > 0) {
+    ctx.fillStyle = info.friendly ? "#FFD700" : "#7cfc00";
+    roundRect(ctx, healthX, healthY, healthWidth * actualPct, healthHeight, pillRadius);
+    ctx.fill();
+  }
+  ctx.restore();
+
+  // Percentage readout.
+  const pct = Math.round(actualPct * 100);
+  ctx.font = `11px ${FONT_FAMILY}`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.strokeStyle = "#000000";
+  ctx.lineWidth = 2.5;
+  ctx.lineJoin = "round";
+  ctx.strokeText(`${pct}%`, 0, healthY + healthHeight / 2);
+  ctx.fillStyle = "white";
+  ctx.fillText(`${pct}%`, 0, healthY + healthHeight / 2);
+
+  // Rarity tag, centered under the bar (shrinks to fit / never overflows it).
+  const rarityY = healthY + healthHeight + 2;
+  const baseFontSize = 11;
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  ctx.lineJoin = "round";
+  ctx.font = `${baseFontSize}px ${FONT_FAMILY}`;
+  let textWidth = ctx.measureText(rarity.name).width;
+  let fontSize = baseFontSize;
+  if (textWidth > healthWidth) {
+    fontSize = Math.max(8, baseFontSize * (healthWidth / textWidth));
+    ctx.font = `${fontSize}px ${FONT_FAMILY}`;
+  }
+  textWidth = ctx.measureText(rarity.name).width;
+  const maxX = healthWidth / 2;
+  const minX = -healthWidth / 2;
+  const finalX = Math.min(Math.max(0, minX), maxX - textWidth);
+  ctx.strokeStyle = rarity.border;
+  ctx.lineWidth = 2;
+  ctx.strokeText(rarity.name, finalX, rarityY);
+  ctx.fillStyle = rarity.color;
+  ctx.fillText(rarity.name, finalX, rarityY);
+
+  ctx.restore();
 }
 
 // ============================================
