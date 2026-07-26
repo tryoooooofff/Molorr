@@ -6,6 +6,18 @@ export const TICK_MS = 1000 / TICK_RATE;
 
 export const SLOT_COUNT = 8;
 /**
+ * Size of the secondary (backup) hotbar row. It mirrors the main row 1:1 so
+ * every main slot has exactly one partner it can be swapped with, both
+ * individually (number keys) and all at once (R).
+ */
+export const SECONDARY_SLOT_COUNT = SLOT_COUNT;
+/**
+ * Total number of addressable hotbar cells: the main row first, then the
+ * secondary row. Bag cells start right after this block, so a single flat
+ * index can address any cell in the game (hotbar + bag) in one number.
+ */
+export const HOTBAR_CELLS = SLOT_COUNT + SECONDARY_SLOT_COUNT;
+/**
  * Starting size of the bag. The bag is *unlimited*: it grows on demand whenever
  * a new item/rarity stack needs a home, so a mob that drops 2-3 items at once can
  * never have part of its loot silently rejected. This constant only decides how
@@ -18,7 +30,37 @@ export const BAG_COUNT = 32;
  * (distinct item x rarity combinations number in the low hundreds).
  */
 export const BAG_MAX = 4096;
-export const TOTAL_CELLS = SLOT_COUNT + BAG_MAX;
+export const TOTAL_CELLS = HOTBAR_CELLS + BAG_MAX;
+
+/** True when a flat cell index addresses a main (petal-equipping) hotbar slot. */
+export function isMainCell(idx: number): boolean {
+  return idx >= 0 && idx < SLOT_COUNT;
+}
+
+/** True when a flat cell index addresses a secondary (backup) hotbar slot. */
+export function isSecondaryCell(idx: number): boolean {
+  return idx >= SLOT_COUNT && idx < HOTBAR_CELLS;
+}
+
+/** True when a flat cell index addresses either hotbar row. */
+export function isHotbarCell(idx: number): boolean {
+  return idx >= 0 && idx < HOTBAR_CELLS;
+}
+
+/** True when a flat cell index addresses a bag cell. */
+export function isBagCell(idx: number): boolean {
+  return idx >= HOTBAR_CELLS && idx < TOTAL_CELLS;
+}
+
+/** Flat cell index of secondary slot `i`. */
+export function secondaryCellIndex(i: number): number {
+  return SLOT_COUNT + i;
+}
+
+/** Flat cell index of bag cell `i`. */
+export function bagCellIndex(i: number): number {
+  return HOTBAR_CELLS + i;
+}
 
 function rgb([r, g, b]: readonly [number, number, number]): string {
   return `rgb(${r},${g},${b})`;

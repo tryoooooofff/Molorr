@@ -10,7 +10,16 @@ export const C2S = {
   PING: 7,
   ORACLE: 8,
   TRADE: 9,
+  /**
+   * Swap the main hotbar row with the secondary row. Payload is a single u8:
+   * 0xff swaps every slot at once (the "R" hotkey), any other value swaps just
+   * that one slot index (the 1-9 hotkeys).
+   */
+  SWAP_ROW: 10,
 } as const;
+
+/** SWAP_ROW payload meaning "swap the entire row", not a single slot. */
+export const SWAP_ROW_ALL = 0xff;
 
 export const S2C = {
   WELCOME: 1,

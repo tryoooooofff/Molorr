@@ -28,6 +28,11 @@ import {
   ORACLE_SKIP,
   oracleRequiredCount,
   RARITIES,
+  SECONDARY_SLOT_COUNT,
+  HOTBAR_CELLS,
+  isBagCell,
+  isHotbarCell,
+  isMainCell,
   SLOT_COUNT,
   TOTAL_CELLS,
   TRADE_COOLDOWN_HOURS,
@@ -42,7 +47,7 @@ import {
   rarityMult,
 } from "./defs";
 
-import { C2S, ENT, EVT, Reader, S2C, TEAM, Writer } from "./protocol";
+import { C2S, ENT, EVT, Reader, S2C, SWAP_ROW_ALL, TEAM, Writer } from "./protocol";
 
 
 export interface Cell {
@@ -67,6 +72,8 @@ interface PetalState {
 
 export interface PlayerSave {
   slots: (Cell | null)[];
+  /** Backup hotbar row. Same length as `slots`; never spawns petals. */
+  secondary: (Cell | null)[];
   bag: (Cell | null)[];
   xp: number;
   mapId: number;
@@ -99,6 +106,11 @@ export class Player {
   nextTradeAt = 0;
 
   slots: (Cell | null)[] = new Array(SLOT_COUNT).fill(null);
+  /**
+   * Secondary hotbar row. It holds real items but never grows petals — it is
+   * pure standby storage that can be swapped into the main row instantly.
+   */
+  secondary: (Cell | null)[] = new Array(SECONDARY_SLOT_COUNT).fill(null);
   bag: (Cell | null)[] = new Array(BAG_COUNT).fill(null);
   petals: PetalState[] = [];
   pets: Mob[][] = Array.from({ length: SLOT_COUNT }, () => []);
@@ -258,6 +270,7 @@ export class GameServer {
     if (!p) return null;
     return {
       slots: p.slots,
+      secondary: p.secondary,
       bag: p.bag,
       xp: p.xp,
       mapId: p.mapId,
@@ -282,6 +295,7 @@ export class GameServer {
         p.mapId = mapId;
         p.xp = xp;
         for (let i = 0; i < SLOT_COUNT; i++) p.slots[i] = readCell(r);
+        for (let i = 0; i < SECONDARY_SLOT_COUNT; i++) p.secondary[i] = readCell(r);
         // Bag length is dynamic (unlimited bag), so it travels as u16.
         const bagCount = Math.min(r.u16(), BAG_MAX);
         if (p.bag.length < bagCount) p.bag.length = bagCount;
@@ -294,13 +308,15 @@ export class GameServer {
         const now = Date.now();
         p.nextOracleAt = oracleSecLeft > 0 ? now + oracleSecLeft * 1000 : 0;
         p.nextTradeAt = tradeSecLeft > 0 ? now + tradeSecLeft * 1000 : 0;
-        if (!p.slots.some(Boolean) && !p.bag.some(Boolean)) {
+        if (!p.slots.some(Boolean) && !p.secondary.some(Boolean) && !p.bag.some(Boolean)) {
           p.slots[0] = { item: 0, rarity: 0, count: 1 };
           p.slots[1] = { item: 0, rarity: 0, count: 1 };
           p.slots[2] = { item: 1, rarity: 0, count: 1 };
           p.slots[3] = { item: 0, rarity: 0, count: 1 };
-          p.bag[0] = { item: 8, rarity: 0, count: 1 };
-          p.bag[1] = { item: 2, rarity: 0, count: 1 };
+          // A fresh player starts with a couple of backups already racked so
+          // the secondary row is discoverable from the very first match.
+          p.secondary[0] = { item: 2, rarity: 0, count: 1 };
+          p.secondary[1] = { item: 8, rarity: 0, count: 1 };
         }
         c.player = p;
         this.applyLevel(p);
@@ -320,12 +336,22 @@ export class GameServer {
       case C2S.SWAP: {
         const p = c.player;
         if (!p) return;
-        const from = r.u8();
-        const to = r.u8();
+        // Cell indices can exceed 255 now that the bag sits behind two hotbar
+        // rows, so both endpoints travel as u16.
+        const from = r.u16();
+        const to = r.u16();
         // Bag entries are stacks, but dragging an inventory card equips/moves
         // one item at a time. Hotbar drags keep their existing swap behaviour.
-        if (from >= SLOT_COUNT) this.moveOneFromBag(p, from, to);
+        if (isBagCell(from)) this.moveOneFromBag(p, from, to);
         else this.swapCells(p, from, to);
+        break;
+      }
+      case C2S.SWAP_ROW: {
+        const p = c.player;
+        if (!p) return;
+        const which = r.u8();
+        if (which === SWAP_ROW_ALL) this.swapAllRows(p);
+        else this.swapRowSlot(p, which);
         break;
       }
       case C2S.CRAFT: {
@@ -411,16 +437,27 @@ export class GameServer {
   }
 
   // ------------------------------------------------------------- inventory
+  /**
+   * Reads any cell by flat index. The address space is laid out as
+   * `[main row][secondary row][bag...]`, so one number can point at any cell
+   * the player owns.
+   */
   private cellAt(p: Player, idx: number): Cell | null {
-    return idx < SLOT_COUNT ? p.slots[idx] : p.bag[idx - SLOT_COUNT] ?? null;
+    if (isMainCell(idx)) return p.slots[idx] ?? null;
+    if (idx < HOTBAR_CELLS) return p.secondary[idx - SLOT_COUNT] ?? null;
+    return p.bag[idx - HOTBAR_CELLS] ?? null;
   }
 
   private setCell(p: Player, idx: number, cell: Cell | null) {
-    if (idx < SLOT_COUNT) {
+    if (isMainCell(idx)) {
       p.slots[idx] = cell;
       return;
     }
-    const bagIdx = idx - SLOT_COUNT;
+    if (idx < HOTBAR_CELLS) {
+      p.secondary[idx - SLOT_COUNT] = cell;
+      return;
+    }
+    const bagIdx = idx - HOTBAR_CELLS;
     // Grow (and null-fill) the unlimited bag if the target cell is past the end.
     while (p.bag.length <= bagIdx) p.bag.push(null);
     p.bag[bagIdx] = cell;
@@ -437,30 +474,80 @@ export class GameServer {
       this.setCell(p, a, cb);
       this.setCell(p, b, ca);
     }
-    if (a < SLOT_COUNT || b < SLOT_COUNT) this.rebuildPetals(p);
+    // Only the main row grows petals, so a secondary-only move is free.
+    if (isMainCell(a) || isMainCell(b)) this.rebuildPetals(p);
     p.dirty = true;
+  }
+
+  /** Swap one main slot with its secondary partner (number-key hotkeys). */
+  private swapRowSlot(p: Player, slot: number) {
+    if (slot < 0 || slot >= Math.min(SLOT_COUNT, SECONDARY_SLOT_COUNT)) return;
+    const main = p.slots[slot] ?? null;
+    const backup = p.secondary[slot] ?? null;
+    if (!main && !backup) return;
+    p.slots[slot] = backup;
+    p.secondary[slot] = main;
+    // The petal that just arrived starts on cooldown so hot-swapping mid-fight
+    // can't be used to dodge reload timers.
+    this.rebuildPetals(p);
+    this.startReload(p, slot);
+    p.dirty = true;
+  }
+
+  /** Swap the whole main row with the whole secondary row (the "R" hotkey). */
+  private swapAllRows(p: Player) {
+    const n = Math.min(SLOT_COUNT, SECONDARY_SLOT_COUNT);
+    let touched = false;
+    for (let i = 0; i < n; i++) {
+      const main = p.slots[i] ?? null;
+      const backup = p.secondary[i] ?? null;
+      if (!main && !backup) continue;
+      p.slots[i] = backup;
+      p.secondary[i] = main;
+      touched = true;
+    }
+    if (!touched) return;
+    this.rebuildPetals(p);
+    for (let i = 0; i < n; i++) this.startReload(p, i);
+    p.dirty = true;
+  }
+
+  /**
+   * Puts the petal in `slot` into its reload state. Used after a hot-swap so a
+   * freshly racked petal has to spin up like any other reload.
+   */
+  private startReload(p: Player, slot: number) {
+    const cell = p.slots[slot];
+    const st = p.petals[slot];
+    if (!cell || !st) return;
+    const def = ITEMS[cell.item];
+    if (!def || !orbitsAsPetal(def.kind)) return;
+    st.alive = false;
+    st.timer = def.reload > 0 ? def.reload : 0.001;
   }
 
   /** Move one card out of an inventory stack, never the full item type. */
   private moveOneFromBag(p: Player, from: number, to: number) {
-    if (from === to || from < SLOT_COUNT || from >= TOTAL_CELLS || to >= TOTAL_CELLS) return;
+    if (from === to || !isBagCell(from) || to >= TOTAL_CELLS) return;
     const source = this.cellAt(p, from);
     if (!source || source.count <= 0) return;
     const one: Cell = { item: source.item, rarity: source.rarity, count: 1 };
     const target = this.cellAt(p, to);
 
-    if (to >= SLOT_COUNT) {
+    if (isHotbarCell(to)) {
+      // Equipping/racking one item replaces whatever occupied that hotbar cell.
+      // Return the displaced card to the unlimited bag before placing the
+      // single dragged item. This is what makes dragging onto either row work.
+      if (target && !this.addItem(p, target.item, target.rarity, target.count)) return;
+      this.setCell(p, to, one);
+      // Only the main row runs petals; racking into the backup row is inert.
+      if (isMainCell(to)) this.rebuildPetals(p);
+    } else {
       // A one-item drag can fill an empty bag cell or add to a matching stack;
       // it never overwrites an unrelated stack.
       if (target && (target.item !== one.item || target.rarity !== one.rarity || target.count >= 999)) return;
       if (target) target.count += 1;
       else this.setCell(p, to, one);
-    } else {
-      // Equipping one item replaces the target petal. Return that displaced
-      // petal to the unlimited bag before placing the single dragged item.
-      if (target && !this.addItem(p, target.item, target.rarity, target.count)) return;
-      this.setCell(p, to, one);
-      this.rebuildPetals(p);
     }
 
     source.count -= 1;
@@ -1336,6 +1423,9 @@ export class GameServer {
       const iw = new Writer(256);
       iw.u8(S2C.INVENTORY).u8(SLOT_COUNT);
       for (const cell of p.slots) writeCell(iw, cell);
+      // Secondary row rides along right after the main row.
+      iw.u8(SECONDARY_SLOT_COUNT);
+      for (let i = 0; i < SECONDARY_SLOT_COUNT; i++) writeCell(iw, p.secondary[i] ?? null);
       // The bag can grow past BAG_COUNT, so its length is sent as u16. Trailing
       // empty cells are trimmed (never below BAG_COUNT) to keep the packet small.
       let bagLen = p.bag.length;
