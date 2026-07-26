@@ -4,6 +4,8 @@
 import {
   BAG_COUNT,
   BAG_MAX,
+  BLOCK_GRID_COLS,
+  BLOCK_GRID_ROWS,
   CRAFT_CARD_COUNT,
   craftChanceFor,
   EMPTY_ITEM,
@@ -39,12 +41,15 @@ import {
   TRINKET_ITEM,
   Wall,
   enemyRarityMult,
+  getBlockAt,
   getDropRarityByItem,
   getSpawnProtection,
   getSummonBatch,
   getSummonCount,
   levelFromXp,
   rarityMult,
+  rollZoneRarity,
+  findSpawnTiles,
 } from "./defs";
 
 import { C2S, ENT, EVT, Reader, S2C, SWAP_ROW_ALL, TEAM, Writer } from "./protocol";
@@ -681,6 +686,28 @@ export class GameServer {
   // --------------------------------------------------------------- spawning
   private spawnPlayer(p: Player) {
     const map = MAPS[p.mapId];
+    // Try to spawn near a grid spawn point first
+    const spawnTiles = findSpawnTiles(p.mapId);
+    if (spawnTiles.length > 0) {
+      const tile = spawnTiles[Math.floor(Math.random() * spawnTiles.length)];
+      const tileW = map.width / BLOCK_GRID_COLS;
+      const tileH = map.height / BLOCK_GRID_ROWS;
+      // Random position within the spawn-point tile
+      for (let tries = 0; tries < 20; tries++) {
+        const x = tile.col * tileW + Math.random() * tileW;
+        const y = tile.row * tileH + Math.random() * tileH;
+        const [cx, cy] = collideWalls(map.walls, x, y, 40);
+        if (Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01) {
+          p.x = x;
+          p.y = y;
+          p.hp = p.maxHp;
+          p.alive = true;
+          p.statsDirty = true;
+          return;
+        }
+      }
+    }
+    // Fallback: random position (original behaviour)
     for (let tries = 0; tries < 60; tries++) {
       const x = 200 + Math.random() * (map.width - 400);
       const y = 200 + Math.random() * (map.height - 400);
@@ -702,14 +729,27 @@ export class GameServer {
     const map = MAPS[mapId];
     const type = map.mobs[(Math.random() * map.mobs.length) | 0];
     let rarity = 0;
-    while (rarity < 3 && Math.random() < 0.16 + map.rarityBias) rarity++;
     let x = 0;
     let y = 0;
-    for (let tries = 0; tries < 40; tries++) {
+    let zone: string = "1";
+    for (let tries = 0; tries < 80; tries++) {
       x = 200 + Math.random() * (map.width - 400);
       y = 200 + Math.random() * (map.height - 400);
+      zone = getBlockAt(mapId, x, y);
+      // Only spawn in zone tiles (A-G); skip walls ('1').
+      // Spawn points are mapped to zone 'A' by getBlockAt.
+      if (zone === "1") continue;
       const [cx, cy] = collideWalls(map.walls, x, y, MOBS[type].radius + 6);
       if (Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01) break;
+    }
+    // Roll rarity from the block zone system.
+    // getBlockAt maps spawn points ('2') → zone 'A', so only '1' or 'A'-'G'
+    // can appear here. The fallback handles the rare case where all 80 retries
+    // landed on walls and zone is still '1'.
+    if (zone >= "A" && zone <= "G") {
+      rarity = rollZoneRarity(zone);
+    } else {
+      rarity = 0;
     }
     this.worlds[mapId].mobs.push(new Mob(this.nextId++, type, mapId, x, y, rarity));
   }
