@@ -1650,14 +1650,14 @@ export class GameServer {
     const rarityIndexOf = (name: string) =>
       Math.max(0, Math.min(MAX_RARITY, RARITIES.findIndex((r) => r.name === name)));
 
-    // Roll every entry of the drop table first, then lay the winners out in a
-    // small ring. Scattering them deterministically (rather than at random)
-    // guarantees a 2- or 3-item drop never stacks into what looks like one card.
-    const rolled: { item: number; rarity: number }[] = [];
+    // Every entry of the mob's drop table drops on every kill — the per-item
+    // `chance` no longer gates whether a card appears, it only ever influenced
+    // *if* you got the item, never *which* rarity. Rarity is still rolled per
+    // item by getDropRarityByItem, so a mob's rare entries stay rare in tier
+    // even though the item itself is now guaranteed.
+    const rolled: { item: number; rarity: number; dropNum: number }[] = [];
     for (const drop of def.drops) {
       for (let i = 0; i < dropCount; i++) {
-        if (Math.random() > drop.chance) continue;
-
         // Normal item: rolled straight off the per-item table, untouched by any
         // Magic Core the player may be holding.
         let item = drop.item;
@@ -1675,7 +1675,7 @@ export class GameServer {
           }
         }
 
-        rolled.push({ item, rarity });
+        rolled.push({ item, rarity, dropNum: i });
       }
     }
 
@@ -1683,13 +1683,14 @@ export class GameServer {
     // If no one met the 5% threshold (or squad pooled threshold), no loot spawns — enforces the damage requirement
     if (eligibleLooters.size === 0) return;
 
-    const spread = rolled.length > 1 ? 26 : 0;
-    const baseAngle = Math.random() * Math.PI * 2;
-    rolled.forEach((roll, idx) => {
-      const a = baseAngle + (idx / rolled.length) * Math.PI * 2;
-      const dist = spread * (1 + Math.floor(idx / def.drops.length) * 0.5);
-      const x = mob.x + Math.cos(a) * dist + (Math.random() - 0.5) * 10;
-      const y = mob.y + Math.sin(a) * dist + (Math.random() - 0.5) * 10;
+    // Scatter each card at a random angle, pushing later copies of the same
+    // item further out so a stacked multi-drop fans away from the corpse
+    // instead of piling onto one spot.
+    rolled.forEach((roll) => {
+      const angle = Math.random() * Math.PI * 2;
+      const distance = (Math.random() * 20 + 10) * (1 + roll.dropNum * 0.5);
+      const x = mob.x + Math.cos(angle) * distance;
+      const y = mob.y + Math.sin(angle) * distance;
       this.spawnDrop(mapId, roll.item, roll.rarity, x, y, killer ? killer.id : 0, eligibleLooters);
     });
   }
