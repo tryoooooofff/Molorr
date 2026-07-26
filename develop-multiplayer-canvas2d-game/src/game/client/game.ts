@@ -56,6 +56,7 @@ import {
   text,
 } from "./ui";
 import { QuickSlot, QuickSlotHost } from "./quickSlot";
+import { BonusSystem } from "./bonus";
 
 interface Ent {
   id: number;
@@ -171,6 +172,8 @@ export class GameClient {
   private focus: "name" | "user" | "pass" | null = null;
   private authStatus = "Playing as guest. Progress saved locally.";
   private account: { username: string; token: string } | null = null;
+  private bonus = new BonusSystem();
+  private bonusOpen = false;
 
   // net
   private net: Transport | null = null;
@@ -519,12 +522,22 @@ export class GameClient {
     const now = Date.now();
     w.u32(Math.max(0, Math.ceil((this.nextOracleAt - now) / 1000)));
     w.u32(Math.max(0, Math.ceil((this.nextTradeAt - now) / 1000)));
+    // The server uses this only to spawn the additional copies; it also tracks
+    // the supplied duration so the bonus cannot outlive its one-hour window.
+    w.u8(this.bonus.currentMultiplier).u16(this.bonus.remainingSeconds);
     this.net?.send(w.bytes());
   }
 
   private writeCell(w: Writer, cell: Cell | null) {
     if (!cell || cell.count <= 0) w.u8(EMPTY_ITEM).u8(0).u16(0);
     else w.u8(cell.item).u8(cell.rarity).u16(cell.count);
+  }
+
+  private sendBonusStatus() {
+    if (!this.connected) return;
+    const w = new Writer(4);
+    w.u8(C2S.BONUS_STATUS).u8(this.bonus.currentMultiplier).u16(this.bonus.remainingSeconds);
+    this.net?.send(w.bytes());
   }
 
   private handlePacket(data: Uint8Array) {
@@ -747,6 +760,7 @@ export class GameClient {
       this.fade = Math.max(0, this.fade - dt * 2.6);
     }
     this.mapFlash = Math.max(0, this.mapFlash - dt * 1.6);
+    if (this.bonus.update()) this.sendBonusStatus();
 
     this.bagAnim += ((this.bagOpen ? 1 : 0) - this.bagAnim) * Math.min(1, dt * 10);
     this.craftAnim += ((this.craftOpen ? 1 : 0) - this.craftAnim) * Math.min(1, dt * 10);
@@ -1636,24 +1650,32 @@ export class GameClient {
     return { x, y, w: cw, h: ch };
   }
 
-  /** Rects for the Inventory / PLAY / Craft row at the bottom of the main menu box. */
+  /** Rects for the main-menu actions, including the daily loot bonus. */
   private menuActionRects() {
     const box = this.menuLayout();
-    const playW = 220;
-    const sideW = 130;
+    const playW = 180;
+    const sideW = 105;
     const h = 52;
-    const gap = 14;
-    const totalW = sideW + gap + playW + gap + sideW;
+    const gap = 10;
+    const totalW = sideW * 3 + playW + gap * 3;
     const startX = box.x + box.w / 2 - totalW / 2;
     const y = box.y + box.h - 74;
     return {
       inventory: { x: startX, y, w: sideW, h },
-      play: { x: startX + sideW + gap, y, w: playW, h },
-      craft: { x: startX + sideW + gap + playW + gap, y, w: sideW, h },
+      bonus: { x: startX + sideW + gap, y, w: sideW, h },
+      play: { x: startX + (sideW + gap) * 2, y, w: playW, h },
+      craft: { x: startX + (sideW + gap) * 2 + playW + gap, y, w: sideW, h },
     };
   }
 
   private menuClick(mx: number, my: number) {
+    if (this.bonusOpen) {
+      const modal = this.bonusModalRect();
+      const claim = { x: modal.x + 28, y: modal.y + modal.h - 66, w: modal.w - 56, h: 40 };
+      if (hit(claim, mx, my) && this.bonus.claim()) this.sendBonusStatus();
+      else if (!hit(modal, mx, my)) this.bonusOpen = false;
+      return;
+    }
     // Craft / Inventory panels can be opened right from the main menu — give
     // them first crack at the click (same as in-game) so their own chrome
     // (close button, search, scrollbar, drag targets) works here too.
@@ -1671,6 +1693,7 @@ export class GameClient {
 
     const actions = this.menuActionRects();
     if (hit(actions.play, mx, my)) this.startGame();
+    if (hit(actions.bonus, mx, my)) this.bonusOpen = true;
     if (hit(actions.inventory, mx, my)) this.toggleBag();
     if (hit(actions.craft, mx, my)) this.toggleCraft();
   }
@@ -2262,9 +2285,10 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     }
 
     const actions = this.menuActionRects();
-    button(ctx, actions.inventory, "Inventory", "#3d8bd6", hit(actions.inventory, this.mx, this.my), 16);
+    button(ctx, actions.inventory, "Inventory", "#3d8bd6", hit(actions.inventory, this.mx, this.my), 15);
+    button(ctx, actions.bonus, this.bonus.isActive ? `Bonus x${this.bonus.currentMultiplier}` : "Daily Bonus", "#d99a26", hit(actions.bonus, this.mx, this.my), 14);
     button(ctx, actions.play, "PLAY", "#3fae60", hit(actions.play, this.mx, this.my), 26);
-    button(ctx, actions.craft, "Craft", "#9b59b6", hit(actions.craft, this.mx, this.my), 16);
+    button(ctx, actions.craft, "Craft", "#9b59b6", hit(actions.craft, this.mx, this.my), 15);
     text(ctx, this.authStatus, box.x + box.w / 2, box.y + box.h - 96, 13, "rgba(255,255,255,0.75)");
 
     text(
@@ -2280,6 +2304,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     // the same in-game panel drawers.
     this.renderBag();
     this.renderCraft();
+    if (this.bonusOpen) this.renderBonusModal();
     if (this.drag) {
       const size = 60;
       drawCard(ctx, { x: this.dragX - size / 2, y: this.dragY - size / 2, w: size, h: size }, this.drag.cell, {
@@ -2287,6 +2312,32 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
         scale: 1.1,
       });
     }
+  }
+
+  private bonusModalRect(): Rect {
+    return { x: this.w / 2 - 175, y: this.h / 2 - 145, w: 350, h: 290 };
+  }
+
+  private renderBonusModal() {
+    const ctx = this.ctx;
+    const r = this.bonusModalRect();
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(0, 0, this.w, this.h);
+    panel(ctx, r);
+    text(ctx, "DAILY LOOT BONUS", r.x + r.w / 2, r.y + 38, 24, "#ffe763");
+    text(ctx, `Streak: ${this.bonus.streakDays} day${this.bonus.streakDays === 1 ? "" : "s"}`, r.x + r.w / 2, r.y + 76, 17, "#ffffff");
+    if (this.bonus.isActive) {
+      text(ctx, `ACTIVE  ×${this.bonus.currentMultiplier}`, r.x + r.w / 2, r.y + 120, 28, "#73e58b");
+      text(ctx, `${this.bonus.remainingTimeText} remaining`, r.x + r.w / 2, r.y + 150, 17, "rgba(255,255,255,0.82)");
+      text(ctx, "Extra card copies apply to every mob drop.", r.x + r.w / 2, r.y + 184, 14, "rgba(255,255,255,0.72)");
+    } else {
+      text(ctx, `Today's reward: ×${this.bonus.nextBonusMultiplier} drops for 1 hour`, r.x + r.w / 2, r.y + 124, 17, "#ffffff");
+      text(ctx, "Claim once each day to build your streak.", r.x + r.w / 2, r.y + 157, 14, "rgba(255,255,255,0.72)");
+    }
+    const claim = { x: r.x + 28, y: r.y + r.h - 66, w: r.w - 56, h: 40 };
+    button(ctx, claim, this.bonus.isActive ? "BONUS ACTIVE" : this.bonus.canClaim() ? "CLAIM BONUS" : "COME BACK TOMORROW", this.bonus.isActive ? "#477c56" : "#d99a26", hit(claim, this.mx, this.my), 17);
+    ctx.restore();
   }
 
   private field(x: number, y: number, w: number, h: number, value: string, placeholder: string, focused: boolean) {

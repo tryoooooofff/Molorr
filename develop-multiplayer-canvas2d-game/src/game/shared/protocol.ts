@@ -16,6 +16,8 @@ export const C2S = {
    * that one slot index (the 1-9 hotkeys).
    */
   SWAP_ROW: 10,
+  /** Current client-persisted daily-bonus multiplier and seconds remaining. */
+  BONUS_STATUS: 11,
 } as const;
 
 /** SWAP_ROW payload meaning "swap the entire row", not a single slot. */

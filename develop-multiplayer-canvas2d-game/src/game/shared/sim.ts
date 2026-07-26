@@ -110,6 +110,9 @@ export class Player {
   orbit = 62;
   nextOracleAt = 0;
   nextTradeAt = 0;
+  /** Daily-bonus state supplied by the local-progress client. */
+  bonusMultiplier = 1;
+  bonusEndsAt = 0;
 
   slots: (Cell | null)[] = new Array(SLOT_COUNT).fill(null);
   /**
@@ -318,6 +321,7 @@ export class GameServer {
         const now = Date.now();
         p.nextOracleAt = oracleSecLeft > 0 ? now + oracleSecLeft * 1000 : 0;
         p.nextTradeAt = tradeSecLeft > 0 ? now + tradeSecLeft * 1000 : 0;
+        this.setBonusStatus(p, r.remaining >= 3 ? r.u8() : 1, r.remaining >= 2 ? r.u16() : 0);
         if (!p.slots.some(Boolean) && !p.secondary.some(Boolean) && !p.bag.some(Boolean)) {
           p.slots[0] = { item: 0, rarity: 0, count: 1 };
           p.slots[1] = { item: 0, rarity: 0, count: 1 };
@@ -341,6 +345,12 @@ export class GameServer {
         p.inDx = r.i8() / 100;
         p.inDy = r.i8() / 100;
         p.flags = r.u8();
+        break;
+      }
+      case C2S.BONUS_STATUS: {
+        const p = c.player;
+        if (!p || r.remaining < 3) return;
+        this.setBonusStatus(p, r.u8(), r.u16());
         break;
       }
       case C2S.SWAP: {
@@ -1219,18 +1229,18 @@ export class GameServer {
     if (hostiles < this.mobCapForMap(mapId) && Math.random() < 0.5) this.spawnMob(mapId);
   }
 
-  /**
-   * Extra whole copies of every drop this player earns, on top of the base one.
-   *
-   * Mirrors the reference `bonusMultiplier + membershipDropRate` maths. Neither
-   * a bonus/event system nor a shop membership exists here yet, so both terms
-   * are 0 and every kill drops a single copy — wiring either one up later only
-   * needs this method to return a bigger number.
-   */
-  private dropMultiplierFor(_p: Player | null): number {
-    const bonusMultiplier = 1; // event / bonus system multiplier
-    const membershipDropRate = 0; // shop membership bonus
-    return Math.max(1, Math.floor(bonusMultiplier + membershipDropRate));
+  /** Applies a bounded one-hour daily-bonus window supplied with local progress. */
+  private setBonusStatus(p: Player, multiplier: number, seconds: number) {
+    const safeMultiplier = Math.max(1, Math.min(5, Math.floor(multiplier)));
+    const safeSeconds = Math.max(0, Math.min(60 * 60, Math.floor(seconds)));
+    p.bonusMultiplier = safeSeconds > 0 ? safeMultiplier : 1;
+    p.bonusEndsAt = safeSeconds > 0 ? Date.now() + safeSeconds * 1000 : 0;
+  }
+
+  /** Extra whole copies of every drop this player earns, on top of the base one. */
+  private dropMultiplierFor(p: Player | null): number {
+    if (!p || p.bonusEndsAt <= Date.now()) return 1;
+    return p.bonusMultiplier;
   }
 
   /**
@@ -1373,10 +1383,6 @@ export class GameServer {
           // items reads as 2-3 pickups instead of one overlapping label.
           if (c) this.pushEvent(c, EVT.LOOT, d.x, d.y - (lootedThisTick++ % 3) * 18, 0, d.item, d.rarity);
         }
-      } else if (dist < (d.ownerId === p.id ? 900 : 160)) {
-        const k = d.ownerId === p.id ? 0.05 : 0.06;
-        d.x += (p.x - d.x) * k;
-        d.y += (p.y - d.y) * k;
       }
     }
   }
