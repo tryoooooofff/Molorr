@@ -1653,8 +1653,8 @@ export class GameServer {
     // Every entry of the mob's drop table drops on every kill — `chance` does
     // not gate whether a card appears. Instead it is the per-entry drop factor
     // handed to getDropRarityByItem: a low `chance` (Moon at 0.005) biases that
-    // card toward the top of the mob's rarity row, a high one (a 0.32 staple)
-    // keeps it near the row's floor.
+    // card toward the floor of the mob's rarity row, so upgrading it is rare,
+    // while a 0.32 staple rolls close to the row's published odds.
     const rolled: { item: number; rarity: number; dropNum: number }[] = [];
     for (const drop of def.drops) {
       for (let i = 0; i < dropCount; i++) {

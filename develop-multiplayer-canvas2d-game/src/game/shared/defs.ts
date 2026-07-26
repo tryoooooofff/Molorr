@@ -215,7 +215,7 @@ export interface ItemDef {
   /**
    * Fallback drop-rarity bias in the (0, 1] range (1.0 = neutral) used only
    * when a caller does not pass the drop entry's own `chance`. Lower values
-   * skew toward higher rarities and disable "Super"-tier rolls for normal
+   * skew toward lower rarities and disable "Super"-tier rolls for normal
    * mobs. Default is 0.8 if unset.
    */
   dropFactor?: number;
@@ -300,8 +300,8 @@ export interface MobDef {
   /**
    * Loot table. Every entry drops on every kill; `chance` is NOT a gate on
    * whether the card appears. It is the drop-rarity bias for that entry — a
-   * low value pushes the roll toward the top of the mob's rarity row, a high
-   * value keeps it near the floor. See `getDropRarityByItem`.
+   * low value pushes the roll toward the floor of the mob's rarity row, a
+   * value near 1 leaves the row's own odds intact. See `getDropRarityByItem`.
    */
   drops: { item: number; chance: number }[];
 }
@@ -1107,10 +1107,11 @@ const ITEM_BASE_FACTOR: Record<number, number> = (() => {
  *
  * The bias comes from `factorOverride` when supplied — that is the drop
  * entry's own `chance` value from the mob's table. A LOW value biases the
- * roll toward the HIGH end of the mob's row, so a 0.005 entry (Moon off a
- * Rock) still drops every kill but lands near the top of what that mob can
- * give, while a 0.32 staple sits near the row's floor. When no override is
- * passed we fall back to the item's own `dropFactor`.
+ * roll toward the LOW end of the mob's row: a 0.005 entry (Moon off a Rock)
+ * still drops every kill but is almost always the row's floor tier, so a
+ * high-rarity Moon is genuinely hard to get. A staple at 0.32 rolls close to
+ * the row's own published odds. When no override is passed we fall back to
+ * the item's own `dropFactor`.
  */
 export function getDropRarityByItem(
   itemType: number,
@@ -1159,13 +1160,22 @@ export function getDropRarityByItem(
   );
   const fallbackRarity = sortedAvailable[0];
 
-  // Build the weighted distribution. factor < 1 boosts higher-tier weights.
+  // Build the weighted distribution. factor < 1 damps the higher tiers: each
+  // step up the ladder is multiplied by `factor` again, so a small factor
+  // (a rare table entry) collapses toward the row's floor while a factor near
+  // 1 leaves the row's own probabilities essentially untouched.
+  //
+  // The exponent is measured from the row's lowest tier rather than the
+  // absolute rarity index. That is mathematically identical after
+  // normalisation but keeps the intermediate weights away from underflow for
+  // tiny factors on high rows (0.005^7 vs 0.005^0).
+  const lowestIndex = RARITY_INDEX[fallbackRarity];
   const weights: Record<string, number> = {};
   let totalWeight = 0;
   for (const rarity of availableRarities) {
     const baseProb = modifiedBase[rarity];
-    const rarityIndex = RARITY_INDEX[rarity];
-    const weight = baseProb * Math.pow(1 / factor, rarityIndex);
+    const step = RARITY_INDEX[rarity] - lowestIndex;
+    const weight = baseProb * Math.pow(factor, step);
     weights[rarity] = weight;
     totalWeight += weight;
   }
