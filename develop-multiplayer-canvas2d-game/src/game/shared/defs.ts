@@ -99,6 +99,11 @@ export const RARITIES: RarityDef[] = [
 
 /** Number of identical cards consumed by one normal craft attempt. */
 export const CRAFT_CARD_COUNT = 5;
+/**
+ * Number of cards consumed per craft attempt when doing batch crafts
+ * (the new unlimited-craft system). Calculated as totalCards / this ratio.
+ */
+export const CRAFT_CARDS_PER_ATTEMPT = 3.5;
 /** Highest rarity index that can ever be stored/displayed. */
 export const MAX_RARITY = RARITIES.length - 1;
 /** Highest rarity reachable through the normal 5-combine crafting ladder (Eternal). Unique sits outside it. */

@@ -285,13 +285,15 @@ class ChatSystem {
 
           // 3. Numbers (use upcoming rarity color)
           if (!found && /^\d/.test(remaining)) {
-            const match = remaining.match(/^(\d+)/);
+            const match = remaining.match(/^(\d+)(x)?/);
             if (match) {
               const number = match[1];
+              const hasX = match[2] === 'x';
               const numberStartOffset = xOffset;
               let tempRemaining = remaining.substring(number.length);
-              if (tempRemaining.startsWith('x')) tempRemaining = tempRemaining.substring(1);
-              if (tempRemaining.startsWith(' ')) tempRemaining = tempRemaining.substring(1);
+              if (hasX) tempRemaining = tempRemaining.substring(1);
+              const hadSpace = tempRemaining.startsWith(' ');
+              if (hadSpace) tempRemaining = tempRemaining.substring(1);
 
               let numberColor = '#ffffff';
               for (const [rarity, color] of Object.entries(rarityColors)) {
@@ -308,12 +310,25 @@ class ChatSystem {
               ctx.fillText(number, numberStartOffset, y);
               xOffset += ctx.measureText(number).width;
 
-              ctx.strokeStyle = '#000000';
-              ctx.lineWidth = 3;
-              ctx.strokeText(' ', xOffset, y);
-              ctx.fillStyle = numberColor;
-              ctx.fillText(' ', xOffset, y);
-              xOffset += ctx.measureText(' ').width;
+              if (hasX) {
+                ctx.strokeStyle = '#000000';
+                ctx.lineWidth = 3;
+                ctx.strokeText('x', xOffset, y);
+                ctx.fillStyle = numberColor;
+                ctx.fillText('x', xOffset, y);
+                xOffset += ctx.measureText('x').width;
+              }
+
+              // Only render a trailing space if one was originally present
+              // (prevents gaps in alphanumeric codes like squad codes)
+              if (hadSpace) {
+                ctx.strokeStyle = '#000000';
+                ctx.lineWidth = 3;
+                ctx.strokeText(' ', xOffset, y);
+                ctx.fillStyle = numberColor;
+                ctx.fillText(' ', xOffset, y);
+                xOffset += ctx.measureText(' ').width;
+              }
 
               remaining = tempRemaining;
               found = true;
@@ -1825,10 +1840,8 @@ export class GameClient {
       const msg = this.chat.sendInput();
       if (msg) {
         this.sendChat(msg);
-        // Show own message locally for instant feedback
-        if (!msg.startsWith("/")) {
-          this.chat.addMessage(`${this.playerName}: ${msg}`, this.playerName, false, false, true);
-        }
+        // No local echo — the server broadcasts the message back to everyone,
+        // including the sender, which is handled in S2C.CHAT.
       }
     } else if (key === "Escape") {
       this.chat.inputActive = false;
@@ -2225,12 +2238,12 @@ export class GameClient {
       }
       this.craftSel = { item: cell.item, rarity: cell.rarity };
       this.craftSlotCounts = this.craftDistributeEvenly(Math.min(CRAFT_CARD_COUNT, avail));
-      if (avail < CRAFT_CARD_COUNT) {
-        this.craftMsg = `Loaded ${avail}/${CRAFT_CARD_COUNT} — need more cards.`;
-        this.craftMsgLife = 1.8;
-      } else {
-        this.craftMsg = "";
-      }
+      this.craftMsg = avail > CRAFT_CARD_COUNT
+        ? `Loaded ${avail} cards — use shift+click to load all.`
+        : avail < CRAFT_CARD_COUNT
+          ? `Loaded ${avail} cards.`
+          : "";
+      if (this.craftMsg) this.craftMsgLife = 1.8;
     } else {
       this.craftSel = { item: cell.item, rarity: cell.rarity };
       this.craftMsg = "";
@@ -2253,13 +2266,8 @@ export class GameClient {
     }
     this.craftSel = { item, rarity };
     this.craftSlotCounts = this.craftDistributeEvenly(avail);
-    if (avail < CRAFT_CARD_COUNT) {
-      this.craftMsg = `Loaded ${avail}/${CRAFT_CARD_COUNT} — need more cards.`;
-      this.craftMsgLife = 1.8;
-    } else {
-      this.craftMsg = "";
-      this.craftMsgLife = 0;
-    }
+    this.craftMsg = `Loaded ${avail} cards.`;
+    this.craftMsgLife = 1.8;
     this.craftGlow = 1;
     this.craftStartFill();
   }
@@ -2284,21 +2292,16 @@ export class GameClient {
 
     if (this.craftMode === "normal") {
       const loaded = this.craftTotalLoaded();
-      if (loaded < CRAFT_CARD_COUNT || avail < CRAFT_CARD_COUNT || sel.rarity >= MAX_CRAFT_RARITY) {
-        this.craftMsg = loaded < CRAFT_CARD_COUNT
-          ? `Load ${CRAFT_CARD_COUNT} identical cards first.`
-          : avail < CRAFT_CARD_COUNT
-            ? `Need ${CRAFT_CARD_COUNT} identical cards.`
-            : "Already at max craftable rarity.";
+      if (loaded < 1 || sel.rarity >= MAX_CRAFT_RARITY) {
+        this.craftMsg = loaded < 1 ? "Load cards first." : "Already at max craftable rarity.";
         this.craftMsgLife = 2;
         this.craftShake = 0.35;
         return;
       }
       const w = new Writer(6);
-      // Send an explicit group size for compatibility with older servers that
-      // treated zero as "craft every available group".
-      w.u8(C2S.CRAFT).u8(sel.item).u8(sel.rarity).u16(CRAFT_CARD_COUNT);
-      this.craftLogPetals += CRAFT_CARD_COUNT;
+      // Send the total card count — the server calculates attempts from it.
+      w.u8(C2S.CRAFT).u8(sel.item).u8(sel.rarity).u16(loaded);
+      this.craftLogPetals += loaded;
       this.craftLogAttempts += 1;
       this.craftStartRotation();
       this.net?.send(w.bytes());
@@ -2731,7 +2734,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     this.renderCraft();
     // Chat system overlay (bottom-left, above hotbar)
     this.chat.width = Math.min(400, this.w * 0.35);
-    this.chat.draw(this.ctx, this.h - this.hotbarHeight());
+    this.chat.draw(this.ctx, this.h - this.hotbarHeight() + 50);
     if (this.drag) {
       const size = 60;
       drawCard(ctx, { x: this.dragX - size / 2, y: this.dragY - size / 2, w: size, h: size }, this.drag.cell, {
@@ -3333,8 +3336,8 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     const submitting = this.craftPhase === "rotating" || this.craftPhase === "waiting";
     const spin = this.craftSpin > 0 ? ease.inOutCubic(1 - this.craftSpin / 0.8) * Math.PI * 2 : 0;
 
-    text(ctx, `Combine ${CRAFT_CARD_COUNT} identical to upgrade`, p.x + p.w * 0.38, (layout as any).craftBottom - 46, 11, "rgba(255,255,255,0.85)");
-    text(ctx, `Click: load ${CRAFT_CARD_COUNT} cards · Shift+click: load all`, p.x + p.w * 0.38, (layout as any).craftBottom - 34, 9, "rgba(255,255,255,0.55)");
+    text(ctx, "Combine cards to upgrade rarity", p.x + p.w * 0.38, (layout as any).craftBottom - 46, 11, "rgba(255,255,255,0.85)");
+    text(ctx, "Click: load 5 cards · Shift+click: load all (unlimited)", p.x + p.w * 0.38, (layout as any).craftBottom - 34, 9, "rgba(255,255,255,0.55)");
 
     // Draw animated slots (pentagon with rotation/contraction)
     layout.bigSlots.forEach((baseRect, i) => {
@@ -3391,21 +3394,19 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     const chance = craftChanceFor(sel.rarity);
     text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, layout.cx, y, 14, RARITIES[sel.rarity].color);
     const loaded = this.craftTotalLoaded();
-    const ready = loaded >= CRAFT_CARD_COUNT;
+    const ready = loaded > 0;
     const status = submitting
-      ? `Using ${CRAFT_CARD_COUNT} cards...`
-      : avail < CRAFT_CARD_COUNT
-        ? `Have ${avail} · Need ${CRAFT_CARD_COUNT - avail} more`
-        : ready
-          ? `Loaded ${loaded} · Ready`
-          : `Loaded ${loaded}/${CRAFT_CARD_COUNT}`;
+      ? `Using ${loaded} cards...`
+      : loaded > 0
+        ? `Loaded ${loaded} · Ready`
+        : `Loaded 0`;
     text(
       ctx,
       status,
       layout.cx,
       y + 16,
       11,
-      submitting || ready ? "#c9ffd6" : avail < CRAFT_CARD_COUNT ? "#ffbcbc" : "#ffe9a8",
+      submitting || ready ? "#c9ffd6" : "#ffbcbc",
     );
     if (sel.rarity < MAX_CRAFT_RARITY && chance !== undefined) {
       const next = sel.rarity + 1;
@@ -3511,7 +3512,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     const avail = sel ? this.countOf(sel.item, sel.rarity) : 0;
     if (this.craftMode === "normal") {
       const enabled = !!sel
-        && this.craftTotalLoaded() >= CRAFT_CARD_COUNT
+        && this.craftTotalLoaded() > 0
         && sel.rarity < MAX_CRAFT_RARITY
         && this.craftPhase === "none";
       return { text: "CRAFT", enabled };
