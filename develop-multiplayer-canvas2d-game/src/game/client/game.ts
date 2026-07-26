@@ -10,20 +10,25 @@ import {
   BAG_MAX,
   CRAFT_CARD_COUNT,
   EMPTY_ITEM,
+  HOTBAR_CELLS,
   ITEMS,
   MAPS,
   MAX_CRAFT_RARITY,
   MOBS,
   RARITIES,
+  SECONDARY_SLOT_COUNT,
   SLOT_COUNT,
   Wall,
+  bagCellIndex,
+  isBagCell,
+  isMainCell,
   craftChanceFor,
   getSummonCount,
   mapRarityToSummonRarity,
   oracleRequiredCount,
   xpForLevel,
 } from "../shared/defs";
-import { C2S, ENT, EVT, Reader, S2C, TEAM, Writer } from "../shared/protocol";
+import { C2S, ENT, EVT, Reader, S2C, SWAP_ROW_ALL, TEAM, Writer } from "../shared/protocol";
 import type { Cell } from "../shared/sim";
 import { createTransport, Transport } from "./transport";
 import {
@@ -48,7 +53,7 @@ import {
   shade,
   text,
 } from "./ui";
-import { QuickSlot } from "./quickSlot";
+import { QuickSlot, QuickSlotHost } from "./quickSlot";
 
 interface Ent {
   id: number;
@@ -100,6 +105,8 @@ interface CraftParticle {
 
 interface SaveData {
   slots: (Cell | null)[];
+  /** Secondary (backup) hotbar row. Optional so old saves still load. */
+  secondary?: (Cell | null)[];
   bag: (Cell | null)[];
   xp: number;
   mapId: number;
@@ -185,6 +192,8 @@ export class GameClient {
   private nextOracleAt = 0;
   private nextTradeAt = 0;
   private slots: (Cell | null)[] = emptyCells(SLOT_COUNT);
+  /** Secondary hotbar row — backup items that can be hot-swapped into `slots`. */
+  private secondary: (Cell | null)[] = emptyCells(SECONDARY_SLOT_COUNT);
   private bag: (Cell | null)[] = emptyCells(BAG_COUNT);
   /** Per-hotbar-slot reload progress (0..1, 1 = ready), streamed with each snapshot. */
   private slotReload: number[] = new Array(SLOT_COUNT).fill(1);
@@ -279,8 +288,35 @@ export class GameClient {
     const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) throw new Error("canvas2d unavailable");
     this.ctx = ctx;
-    this.quickSlot = new QuickSlot(this);
+    this.quickSlot = new QuickSlot(this.quickSlotHost());
     this.loadLocal();
+  }
+
+  /**
+   * Adapter handed to QuickSlot. The hotbar view reads live cell data and
+   * pushes every mutation back through the network, so it never keeps a
+   * private copy that could drift from the server.
+   */
+  private quickSlotHost(): QuickSlotHost {
+    return {
+      viewWidth: () => this.w,
+      viewHeight: () => this.h,
+      mainCells: () => this.slots,
+      secondaryCells: () => this.secondary,
+      reloadProgress: (slot) => this.slotReload[slot] ?? 1,
+      draggingFrom: () => this.drag?.from ?? -1,
+      requestSwapSlot: (slot) => this.sendSwapRow(slot),
+      requestSwapAll: () => this.sendSwapRow(SWAP_ROW_ALL),
+      drawTooltip: (cell, x, y) => this.tooltip(cell, x, y),
+    };
+  }
+
+  /** Tells the server to swap one slot (0-based) or, with SWAP_ROW_ALL, both rows. */
+  private sendSwapRow(which: number) {
+    if (!this.net || !this.connected) return;
+    const w = new Writer(4);
+    w.u8(C2S.SWAP_ROW).u8(which);
+    this.net.send(w.bytes());
   }
 
   // ------------------------------------------------------------- lifecycle
@@ -349,10 +385,13 @@ export class GameClient {
   private applySave(data: SaveData) {
     if (!data) return;
     this.slots = emptyCells(SLOT_COUNT);
+    this.secondary = emptyCells(SECONDARY_SLOT_COUNT);
     // The bag is unlimited — keep every saved cell, only padding up to BAG_COUNT.
     const savedBag = (data.bag || []).slice(0, BAG_MAX);
     this.bag = emptyCells(Math.max(BAG_COUNT, savedBag.length));
     (data.slots || []).slice(0, SLOT_COUNT).forEach((c, i) => (this.slots[i] = c ?? null));
+    // `secondary` is absent in pre-dual-row saves; those just start empty.
+    (data.secondary || []).slice(0, SECONDARY_SLOT_COUNT).forEach((c, i) => (this.secondary[i] = c ?? null));
     savedBag.forEach((c, i) => (this.bag[i] = c ?? null));
     this.xp = data.xp || 0;
     this.selectedMap = Math.max(0, Math.min(MAPS.length - 1, data.mapId || 0));
@@ -367,6 +406,7 @@ export class GameClient {
   private currentSave(): SaveData {
     return {
       slots: this.slots,
+      secondary: this.secondary,
       bag: this.bag,
       xp: this.xp,
       mapId: this.mapId,
@@ -461,6 +501,7 @@ export class GameClient {
     const w = new Writer(256);
     w.u8(C2S.JOIN).str(this.playerName).u8(this.selectedMap).u32(this.xp);
     for (let i = 0; i < SLOT_COUNT; i++) this.writeCell(w, this.slots[i]);
+    for (let i = 0; i < SECONDARY_SLOT_COUNT; i++) this.writeCell(w, this.secondary[i]);
     // Unlimited bag: send the real (dynamic) length as u16.
     const bagLen = Math.min(this.bag.length, BAG_MAX);
     w.u16(bagLen);
@@ -545,10 +586,17 @@ export class GameClient {
           const c = this.readCell(r);
           if (i < SLOT_COUNT) slots[i] = c;
         }
+        const secCount = r.u8();
+        const secondary = emptyCells(SECONDARY_SLOT_COUNT);
+        for (let i = 0; i < secCount; i++) {
+          const c = this.readCell(r);
+          if (i < SECONDARY_SLOT_COUNT) secondary[i] = c;
+        }
         const bagCount = Math.min(r.u16(), BAG_MAX);
         const bag = emptyCells(Math.max(BAG_COUNT, bagCount));
         for (let i = 0; i < bagCount; i++) bag[i] = this.readCell(r);
         this.slots = slots;
+        this.secondary = secondary;
         this.bag = bag;
         this.saveDirty = true;
         break;
@@ -772,18 +820,17 @@ export class GameClient {
   }
 
   // --------------------------------------------------------------- layouts
-  private hotbarRects(): Rect[] {
-    const size = Math.min(66, this.w / 12);
-    const gap = 8;
-    const total = SLOT_COUNT * size + (SLOT_COUNT - 1) * gap;
-    const x0 = (this.w - total) / 2;
-    const y = this.h - size - 18;
-    return new Array(SLOT_COUNT).fill(0).map((_, i) => ({ x: x0 + i * (size + gap), y, w: size, h: size }));
+  /**
+   * Height reserved at the bottom of the screen by the dual-row quick-slot
+   * bar. Panels use it so they never sit on top of the hotbar.
+   */
+  private hotbarHeight(): number {
+    return this.quickSlot.height();
   }
 
   private bagPanelRect(): Rect {
     const w = Math.min(400, this.w * 0.92);
-    const hotbarH = Math.min(66, this.w / 12);
+    const hotbarH = this.hotbarHeight();
     const maxH = this.h - hotbarH - 130;
     const h = Math.min(560, Math.max(320, maxH));
     const hidden = this.h + 20;
@@ -901,14 +948,14 @@ export class GameClient {
     const slotX = p.x + layout.pad + col * (layout.slotSize + layout.gap);
     const slotY = layout.gridTop + row * (layout.slotSize + layout.gap) + yOffset;
     if (x < slotX || x > slotX + layout.slotSize || y < slotY || y > slotY + layout.slotSize) return -1;
-    return SLOT_COUNT + entry.slot;
+    return bagCellIndex(entry.slot);
   }
 
   private craftPanelRect(): Rect {
     // WIDER panel as requested — 760px ideal, responsive down to 92% of screen
     const idealW = 780;
     const w = Math.min(idealW, Math.floor(this.w * 0.92));
-    const hotbarH = Math.min(66, this.w / 12);
+    const hotbarH = this.hotbarHeight();
     const maxH = this.h - hotbarH - 40;
     const h = Math.min(620, Math.max(560, maxH, this.h - 40));
     const t = ease.outCubic(this.craftAnim);
@@ -1377,30 +1424,43 @@ export class GameClient {
     return `${h}h ${String(m).padStart(2, "0")}m ${String(s).padStart(2, "0")}s`;
   }
 
+  /** Reads any cell by flat index: `[main row][secondary row][bag...]`. */
   private cellAt(index: number): Cell | null {
-    return index < SLOT_COUNT ? this.slots[index] : this.bag[index - SLOT_COUNT];
+    if (isMainCell(index)) return this.slots[index] ?? null;
+    if (index < HOTBAR_CELLS) return this.secondary[index - SLOT_COUNT] ?? null;
+    return this.bag[index - HOTBAR_CELLS] ?? null;
   }
 
   private cellIndexAtPoint(x: number, y: number): number {
-    const hb = this.hotbarRects();
-    for (let i = 0; i < hb.length; i++) if (hit(hb[i], x, y)) return i;
+    // Both hotbar rows are valid drag sources and drop targets.
+    const slot = this.quickSlot.cellIndexAtPoint(x, y);
+    if (slot >= 0) return slot;
     if (this.bagAnim > 0.35) return this.bagSlotAtPoint(x, y);
     return -1;
+  }
+
+  /**
+   * The HUD button stacks sit directly above the dual-row quick-slot bar, so
+   * they follow it instead of using fixed offsets from the bottom edge.
+   */
+  private hudButtonRowY(row: 0 | 1): number {
+    const bottom = this.h - this.hotbarHeight() - 34;
+    return bottom - (1 - row) * 46 - 38;
   }
 
   private hudButtons(): { id: string; rect: Rect; label: string; color: string }[] {
     const bw = Math.min(120, this.w / 8);
     return [
-      { id: "bag", rect: { x: 16, y: this.h - 108, w: bw, h: 38 }, label: "Inventory", color: "#3d8bd6" },
-      { id: "craft", rect: { x: 16, y: this.h - 62, w: bw, h: 38 }, label: "Craft", color: "#c9762b" },
-      { id: "menu", rect: { x: this.w - 108, y: this.h - 62, w: 92, h: 38 }, label: "Menu", color: "#8a4d4d" },
+      { id: "bag", rect: { x: 16, y: this.hudButtonRowY(0), w: bw, h: 38 }, label: "Inventory", color: "#3d8bd6" },
+      { id: "craft", rect: { x: 16, y: this.hudButtonRowY(1), w: bw, h: 38 }, label: "Craft", color: "#c9762b" },
+      { id: "menu", rect: { x: this.w - 108, y: this.hudButtonRowY(1), w: 92, h: 38 }, label: "Menu", color: "#8a4d4d" },
     ];
   }
 
   private mapButtons(): { id: number; rect: Rect }[] {
     const bw = 92;
     const x = this.w - (bw + 8) * MAPS.length - 8;
-    return MAPS.map((m) => ({ id: m.id, rect: { x: x + m.id * (bw + 8), y: this.h - 108, w: bw, h: 38 } }));
+    return MAPS.map((m) => ({ id: m.id, rect: { x: x + m.id * (bw + 8), y: this.hudButtonRowY(0), w: bw, h: 38 } }));
   }
 
   // ---------------------------------------------------------------- events
@@ -1428,10 +1488,14 @@ export class GameClient {
     if (e.code === "KeyC") this.toggleCraft();
     if (this.scene === "game") {
       if (e.code === "Escape") this.gotoMenu();
-      // QuickSlot hotkeys: 'r' swaps all main↔secondary; '1'–'9' swap single slots
-      if (e.code === "KeyR") { this.quickSlot.swapAllSlots(); e.preventDefault(); }
-      const slotKey = parseInt(e.key);
-      if (slotKey >= 1 && slotKey <= 9) {
+      // QuickSlot hotkeys: 'r' swaps both rows at once; the number keys swap a
+      // single main slot with its secondary partner.
+      if (e.code === "KeyR") {
+        this.quickSlot.swapAllSlots();
+        e.preventDefault();
+      }
+      const slotKey = parseInt(e.key, 10);
+      if (slotKey >= 1 && slotKey <= SLOT_COUNT) {
         this.quickSlot.swapSlot(slotKey - 1);
         e.preventDefault();
       }
@@ -1652,16 +1716,14 @@ export class GameClient {
 
     if (this.bagAnim > 0.4 && this.handleBagClick(mx, my)) return;
 
-    // QuickSlot secondary / primary row clicks (pick items back to inventory)
-    if (this.quickSlot.handleClick([mx, my])) return;
-
+    // Both hotbar rows and the bag start a drag the same way.
     const idx = this.cellIndexAtPoint(mx, my);
     if (idx >= 0) {
       const cell = this.cellAt(idx);
       if (cell) {
         // Bag cells are stacks. A drag from the inventory always represents
         // exactly one physical item, never the whole item-type stack.
-        this.drag = { from: idx, cell: idx >= SLOT_COUNT ? { ...cell, count: 1 } : cell };
+        this.drag = { from: idx, cell: isBagCell(idx) ? { ...cell, count: 1 } : cell };
         this.dragX = mx;
         this.dragY = my;
       }
@@ -2076,16 +2138,19 @@ export class GameClient {
     }
     const target = this.cellIndexAtPoint(mx, my);
     if (target < 0 || target === drag.from) return;
-    const w = new Writer(4);
-    w.u8(C2S.SWAP).u8(drag.from).u8(target);
+    // Cell indices now span two hotbar rows plus an unlimited bag, so they no
+    // longer fit in a byte — send both endpoints as u16.
+    const w = new Writer(8);
+    w.u8(C2S.SWAP).u16(drag.from).u16(target);
     this.net?.send(w.bytes());
 
     // The server transfers one item when the source is a bag cell. Do not do
     // a full-stack optimistic swap here: wait for its inventory snapshot so
     // the stack count and an equipped replacement cannot briefly desync.
-    if (drag.from >= SLOT_COUNT) return;
+    if (isBagCell(drag.from)) return;
 
-    // Hotbar-to-hotbar (or hotbar-to-bag) remains a normal card swap.
+    // Hotbar-to-hotbar (either row) and hotbar-to-bag stay a normal card swap,
+    // mirrored locally so the drag feels instant.
     const a = this.cellAt(drag.from);
     const b = this.cellAt(target);
     this.setCellLocal(drag.from, b);
@@ -2093,8 +2158,9 @@ export class GameClient {
   }
 
   private setCellLocal(index: number, cell: Cell | null) {
-    if (index < SLOT_COUNT) this.slots[index] = cell;
-    else this.bag[index - SLOT_COUNT] = cell;
+    if (isMainCell(index)) this.slots[index] = cell;
+    else if (index < HOTBAR_CELLS) this.secondary[index - SLOT_COUNT] = cell;
+    else this.bag[index - HOTBAR_CELLS] = cell;
   }
 
   // --------------------------------------------------------------- render
@@ -2412,26 +2478,11 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
     healthBar(ctx, 30, 50, barW - 28, 14, pct, "#ffd34a");
     text(ctx, `${this.xp} XP`, 30 + (barW - 28) / 2, 57, 11, "#3a2b00");
 
-    // health
+    // health — sits just above the dual-row hotbar
     const hpW = Math.min(300, this.w * 0.28);
-    healthBar(ctx, this.w / 2 - hpW / 2, this.h - 96, hpW, 18, this.hp / Math.max(1, this.maxHp), "#57e36a");
-    text(ctx, `${Math.max(0, Math.round(this.hp))} / ${this.maxHp}`, this.w / 2, this.h - 87, 12, "#ffffff");
-
-    // hotbar
-    const rects = this.hotbarRects();
-    rects.forEach((r, i) => {
-      const cell = this.slots[i];
-      const hovered = hit(r, this.mx, this.my);
-      drawCard(ctx, r, cell, {
-        hovered,
-        empty: `${i + 1}`,
-        dim: this.drag?.from === i ? 0.35 : 1,
-        reload: this.slotReload[i] ?? 1,
-      });
-      if (cell && ITEMS[cell.item].kind === "summon") {
-        text(ctx, "SUMMON", r.x + r.w / 2, r.y + 12, 9, "#ffe763");
-      }
-    });
+    const hpY = this.h - this.hotbarHeight() - 26;
+    healthBar(ctx, this.w / 2 - hpW / 2, hpY, hpW, 18, this.hp / Math.max(1, this.maxHp), "#57e36a");
+    text(ctx, `${Math.max(0, Math.round(this.hp))} / ${this.maxHp}`, this.w / 2, hpY + 9, 12, "#ffffff");
 
     // buttons
     for (const b of this.hudButtons()) button(ctx, b.rect, b.label, b.color, hit(b.rect, this.mx, this.my), 16);
@@ -2534,7 +2585,7 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
         hoveredEntry = entry;
         hoveredRect = r;
       }
-      drawCard(ctx, r, entry.cell, { hovered, dim: this.drag?.from === SLOT_COUNT + entry.slot ? 0.35 : 1 });
+      drawCard(ctx, r, entry.cell, { hovered, dim: this.drag?.from === bagCellIndex(entry.slot) ? 0.35 : 1 });
     });
 
     ctx.restore();
