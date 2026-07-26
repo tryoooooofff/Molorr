@@ -213,10 +213,9 @@ export interface ItemDef {
   speed?: number; // % move speed bonus
   petMob?: number; // mob type spawned when this is a summon
   /**
-   * Fallback drop-rarity bias in the (0, 1] range (1.0 = neutral) used only
-   * when a caller does not pass the drop entry's own `chance`. Lower values
-   * skew toward lower rarities and disable "Super"-tier rolls for normal
-   * mobs. Default is 0.8 if unset.
+   * Legacy tuning field kept in item data for compatibility. Drop rarity now
+   * comes directly from `RARITY_DROP_RATES[mob rarity]`, so this no longer
+   * changes mob loot rarity.
    */
   dropFactor?: number;
   /**
@@ -298,10 +297,9 @@ export interface MobDef {
   speed: number;
   xp: number;
   /**
-   * Loot table. Every entry drops on every kill; `chance` is NOT a gate on
-   * whether the card appears. It is the drop-rarity bias for that entry — a
-   * low value pushes the roll toward the floor of the mob's rarity row, a
-   * value near 1 leaves the row's own odds intact. See `getDropRarityByItem`.
+   * Loot table. Every entry drops on every kill. The final card rarity is
+   * rolled only from `RARITY_DROP_RATES[mob rarity]`; the `chance` field is
+   * kept for table compatibility but no longer biases the rarity roll.
    */
   drops: { item: number; chance: number }[];
 }
@@ -1029,17 +1027,12 @@ export function levelFromXp(xp: number): number {
 }
 
 // =====================================================================
-// Per-item drop rarity (replaces the old "roll rarity once per kill"
-// approach so each item can have its own bias).
+// Mob-rarity drop table. The row is selected by the killed mob's rarity, then
+// one drop rarity is rolled from that row's probabilities.
 // =====================================================================
 
 /** Ordered list of rarity names used by the drop tables (low → high). */
 export const RARITY_ORDER: string[] = RARITIES.map((r) => r.name);
-
-/** Rarity name → index in RARITY_ORDER / RARITIES. */
-const RARITY_INDEX: Record<string, number> = Object.fromEntries(
-  RARITY_ORDER.map((name, i) => [name, i]),
-);
 
 // Base drop distribution per mob rarity (rows). The numbers in each row are
 // the unmodified probability of that tier being selected. Anything past the
@@ -1088,110 +1081,37 @@ const RARITY_DROP_RATES: Record<string, Record<string, number>> = {
 };
 
 /**
- * Drop-bias factor for each item, read straight from `ITEM_STATS.dropFactor`.
- * Values are in (0, 1] — 1.0 is neutral, lower values push the roll toward
- * higher rarities and disable "Super"-tier drops for normal mobs.
- */
-const DEFAULT_DROP_FACTOR = 0.8;
-const ITEM_BASE_FACTOR: Record<number, number> = (() => {
-  const out: Record<number, number> = {};
-  for (const item of ITEMS) {
-    if (item.dropFactor !== undefined) out[item.id] = item.dropFactor;
-  }
-  return out;
-})();
-
-/**
- * Pick the rarity of a single drop for `itemType` from a mob of rarity
- * `mobRarity`.
+ * Pick the rarity of a single drop from the mob's rarity row.
  *
- * The bias comes from `factorOverride` when supplied — that is the drop
- * entry's own `chance` value from the mob's table. A LOW value biases the
- * roll toward the LOW end of the mob's row: a 0.005 entry (Moon off a Rock)
- * still drops every kill but is almost always the row's floor tier, so a
- * high-rarity Moon is genuinely hard to get. A staple at 0.32 rolls close to
- * the row's own published odds. When no override is passed we fall back to
- * the item's own `dropFactor`.
+ * This intentionally follows `RARITY_DROP_RATES` directly:
+ *   "mob rarity" -> { "drop rarity": probability }
+ * Item-specific `dropFactor` / drop-entry `chance` values do not alter the
+ * selected rarity anymore, so a Rare mob always uses the Rare row, an Ultra mob
+ * always uses the Ultra row, and so on.
  */
 export function getDropRarityByItem(
-  itemType: number,
+  _itemType: number,
   mobRarity: string,
-  factorOverride?: number,
+  _factorOverride?: number,
 ): string {
-  const factor =
-    factorOverride !== undefined && factorOverride > 0
-      ? factorOverride
-      : ITEM_BASE_FACTOR[itemType] ?? DEFAULT_DROP_FACTOR;
   const base = RARITY_DROP_RATES[mobRarity];
-
   if (!base) return "Common";
 
-  const modifiedBase: Record<string, number> = { ...base };
+  const entries = RARITY_ORDER
+    .map((rarity) => ({ rarity, chance: Math.max(0, base[rarity] ?? 0) }))
+    .filter((entry) => entry.chance > 0);
+  if (entries.length === 0) return "Common";
 
-  // Items with factor < 0.9 can't roll "Super" from normal mobs — divert that
-  // probability into "Ultra" so it still feels rewarding. Omega / Eternal mobs
-  // are exempt since they are designed to drop everything.
-  const isSuperDisabled = factor < 0.9;
-  const isSpecialMob = mobRarity === "Omega" || mobRarity === "Eternal";
-  if (
-    isSuperDisabled &&
-    !isSpecialMob &&
-    modifiedBase["Super"] !== undefined &&
-    modifiedBase["Super"] > 0
-  ) {
-    const superProb = modifiedBase["Super"];
-    modifiedBase["Ultra"] = (modifiedBase["Ultra"] || 0) + superProb;
-    modifiedBase["Super"] = 0;
+  const total = entries.reduce((sum, entry) => sum + entry.chance, 0);
+  if (total <= 0) return "Common";
+
+  let roll = Math.random() * total;
+  for (const entry of entries) {
+    roll -= entry.chance;
+    if (roll <= 0) return entry.rarity;
   }
 
-  // Cap drops at the highest wild-rollable tier (Omega, MAX_WILD_DROP_RARITY)
-  // — anything past it is crafting-only and must never come off a mob.
-  const availableRarities = RARITY_ORDER.filter(
-    (r) => modifiedBase[r] > 0 && (RARITY_INDEX[r] ?? 0) <= MAX_WILD_DROP_RARITY,
-  );
-  if (availableRarities.length === 0) return "Common";
-
-  // Safety net for floating-point residue in the cumulative walk below. It has
-  // to be a tier the mob can actually give, so it is the row's LOWEST available
-  // tier — never one below it, which would hand out a rarity the table says is
-  // impossible (e.g. a Mythic mob paying out "Rare").
-  const sortedAvailable = availableRarities.slice().sort(
-    (a, b) => RARITY_INDEX[a] - RARITY_INDEX[b],
-  );
-  const fallbackRarity = sortedAvailable[0];
-
-  // Build the weighted distribution. factor < 1 damps the higher tiers: each
-  // step up the ladder is multiplied by `factor` again, so a small factor
-  // (a rare table entry) collapses toward the row's floor while a factor near
-  // 1 leaves the row's own probabilities essentially untouched.
-  //
-  // The exponent is measured from the row's lowest tier rather than the
-  // absolute rarity index. That is mathematically identical after
-  // normalisation but keeps the intermediate weights away from underflow for
-  // tiny factors on high rows (0.005^7 vs 0.005^0).
-  const lowestIndex = RARITY_INDEX[fallbackRarity];
-  const weights: Record<string, number> = {};
-  let totalWeight = 0;
-  for (const rarity of availableRarities) {
-    const baseProb = modifiedBase[rarity];
-    const step = RARITY_INDEX[rarity] - lowestIndex;
-    const weight = baseProb * Math.pow(factor, step);
-    weights[rarity] = weight;
-    totalWeight += weight;
-  }
-
-  if (totalWeight <= 0) return fallbackRarity;
-
-  // Normalized roll.
-  let rand = Math.random() * totalWeight;
-  let cumulative = 0;
-  for (const rarity of RARITY_ORDER) {
-    if (weights[rarity]) {
-      cumulative += weights[rarity];
-      if (rand <= cumulative) return rarity;
-    }
-  }
-  return fallbackRarity;
+  return entries[entries.length - 1].rarity;
 }
 
 // ------------------------------------------------------------------ summons
