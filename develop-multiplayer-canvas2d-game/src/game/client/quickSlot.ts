@@ -33,6 +33,8 @@ export interface QuickSlotHost {
   secondaryCells(): (Cell | null)[];
   /** Reload progress 0..1 per main slot (1 = ready). */
   reloadProgress(slot: number): number;
+  /** Remaining health 0..1 per main slot (1 = full health). */
+  slotHp(slot: number): number;
   /** Flat cell index currently being dragged, or -1. */
   draggingFrom(): number;
   /** Ask the server to swap one main slot with its secondary partner. */
@@ -179,6 +181,7 @@ export class QuickSlot {
         empty: `${i + 1}`,
         dim: dragFrom === i ? 0.35 : 1,
         reload: this.host.reloadProgress(i),
+        hp: this.host.slotHp(i),
       });
       if (cell && ITEMS[cell.item]?.kind === "summon") {
         text(ctx, "SUMMON", r.x + r.w / 2, r.y + 12, 9, "#ffe763");

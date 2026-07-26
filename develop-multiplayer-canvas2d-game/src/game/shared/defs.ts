@@ -913,9 +913,43 @@ export function rarityMult(r: number): number {
   return RARITIES[Math.max(0, Math.min(MAX_RARITY, r))].mult;
 }
 
+export const ENEMY_HEALTH_MULTIPLIERS = {
+  "Common": 1,
+  "Unusual": 3.75,
+  "Rare": 13.5,
+  "Epic": 54,
+  "Legendary": 405,
+  "Mythic": 2430,
+  "Ultra": 24500,
+  "Super": 177800,
+  "Omega": 510510,
+  "Eternal": 5059830,
+  "Unique": 3059830.0
+};
+
+export const PROGRESSIVE_RARITY_MULTIPLIERS = {
+  "Common": 1.0,
+  "Unusual": 3.0,
+  "Rare": 9.0,
+  "Epic": 27.0,
+  "Legendary": 81.0,
+  "Mythic": 205.0,
+  "Ultra": 620.0,
+  "Super": 2187.0,
+  "Omega": 6561.0,
+  "Eternal": 18000.0,
+  "Unique": 50683.0
+};
+
+export function enemyDamageMult(r: number): number {
+  const name = RARITIES[Math.max(0, Math.min(MAX_RARITY, r))].name as keyof typeof PROGRESSIVE_RARITY_MULTIPLIERS;
+  return PROGRESSIVE_RARITY_MULTIPLIERS[name] ?? 1.0;
+}
+
 /** Multiplier applied to a wild mob's health when it spawns at rarity `r`. */
 export function enemyRarityMult(r: number): number {
-  return RARITIES[Math.max(0, Math.min(MAX_RARITY, r))].enemyMult;
+  const name = RARITIES[Math.max(0, Math.min(MAX_RARITY, r))].name as keyof typeof ENEMY_HEALTH_MULTIPLIERS;
+  return ENEMY_HEALTH_MULTIPLIERS[name] ?? 1.0;
 }
 
 /** Chance that a single craft attempt made from rarity `r` succeeds, or undefined if `r` can't be crafted further. */

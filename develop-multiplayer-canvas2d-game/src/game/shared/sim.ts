@@ -41,6 +41,7 @@ import {
   TRINKET_ITEM,
   Wall,
   enemyRarityMult,
+  enemyDamageMult,
   getBlockAt,
   getDropRarityByItem,
   getSpawnProtection,
@@ -171,7 +172,7 @@ export class Mob {
     this.maxHp = Math.round(def.health * m);
     this.hp = this.maxHp;
     this.radius = def.radius * (1 + rarity * 0.08);
-    this.damage = def.damage * (1 + rarity * 0.35);
+    this.damage = def.damage * enemyDamageMult(rarity);
     this.speed = def.speed;
   }
 }
@@ -1475,6 +1476,18 @@ export class GameServer {
       const total = def.reload > 0 ? def.reload : 1;
       const progress = 1 - Math.max(0, Math.min(1, st.timer / total));
       body.u8(Math.round(progress * 255));
+    }
+
+    // Per-slot health/damage (0..255, 255 = full health)
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const cell = p.slots[i];
+      const st = p.petals[i];
+      if (!cell || !st || !st.alive) {
+        body.u8(255);
+        continue;
+      }
+      const maxHp = st.maxHp > 0 ? st.maxHp : 1;
+      body.u8(Math.max(0, Math.min(255, Math.round((st.hp / maxHp) * 255))));
     }
 
     w.u16(count);
