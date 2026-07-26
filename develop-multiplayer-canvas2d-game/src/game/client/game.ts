@@ -48,6 +48,7 @@ import {
   shade,
   text,
 } from "./ui";
+import { QuickSlot } from "./quickSlot";
 
 interface Ent {
   id: number;
@@ -270,11 +271,15 @@ export class GameClient {
   private saveTimer = 0;
   private saveDirty = false;
 
+  // Dual-row quick-slot bar (main + secondary)
+  quickSlot!: QuickSlot;
+
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) throw new Error("canvas2d unavailable");
     this.ctx = ctx;
+    this.quickSlot = new QuickSlot(this);
     this.loadLocal();
   }
 
@@ -1423,6 +1428,13 @@ export class GameClient {
     if (e.code === "KeyC") this.toggleCraft();
     if (this.scene === "game") {
       if (e.code === "Escape") this.gotoMenu();
+      // QuickSlot hotkeys: 'r' swaps all main↔secondary; '1'–'9' swap single slots
+      if (e.code === "KeyR") { this.quickSlot.swapAllSlots(); e.preventDefault(); }
+      const slotKey = parseInt(e.key);
+      if (slotKey >= 1 && slotKey <= 9) {
+        this.quickSlot.swapSlot(slotKey - 1);
+        e.preventDefault();
+      }
     }
   };
 
@@ -1476,6 +1488,7 @@ export class GameClient {
     }
     if (this.bagDraggingThumb) this.dragBagThumb(p.y);
     if (this.craftDraggingThumb) this.dragCraftThumb(p.y);
+    this.quickSlot.handleMouseMove(p.x, p.y);
   };
 
   private onPointerDown = (e: PointerEvent) => {
@@ -1639,6 +1652,8 @@ export class GameClient {
 
     if (this.bagAnim > 0.4 && this.handleBagClick(mx, my)) return;
 
+    // QuickSlot secondary / primary row clicks (pick items back to inventory)
+    if (this.quickSlot.handleClick([mx, my])) return;
 
     const idx = this.cellIndexAtPoint(mx, my);
     if (idx >= 0) {
@@ -2453,6 +2468,9 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
       text(ctx, k.msg, this.w - 16, my + mm + 24 + i * 20, 14, "#d9ffd9", "right");
       ctx.restore();
     });
+
+    // Dual-row quick-slot bar (main + secondary rows)
+    this.quickSlot.draw(ctx);
   }
 
   private renderBag() {
