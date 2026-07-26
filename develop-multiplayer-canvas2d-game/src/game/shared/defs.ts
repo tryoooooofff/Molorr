@@ -103,8 +103,13 @@ export const CRAFT_CARD_COUNT = 5;
 export const MAX_RARITY = RARITIES.length - 1;
 /** Highest rarity reachable through the normal 5-combine crafting ladder (Eternal). Unique sits outside it. */
 export const MAX_CRAFT_RARITY = RARITIES.length - 2;
-/** Wild mob drops never roll above this rarity (Legendary) — everything past it is crafting-only. */
-export const MAX_WILD_DROP_RARITY = 4;
+/**
+ * Wild mob drops never roll above this rarity. With the block zone system
+ * allowing mobs up to Omega (zone G), the cap is raised so high-zone mobs
+ * actually drop items at their appropriate tier instead of being silently
+ * clamped to Legendary.
+ */
+export const MAX_WILD_DROP_RARITY = 8;
 
 /** Oracle skips this many rarity tiers in one guaranteed (non-random) conversion. */
 export const ORACLE_SKIP = 2;
@@ -644,6 +649,265 @@ export const MAPS: MapDef[] = [
     ],
   },
 ];
+
+// =====================================================================
+// Block rarity system — each map tile belongs to a zone (A-G) that
+// determines the rarity distribution of mobs spawning there.
+// 1 = wall (no spawn), 2 = player spawn point, A-G = zone letters.
+// =====================================================================
+
+/**
+ * Per-zone rarity distributions. Each zone maps to a list of
+ * { rarityIndex, chance } pairs that define what rarity a mob
+// spawning in that zone rolls.
+ *
+ * Zone A is the safest (mostly Common), zone G the most dangerous
+ * (can reach Omega at 1%).
+ */
+export const BLOCK_ZONES: Record<string, { rarityIndex: number; chance: number }[]> = {
+  // Zone A: common 80%, unusual 20%
+  "A": [
+    { rarityIndex: 0, chance: 0.80 },
+    { rarityIndex: 1, chance: 0.20 },
+  ],
+  // Zone B: common 20%, unusual 70%, rare 10%
+  "B": [
+    { rarityIndex: 0, chance: 0.20 },
+    { rarityIndex: 1, chance: 0.70 },
+    { rarityIndex: 2, chance: 0.10 },
+  ],
+  // Zone C: unusual 20%, rare 70%, epic 10%
+  "C": [
+    { rarityIndex: 1, chance: 0.20 },
+    { rarityIndex: 2, chance: 0.70 },
+    { rarityIndex: 3, chance: 0.10 },
+  ],
+  // Zone D: rare 10%, epic 75%, legendary 15%
+  "D": [
+    { rarityIndex: 2, chance: 0.10 },
+    { rarityIndex: 3, chance: 0.75 },
+    { rarityIndex: 4, chance: 0.15 },
+  ],
+  // Zone E: epic 10%, legendary 75%, mythic 15%
+  "E": [
+    { rarityIndex: 3, chance: 0.10 },
+    { rarityIndex: 4, chance: 0.75 },
+    { rarityIndex: 5, chance: 0.15 },
+  ],
+  // Zone F: legendary 5%, mythic 90%, ultra 5%
+  "F": [
+    { rarityIndex: 4, chance: 0.05 },
+    { rarityIndex: 5, chance: 0.90 },
+    { rarityIndex: 6, chance: 0.05 },
+  ],
+  // Zone G: mythic 5%, ultra 89%, super 5%, omega 1%
+  "G": [
+    { rarityIndex: 5, chance: 0.05 },
+    { rarityIndex: 6, chance: 0.89 },
+    { rarityIndex: 7, chance: 0.05 },
+    { rarityIndex: 8, chance: 0.01 },
+  ],
+};
+
+/**
+ * Compact 40×40 zone grids for each map. Each row is a 40-character string:
+ * '1' = wall (no spawn), '2' = spawn point (treated as zone 'A' by getBlockAt),
+ * 'A'-'G' = zone letter.
+ * Tile size = map.width / 40 = 200 px per tile.
+ */
+export const MAP_GRIDS: string[][] = [
+  // Garden (map 0)
+  [
+    '1111111111111111111111111111111111111111',
+    '1111111111111111111111111111111111111111',
+    '11CCC1111111CC1111CC11111CC111111CCCC111',
+    '11CCCCC111111C1111CCC1111C11111CCCCC1111',
+    '1111CCCCCCCCCCC1111CC111CC11CCCCCC111111',
+    '1111CCCCCCCCCCCCC11BC11CCCCCCCCCC1111111',
+    '11111CCCCCCCCCCCCC11BBCCCCCCCCCCC1111C11',
+    '1111CCCCC111111CCBBBBBBCC111CCCCCCCCCC11',
+    '1111CCCC111111111BBBBBBB111111CCCCDDD111',
+    '111DDCC111111G111BBBBBB11111111CCCDD1111',
+    '111DDD11111GGGG11BBBBBB111111111CDDD1111',
+    '111DDD111GGGGGG111BBBBBB11111111DDDD1111',
+    '11DDDD111GGGGGG111B1BBBB111111111DDD1111',
+    '11DDDDD11GGGGGGG11BBBB11111111111DDD1111',
+    '11DD1DD11GGGGGGG11BBB11111GGG1111DDD1111',
+    '11DD1DD111GGGGG111BB11111GGGGGG11DDD1111',
+    '11DD1DD1111GG11111BB1111GGG1GGG11DDD1111',
+    '111DDDD1111GG11111BB1111GGG11GG111DD1111',
+    '111DDDD111GGG1111ABAAA111GG11GG111DDD111',
+    '11DDD1D111GGG1111AAAAA111GG11GGG11DDD111',
+    '11D1D1D1111GGG111AA2AA111GG11GGG11DDD111',
+    '11D1DDD1111GGG1111AAA1111GG11GG111DDD111',
+    '11D1DDDE1111GG11111111111GG11GG111DDD111',
+    '11EEED1E1111GG1111111111GGG11FGG11EEE111',
+    '1111EE1E1111GGG111111111GGG11FF111EEE111',
+    '111EEEEE1111GGG1F111111GGG111FF111EEE111',
+    '11EEEEE11111FFFFFG111GGGGG111FFF111EE111',
+    '11E1EE11111FFFFFFG1GGGGG1111FFFF111EE111',
+    '1111E1111111FFF1GGGGGGG111111FFF11EEE111',
+    '111EE1111111FFF11GGGGG111111FFFF11EE1111',
+    '111EE1111111FF111GGG11111111FFFF11EE1111',
+    '11EEE111111FF111111111111111FFFFFEEE1111',
+    '11EEE1111FFF111F111111111111FFFFFEEEE111',
+    '111EEE1FFFFF11FFFF11FFF111FFFFFFFEEEE111',
+    '111EEEFFF11FFFFFFFFFFFFFFFFFFFFEEEEEEE11',
+    '111EEEEF111FFFF1FFFF111FFFFFFFFEEEEEEE11',
+    '111EEEEEF1FFFF111FFFFFFFFFFFFFFEEEEEEE11',
+    '1111EEEEFFFFFFFFFFFFFFFF111FFFEEEEEEE111',
+    '1111111111111111111111111111111111111111',
+    '1111111111111111111111111111111111111111',
+  ],
+  // Desert (map 1)
+  [
+    '1111111111111111111111111111111111111111',
+    '1111111111111111111111111111111111111111',
+    '1111AAAAA11BB11111BB11111111111111111111',
+    '11A2AAAAAABBBBBB1BBBBB111111CCCCDD111111',
+    '11AAAAAAAABBBBBBBBBBBBB1111CCCCDDDDD1111',
+    '111AAAAAAABB11BBBB1BBBC1CCCCCCD1DDDD1111',
+    '111111AA11B111BB111BBBCCCCCCCDD111DD1111',
+    '111111111111111B11111CCCC111CDD111DD1111',
+    '11111111111111111111CCC111111DDD11DDD111',
+    '1111111111111111111CCC11111111DD111DD111',
+    '111111111111111111CCCC111111111DD11DD111',
+    '11111111111111111CCCCCCC1111111DDD1DD111',
+    '1111FF11111111111CCCCCCCCC111111DDDDDD11',
+    '1111FF111111111CCCCCCCCCCCC111111DDDDE11',
+    '111FFFF11111DDDDDDD111DDDDCC11111111DEE1',
+    '111FFF111111DDDDD111111DDDD111111111EE11',
+    '111FFF111111DDDDD11111DDDDD1111111111111',
+    '111FFF111111DDDDDDDDDDDDDDD1111111111111',
+    '11FFFFF1111111DDDDDDDDDDD111111111111111',
+    '11FFFFF111111DDDDDDDDD111111111111111111',
+    '1111FFF111111DDD111DDD11111111111GG11111',
+    '1111EFE1111EEDD1111DD111111111GGGGGG1111',
+    '1111EEEEEEEEEDD1111DD11111111GGGGGGG1111',
+    '1111EEEEEEEEEE11111EE11111111GGGGGGGG111',
+    '1111EEEEEEEE1111111EE1111111GGGGGGGGG111',
+    '111EEEEEEEEE111111EEE111111GGGGGGGGGGG11',
+    '1111EFFFFFF111111EEEE11111GGGGGGG11GGG11',
+    '1111FFFFFFF111111EEE11111GGGGGGG111GGG11',
+    '111FFFFFFF111111EEE11111FGGGGGGG111GGG11',
+    '1111FFFFFF111111EE11111FGGGGGGGG111GGG11',
+    '1111FFFFF1111111EE1111FFFFGG1GGGG1GGGG11',
+    '111FFFFFF111111EEEEE1FFFFFG11GGGGGGGG111',
+    '111FFFFFF1111111EEEFFFFFF11111GGGGGGG111',
+    '111FFFFFFF111111EEEFFFFFF111111GGGGGG111',
+    '11FFFFFFFF1111111EFFFFFFFFF1111GGGGG1111',
+    '11FFFFGFFF1111111111FFFFFFFFGGGGGGG11111',
+    '111FFFFFFF111111111111FFFFFFGGGGGG111111',
+    '1111F1FF111111111111111111FFFGGG11111111',
+    '1111111111111111111111111111111111111111',
+    '1111111111111111111111111111111111111111',
+  ],
+  // Ocean (map 2)
+  [
+    '1111111111111111111111111111111111111111',
+    '1111111111111111111111111111111111111111',
+    '1111GG11111111111111111111EEEEDDDDDDD111',
+    '111GGG111111111111111111EEEEEEEDDDDDDD11',
+    '111GGGGGGG111111111FFFEEEEEEEEEDD11DDD11',
+    '111GGGGGGGG11111111FFFFEEEEEEEE11111DD11',
+    '111GGGGGGGGG111111FFFFFFEEEEEE111111DD11',
+    '111GGG11GGGG1111111FFFFFEEEE111111DDDD11',
+    '111GGG111GGGG111111FFFFFEE11111111DDDD11',
+    '111GGGG111GGF111111FFFFFE111111111DDD111',
+    '111GGGG11GGFFF111111FFFF1111111111DD1111',
+    '111GGGGGGGFFFF111111FF1111111111DDD11111',
+    '111GGFFFFFFFFF111111FF1111111111DDD11111',
+    '111FFFFFFFF1FFF11111111111111DDDDDD11111',
+    '111FFFFFF111FFF1111111111111DDDDDDDD1111',
+    '111FFFFFF1111EE1111111111111DDD111DDD111',
+    '1111FFFFF111EEEE111111111111DDDD111CC111',
+    '1111FFFFFFFEEEEE1111111111111CCCC1CCC111',
+    '1111FFFFFFEEEEEE111111111111111CCCCC1111',
+    '1111FFFFFEEEEEED1111111D11111111CCCC1111',
+    '111111FFEEEEEEDD111111DD11111111CCCC1111',
+    '111111FEEEEEEDDDD1111DD111111111CCCC1111',
+    '11111111EEEEDDDDD11CCDD111111111CC1C1111',
+    '11111111111EEDDDDCCCCC111111111CCC1C1111',
+    '111111111111111DDCCCCC11111111CC1CCC1111',
+    '111111111111111CCCCC111111111BB11CCC1111',
+    '11111111111111DDCCCC1111C1111BBBCC111111',
+    '1111111111111DD11CCC11CCB1111BBB11111111',
+    '111111111DDDDD1111CCCCCC1111BBB111111111',
+    '11111111DDDD11111CCCCCB1111BBB1111111111',
+    '1111111DDD1111111CCCBBBB1111BB1111111111',
+    '111EE11EE1111111CCC11BBBB1111BB111111111',
+    '11EEEE1EE111111CC11111BBBBBBBBAA11111111',
+    '11EEEEEEE11111CC11111BB11BBBBBAAAAAA1111',
+    '11FEEEEE1111111111111BB111BB111AA1AA1111',
+    '11FEEEEEEE1111111111BB111BB1111AAA2AA111',
+    '11FEEEEEEE111111111BB111BB11111AAAAAA111',
+    '11FEE1E111111111111B111111111111A1AA1111',
+    '1111111111111111111111111111111111111111',
+    '1111111111111111111111111111111111111111',
+  ],
+];
+
+/** Number of columns/rows in each block grid. */
+export const BLOCK_GRID_COLS = 40;
+export const BLOCK_GRID_ROWS = 40;
+
+/**
+ * Look up the block zone character at a world position.
+ * Returns '1' for walls/out-of-bounds, or a zone letter 'A'-'G'.
+ * Spawn-point tiles (stored as '2' in the grid) are mapped to zone 'A',
+ * the safest zone (common 80%, unusual 20%), so mobs near spawn points
+ * are mostly common.
+ */
+export function getBlockAt(mapId: number, x: number, y: number): string {
+  const grid = MAP_GRIDS[mapId];
+  if (!grid) return "1";
+  const map = MAPS[mapId];
+  const tileW = map.width / BLOCK_GRID_COLS;
+  const tileH = map.height / BLOCK_GRID_ROWS;
+  const col = Math.floor(x / tileW);
+  const row = Math.floor(y / tileH);
+  if (row < 0 || row >= BLOCK_GRID_ROWS || col < 0 || col >= BLOCK_GRID_COLS) return "1";
+  const ch = grid[row]?.[col] ?? "1";
+  // Spawn points ('2') are treated as zone A — the safest zone.
+  return ch === "2" ? "A" : ch;
+}
+
+/**
+ * Roll a rarity index based on the zone letter.
+ * Each zone has its own probability distribution defined in BLOCK_ZONES.
+ * Falls back to Common (0) if the zone is unknown.
+ */
+export function rollZoneRarity(zone: string): number {
+  const entries = BLOCK_ZONES[zone];
+  if (!entries) return 0;
+  const roll = Math.random();
+  let cumulative = 0;
+  for (const entry of entries) {
+    cumulative += entry.chance;
+    if (roll <= cumulative) return Math.min(entry.rarityIndex, MAX_RARITY);
+  }
+  // Floating-point rounding: return the highest rarity in the zone
+  const last = entries[entries.length - 1];
+  return Math.min(last.rarityIndex, MAX_RARITY);
+}
+
+/**
+ * Find all spawn-point tiles (value '2') in a map's block grid.
+ * These tiles are treated as zone 'A' by getBlockAt for rarity rolls,
+ * but kept as '2' in the grid so players can be spawned there.
+ * Returns an array of { row, col } objects.
+ */
+export function findSpawnTiles(mapId: number): { row: number; col: number }[] {
+  const grid = MAP_GRIDS[mapId];
+  if (!grid) return [];
+  const result: { row: number; col: number }[] = [];
+  for (let row = 0; row < BLOCK_GRID_ROWS; row++) {
+    for (let col = 0; col < BLOCK_GRID_COLS; col++) {
+      if (grid[row]?.[col] === "2") result.push({ row, col });
+    }
+  }
+  return result;
+}
 
 export function rarityMult(r: number): number {
   return RARITIES[Math.max(0, Math.min(MAX_RARITY, r))].mult;
