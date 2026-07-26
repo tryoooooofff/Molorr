@@ -1176,6 +1176,14 @@ export function drawMob(
     const swing = Math.sin(animationTimer * 8) * 0.08; // tiny breathing motion
     const jawRotation = baseRotation + swing;
 
+    // Antennae were previously 6x too long; shrink them to 1/6 of their
+    // original reach and snap every coordinate to a whole pixel.
+    const ANTENNA_SHRINK = 1 / 6;
+    const ctrlX = Math.round(25 * scale * ANTENNA_SHRINK);
+    const ctrlY = Math.round(15 * scale * ANTENNA_SHRINK);
+    const tipX = Math.round(55 * scale * ANTENNA_SHRINK);
+    const tipY = Math.round(8 * scale * ANTENNA_SHRINK);
+
     ctx.strokeStyle = css(antennaColor);
     ctx.lineWidth = Math.max(1.5, 2.2 * scale);
     ctx.lineCap = "round";
@@ -1186,7 +1194,7 @@ export function drawMob(
     ctx.rotate(jawRotation);
     ctx.beginPath();
     ctx.moveTo(0, 0);
-    ctx.quadraticCurveTo(25 * scale, 15 * scale, 55 * scale, 8 * scale);
+    ctx.quadraticCurveTo(ctrlX, ctrlY, tipX, tipY);
     ctx.stroke();
     ctx.restore();
 
@@ -1196,7 +1204,7 @@ export function drawMob(
     ctx.rotate(-jawRotation);
     ctx.beginPath();
     ctx.moveTo(0, 0);
-    ctx.quadraticCurveTo(25 * scale, -15 * scale, 55 * scale, -8 * scale);
+    ctx.quadraticCurveTo(ctrlX, -ctrlY, tipX, -tipY);
     ctx.stroke();
     ctx.restore();
   };
