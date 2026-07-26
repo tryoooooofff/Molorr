@@ -213,10 +213,10 @@ export interface ItemDef {
   speed?: number; // % move speed bonus
   petMob?: number; // mob type spawned when this is a summon
   /**
-   * Drop-rarity bias factor in the (0, 1] range (1.0 = neutral). Lower values
-   * make this item skew its drops toward higher rarities, and disable
-   * "Super"-tier rolls for normal mobs. Default is 0.8 if unset; "Moon" uses
-   * 0.002 because it should be effectively impossible at any non-Omega mob.
+   * Fallback drop-rarity bias in the (0, 1] range (1.0 = neutral) used only
+   * when a caller does not pass the drop entry's own `chance`. Lower values
+   * skew toward lower rarities and disable "Super"-tier rolls for normal
+   * mobs. Default is 0.8 if unset.
    */
   dropFactor?: number;
   /**
@@ -297,26 +297,32 @@ export interface MobDef {
   damage: number;
   speed: number;
   xp: number;
+  /**
+   * Loot table. Every entry drops on every kill; `chance` is NOT a gate on
+   * whether the card appears. It is the drop-rarity bias for that entry — a
+   * low value pushes the roll toward the floor of the mob's rarity row, a
+   * value near 1 leaves the row's own odds intact. See `getDropRarityByItem`.
+   */
   drops: { item: number; chance: number }[];
 }
 
 export const MOBS: MobDef[] = [
-  { id: 0, name: "Ladybug", color: "#eb4034", outline: "#a82a20", shape: "bug", radius: 22, health: 60, damage: 18, speed: 42, xp: 10, drops: [{ item: 30, chance: 0.32 }, { item: 31, chance: 0.28 }, { item: 8, chance: 0.07 }] },
-  { id: 1, name: "Bee", color: "#f5d442", outline: "#c2a41e", shape: "wasp", radius: 18, health: 48, damage: 32, speed: 62, xp: 14, drops: [{ item: 2, chance: 0.3 }, { item: 18, chance: 0.24 }, { item: 19, chance: 0.22 }, { item: 20, chance: 0.06 }] },
-  { id: 2, name: "Rock", color: "#8d8d8d", outline: "#5f5f5f", shape: "rock", radius: 26, health: 130, damage: 10, speed: 0, xp: 12, drops: [{ item: 15, chance: 0.32 }, { item: 3, chance: 0.32 }, { item: 16, chance: 0.22 }, { item: 17, chance: 0.005 }] },
+  { id: 0, name: "Ladybug", color: "#eb4034", outline: "#a82a20", shape: "bug", radius: 22, health: 60, damage: 18, speed: 42, xp: 10, drops: [{ item: 30, chance: 0.7 }, { item: 31, chance: 0.7 }, { item: 8, chance: 0.07 }] },
+  { id: 1, name: "Bee", color: "#f5d442", outline: "#c2a41e", shape: "wasp", radius: 18, health: 48, damage: 32, speed: 62, xp: 14, drops: [{ item: 2, chance: 0.7 }, { item: 18, chance: 0.7 }, { item: 19, chance: 0.7 }, { item: 20, chance: 0.06 }] },
+  { id: 2, name: "Rock", color: "#8d8d8d", outline: "#5f5f5f", shape: "rock", radius: 26, health: 130, damage: 10, speed: 0, xp: 12, drops: [{ item: 15, chance: 0.32 }, { item: 3, chance: 0.7 }, { item: 16, chance: 0.7 }, { item: 17, chance: 0.005 }] },
   // The old generic "Ant" was replaced with Soldier Ant; Worker Ant is a
   // brand new mob added to the Garden biome (id 10 below).
-  { id: 3, name: "Soldier Ant", color: "#5b452c", outline: "#3a2b19", shape: "ant", radius: 17, health: 46, damage: 18, speed: 60, xp: 9, drops: [{ item: 7, chance: 0.28 }, { item: 11, chance: 0.3 }, { item: 12, chance: 0.07 }] },
-  { id: 4, name: "Cactus", color: "#4caf50", outline: "#357a38", shape: "cactus", radius: 25, health: 110, damage: 26, speed: 0, xp: 18, drops: [{ item: 9, chance: 0.12 }, { item: 3, chance: 0.25 }, { item: 4, chance: 0.3 }] },
-  { id: 5, name: "Scorpion", color: "#c76b2a", outline: "#8c4718", shape: "crab", radius: 21, health: 90, damage: 36, speed: 70, xp: 24, drops: [{ item: 36, chance: 0.32 }, { item: 37, chance: 0.28 }, { item: 35, chance: 0.07 }] },
-  { id: 6, name: "Beetle", color: "#d1a054", outline: "#9c7532", shape: "bug", radius: 23, health: 100, damage: 24, speed: 48, xp: 20, drops: [{ item: 33, chance: 0.32 }, { item: 35, chance: 0.28 }, { item: 36, chance: 0.1 }] },
-  { id: 7, name: "Jellyfish", color: "#b06be0", outline: "#7d40a8", shape: "jelly", radius: 22, health: 78, damage: 28, speed: 38, xp: 20, drops: [{ item: 24, chance: 0.32 }, { item: 25, chance: 0.26 }, { item: 26, chance: 0.07 }] },
-  { id: 8, name: "Crab", color: "#ef7d3b", outline: "#b2541f", shape: "crab", radius: 24, health: 120, damage: 32, speed: 44, xp: 26, drops: [{ item: 27, chance: 0.3 }, { item: 28, chance: 0.28 }, { item: 29, chance: 0.07 }, { item: 4, chance: 0.2 }] },
-  { id: 9, name: "Starfish", color: "#f2799e", outline: "#bc4c72", shape: "star", radius: 20, health: 95, damage: 18, speed: 36, xp: 18, drops: [{ item: 21, chance: 0.3 }, { item: 22, chance: 0.28 }, { item: 4, chance: 0.22 }, { item: 23, chance: 0.07 }] },
-  { id: 10, name: "Worker Ant", color: "#8a6a3c", outline: "#5d4528", shape: "ant", radius: 14, health: 32, damage: 10, speed: 68, xp: 6, drops: [{ item: 1, chance: 0.3 }, { item: 13, chance: 0.3 }, { item: 14, chance: 0.07 }] },
+  { id: 3, name: "Soldier Ant", color: "#5b452c", outline: "#3a2b19", shape: "ant", radius: 17, health: 46, damage: 18, speed: 60, xp: 9, drops: [{ item: 7, chance: 0.7 }, { item: 11, chance: 0.7 }, { item: 12, chance: 0.07 }] },
+  { id: 4, name: "Cactus", color: "#4caf50", outline: "#357a38", shape: "cactus", radius: 25, health: 110, damage: 26, speed: 0, xp: 18, drops: [{ item: 9, chance: 0.12 }, { item: 3, chance: 0.7 }, { item: 4, chance: 0.7 }] },
+  { id: 5, name: "Scorpion", color: "#c76b2a", outline: "#8c4718", shape: "crab", radius: 21, health: 90, damage: 36, speed: 70, xp: 24, drops: [{ item: 36, chance: 0.7 }, { item: 37, chance: 0.28 }, { item: 35, chance: 0.7 }] },
+  { id: 6, name: "Beetle", color: "#d1a054", outline: "#9c7532", shape: "bug", radius: 23, health: 100, damage: 24, speed: 48, xp: 20, drops: [{ item: 33, chance: 0.7 }, { item: 35, chance: 0.7 }, { item: 36, chance: 0.7 }] },
+  { id: 7, name: "Jellyfish", color: "#b06be0", outline: "#7d40a8", shape: "jelly", radius: 22, health: 78, damage: 28, speed: 38, xp: 20, drops: [{ item: 24, chance: 0.7 }, { item: 25, chance: 0.7 }, { item: 26, chance: 0.07 }] },
+  { id: 8, name: "Crab", color: "#ef7d3b", outline: "#b2541f", shape: "crab", radius: 24, health: 120, damage: 32, speed: 44, xp: 26, drops: [{ item: 27, chance: 0.7 }, { item: 28, chance: 0.7 }, { item: 29, chance: 0.07 }, { item: 4, chance: 0.7 }] },
+  { id: 9, name: "Starfish", color: "#f2799e", outline: "#bc4c72", shape: "star", radius: 20, health: 95, damage: 18, speed: 36, xp: 18, drops: [{ item: 21, chance: 0.7 }, { item: 22, chance: 0.7 }, { item: 4, chance: 0.7 }, { item: 23, chance: 0.07 }] },
+  { id: 10, name: "Worker Ant", color: "#8a6a3c", outline: "#5d4528", shape: "ant", radius: 14, health: 32, damage: 10, speed: 68, xp: 6, drops: [{ item: 1, chance: 0.7 }, { item: 13, chance: 0.7 }, { item: 14, chance: 0.07 }] },
   // Sandstorm: a new desert hazard mob. It reuses the cactus "shape" placeholder
   // until the user finishes its detailed art.
-  { id: 11, name: "Sandstorm", color: "#d4b878", outline: "#8a6a3c", shape: "cactus", radius: 28, health: 150, damage: 22, speed: 24, xp: 22, drops: [{ item: 9, chance: 0.18 }, { item: 4, chance: 0.3 }, { item: 32, chance: 0.2 }] },
+  { id: 11, name: "Sandstorm", color: "#d4b878", outline: "#8a6a3c", shape: "cactus", radius: 28, health: 150, damage: 22, speed: 24, xp: 22, drops: [{ item: 9, chance: 0.18 }, { item: 4, chance: 0.7 }, { item: 32, chance: 0.7 }] },
 ];
 
 export interface Wall {
@@ -1097,12 +1103,25 @@ const ITEM_BASE_FACTOR: Record<number, number> = (() => {
 
 /**
  * Pick the rarity of a single drop for `itemType` from a mob of rarity
- * `mobRarity`. Each item has its own bias (`dropFactor`) so e.g. "Moon"
- * (factor 0.002) almost never lands on a low tier while a generic petal
- * (factor 0.8) lands on the row's lowest available tier.
+ * `mobRarity`.
+ *
+ * The bias comes from `factorOverride` when supplied — that is the drop
+ * entry's own `chance` value from the mob's table. A LOW value biases the
+ * roll toward the LOW end of the mob's row: a 0.005 entry (Moon off a Rock)
+ * still drops every kill but is almost always the row's floor tier, so a
+ * high-rarity Moon is genuinely hard to get. A staple at 0.32 rolls close to
+ * the row's own published odds. When no override is passed we fall back to
+ * the item's own `dropFactor`.
  */
-export function getDropRarityByItem(itemType: number, mobRarity: string): string {
-  const factor = ITEM_BASE_FACTOR[itemType] ?? DEFAULT_DROP_FACTOR;
+export function getDropRarityByItem(
+  itemType: number,
+  mobRarity: string,
+  factorOverride?: number,
+): string {
+  const factor =
+    factorOverride !== undefined && factorOverride > 0
+      ? factorOverride
+      : ITEM_BASE_FACTOR[itemType] ?? DEFAULT_DROP_FACTOR;
   const base = RARITY_DROP_RATES[mobRarity];
 
   if (!base) return "Common";
@@ -1125,30 +1144,38 @@ export function getDropRarityByItem(itemType: number, mobRarity: string): string
     modifiedBase["Super"] = 0;
   }
 
-  // Cap drops at the highest wild-rollable tier (Legendary) — anything past
-  // it is crafting-only and must never come off a mob.
+  // Cap drops at the highest wild-rollable tier (Omega, MAX_WILD_DROP_RARITY)
+  // — anything past it is crafting-only and must never come off a mob.
   const availableRarities = RARITY_ORDER.filter(
     (r) => modifiedBase[r] > 0 && (RARITY_INDEX[r] ?? 0) <= MAX_WILD_DROP_RARITY,
   );
   if (availableRarities.length === 0) return "Common";
 
-  // Pick a "lowest available tier + one below" fallback. The drop table's
-  // minimum tier for the mob is the lowest we can ever roll; if the math
-  // leaves us with nothing, we drop one further.
+  // Safety net for floating-point residue in the cumulative walk below. It has
+  // to be a tier the mob can actually give, so it is the row's LOWEST available
+  // tier — never one below it, which would hand out a rarity the table says is
+  // impossible (e.g. a Mythic mob paying out "Rare").
   const sortedAvailable = availableRarities.slice().sort(
     (a, b) => RARITY_INDEX[a] - RARITY_INDEX[b],
   );
-  const lowestAvailable = sortedAvailable[0];
-  const lowestIndex = RARITY_INDEX[lowestAvailable];
-  const fallbackRarity = lowestIndex > 0 ? RARITY_ORDER[lowestIndex - 1] : lowestAvailable;
+  const fallbackRarity = sortedAvailable[0];
 
-  // Build the weighted distribution. factor < 1 boosts higher-tier weights.
+  // Build the weighted distribution. factor < 1 damps the higher tiers: each
+  // step up the ladder is multiplied by `factor` again, so a small factor
+  // (a rare table entry) collapses toward the row's floor while a factor near
+  // 1 leaves the row's own probabilities essentially untouched.
+  //
+  // The exponent is measured from the row's lowest tier rather than the
+  // absolute rarity index. That is mathematically identical after
+  // normalisation but keeps the intermediate weights away from underflow for
+  // tiny factors on high rows (0.005^7 vs 0.005^0).
+  const lowestIndex = RARITY_INDEX[fallbackRarity];
   const weights: Record<string, number> = {};
   let totalWeight = 0;
   for (const rarity of availableRarities) {
     const baseProb = modifiedBase[rarity];
-    const rarityIndex = RARITY_INDEX[rarity];
-    const weight = baseProb * Math.pow(1 / factor, rarityIndex);
+    const step = RARITY_INDEX[rarity] - lowestIndex;
+    const weight = baseProb * Math.pow(factor, step);
     weights[rarity] = weight;
     totalWeight += weight;
   }
