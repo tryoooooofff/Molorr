@@ -14,7 +14,6 @@
  */
 
 import { RARITY_ORDER } from "../shared/defs";
-import type { Cell } from "../shared/sim";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -42,9 +41,11 @@ interface MimicRecord {
 // ---------------------------------------------------------------------------
 
 export class QuickSlot {
-  player: any; // Player reference — duck-typed to work with petal system
-  slots: (Cell | null)[] = [];
-  secondarySlots: (Cell | null)[] = [];
+  player: any;
+  /** Main hotbar — holds Item instances (duck-typed, richer than Cell). */
+  slots: (Record<string, any> | null)[] = [];
+  /** Secondary hotbar — same shape as main. */
+  secondarySlots: (Record<string, any> | null)[] = [];
   baseSlotCount = 10;
 
   selectedIndex = 0;
@@ -133,7 +134,7 @@ export class QuickSlot {
         item
           ? {
               slot_index: i,
-              type: item.type,
+              type: (item as any).type ?? (item as any).item,
               rarity: item.rarity,
               level: (item as any).level || 1,
               count: (item as any).count || 1,
@@ -697,6 +698,7 @@ export class QuickSlot {
       return false;
     }
     const mimicItem = this.slots[mimicSlotIndex];
+    if (!mimicItem) return false;
     // The game's actual copy logic depends on the Item constructor
     const gi = (window as any).gameInstance;
     const ItemCtor = gi?.Item;
