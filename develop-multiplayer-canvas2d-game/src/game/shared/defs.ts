@@ -307,22 +307,22 @@ export interface MobDef {
 }
 
 export const MOBS: MobDef[] = [
-  { id: 0, name: "Ladybug", color: "#eb4034", outline: "#a82a20", shape: "bug", radius: 22, health: 60, damage: 18, speed: 42, xp: 10, drops: [{ item: 30, chance: 0.32 }, { item: 31, chance: 0.28 }, { item: 8, chance: 0.07 }] },
-  { id: 1, name: "Bee", color: "#f5d442", outline: "#c2a41e", shape: "wasp", radius: 18, health: 48, damage: 32, speed: 62, xp: 14, drops: [{ item: 2, chance: 0.3 }, { item: 18, chance: 0.24 }, { item: 19, chance: 0.22 }, { item: 20, chance: 0.06 }] },
-  { id: 2, name: "Rock", color: "#8d8d8d", outline: "#5f5f5f", shape: "rock", radius: 26, health: 130, damage: 10, speed: 0, xp: 12, drops: [{ item: 15, chance: 0.32 }, { item: 3, chance: 0.32 }, { item: 16, chance: 0.22 }, { item: 17, chance: 0.005 }] },
+  { id: 0, name: "Ladybug", color: "#eb4034", outline: "#a82a20", shape: "bug", radius: 22, health: 60, damage: 18, speed: 42, xp: 10, drops: [{ item: 30, chance: 0.7 }, { item: 31, chance: 0.7 }, { item: 8, chance: 0.07 }] },
+  { id: 1, name: "Bee", color: "#f5d442", outline: "#c2a41e", shape: "wasp", radius: 18, health: 48, damage: 32, speed: 62, xp: 14, drops: [{ item: 2, chance: 0.7 }, { item: 18, chance: 0.7 }, { item: 19, chance: 0.7 }, { item: 20, chance: 0.06 }] },
+  { id: 2, name: "Rock", color: "#8d8d8d", outline: "#5f5f5f", shape: "rock", radius: 26, health: 130, damage: 10, speed: 0, xp: 12, drops: [{ item: 15, chance: 0.32 }, { item: 3, chance: 0.7 }, { item: 16, chance: 0.7 }, { item: 17, chance: 0.005 }] },
   // The old generic "Ant" was replaced with Soldier Ant; Worker Ant is a
   // brand new mob added to the Garden biome (id 10 below).
-  { id: 3, name: "Soldier Ant", color: "#5b452c", outline: "#3a2b19", shape: "ant", radius: 17, health: 46, damage: 18, speed: 60, xp: 9, drops: [{ item: 7, chance: 0.28 }, { item: 11, chance: 0.3 }, { item: 12, chance: 0.07 }] },
-  { id: 4, name: "Cactus", color: "#4caf50", outline: "#357a38", shape: "cactus", radius: 25, health: 110, damage: 26, speed: 0, xp: 18, drops: [{ item: 9, chance: 0.12 }, { item: 3, chance: 0.25 }, { item: 4, chance: 0.3 }] },
-  { id: 5, name: "Scorpion", color: "#c76b2a", outline: "#8c4718", shape: "crab", radius: 21, health: 90, damage: 36, speed: 70, xp: 24, drops: [{ item: 36, chance: 0.32 }, { item: 37, chance: 0.28 }, { item: 35, chance: 0.07 }] },
-  { id: 6, name: "Beetle", color: "#d1a054", outline: "#9c7532", shape: "bug", radius: 23, health: 100, damage: 24, speed: 48, xp: 20, drops: [{ item: 33, chance: 0.32 }, { item: 35, chance: 0.28 }, { item: 36, chance: 0.1 }] },
-  { id: 7, name: "Jellyfish", color: "#b06be0", outline: "#7d40a8", shape: "jelly", radius: 22, health: 78, damage: 28, speed: 38, xp: 20, drops: [{ item: 24, chance: 0.32 }, { item: 25, chance: 0.26 }, { item: 26, chance: 0.07 }] },
-  { id: 8, name: "Crab", color: "#ef7d3b", outline: "#b2541f", shape: "crab", radius: 24, health: 120, damage: 32, speed: 44, xp: 26, drops: [{ item: 27, chance: 0.3 }, { item: 28, chance: 0.28 }, { item: 29, chance: 0.07 }, { item: 4, chance: 0.2 }] },
-  { id: 9, name: "Starfish", color: "#f2799e", outline: "#bc4c72", shape: "star", radius: 20, health: 95, damage: 18, speed: 36, xp: 18, drops: [{ item: 21, chance: 0.3 }, { item: 22, chance: 0.28 }, { item: 4, chance: 0.22 }, { item: 23, chance: 0.07 }] },
-  { id: 10, name: "Worker Ant", color: "#8a6a3c", outline: "#5d4528", shape: "ant", radius: 14, health: 32, damage: 10, speed: 68, xp: 6, drops: [{ item: 1, chance: 0.3 }, { item: 13, chance: 0.3 }, { item: 14, chance: 0.07 }] },
+  { id: 3, name: "Soldier Ant", color: "#5b452c", outline: "#3a2b19", shape: "ant", radius: 17, health: 46, damage: 18, speed: 60, xp: 9, drops: [{ item: 7, chance: 0.7 }, { item: 11, chance: 0.7 }, { item: 12, chance: 0.07 }] },
+  { id: 4, name: "Cactus", color: "#4caf50", outline: "#357a38", shape: "cactus", radius: 25, health: 110, damage: 26, speed: 0, xp: 18, drops: [{ item: 9, chance: 0.12 }, { item: 3, chance: 0.7 }, { item: 4, chance: 0.7 }] },
+  { id: 5, name: "Scorpion", color: "#c76b2a", outline: "#8c4718", shape: "crab", radius: 21, health: 90, damage: 36, speed: 70, xp: 24, drops: [{ item: 36, chance: 0.7 }, { item: 37, chance: 0.28 }, { item: 35, chance: 0.7 }] },
+  { id: 6, name: "Beetle", color: "#d1a054", outline: "#9c7532", shape: "bug", radius: 23, health: 100, damage: 24, speed: 48, xp: 20, drops: [{ item: 33, chance: 0.7 }, { item: 35, chance: 0.7 }, { item: 36, chance: 0.7 }] },
+  { id: 7, name: "Jellyfish", color: "#b06be0", outline: "#7d40a8", shape: "jelly", radius: 22, health: 78, damage: 28, speed: 38, xp: 20, drops: [{ item: 24, chance: 0.7 }, { item: 25, chance: 0.7 }, { item: 26, chance: 0.07 }] },
+  { id: 8, name: "Crab", color: "#ef7d3b", outline: "#b2541f", shape: "crab", radius: 24, health: 120, damage: 32, speed: 44, xp: 26, drops: [{ item: 27, chance: 0.7 }, { item: 28, chance: 0.7 }, { item: 29, chance: 0.07 }, { item: 4, chance: 0.7 }] },
+  { id: 9, name: "Starfish", color: "#f2799e", outline: "#bc4c72", shape: "star", radius: 20, health: 95, damage: 18, speed: 36, xp: 18, drops: [{ item: 21, chance: 0.7 }, { item: 22, chance: 0.7 }, { item: 4, chance: 0.7 }, { item: 23, chance: 0.07 }] },
+  { id: 10, name: "Worker Ant", color: "#8a6a3c", outline: "#5d4528", shape: "ant", radius: 14, health: 32, damage: 10, speed: 68, xp: 6, drops: [{ item: 1, chance: 0.7 }, { item: 13, chance: 0.7 }, { item: 14, chance: 0.07 }] },
   // Sandstorm: a new desert hazard mob. It reuses the cactus "shape" placeholder
   // until the user finishes its detailed art.
-  { id: 11, name: "Sandstorm", color: "#d4b878", outline: "#8a6a3c", shape: "cactus", radius: 28, health: 150, damage: 22, speed: 24, xp: 22, drops: [{ item: 9, chance: 0.18 }, { item: 4, chance: 0.3 }, { item: 32, chance: 0.2 }] },
+  { id: 11, name: "Sandstorm", color: "#d4b878", outline: "#8a6a3c", shape: "cactus", radius: 28, health: 150, damage: 22, speed: 24, xp: 22, drops: [{ item: 9, chance: 0.18 }, { item: 4, chance: 0.7 }, { item: 32, chance: 0.7 }] },
 ];
 
 export interface Wall {
