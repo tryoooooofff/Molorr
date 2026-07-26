@@ -855,6 +855,8 @@ export function drawCard(
     dim?: number;
     /** 0..1 reload progress. 1 = fully reloaded/ready; below 1 draws a sweep overlay. */
     reload?: number;
+    /** 0..1 remaining health. Below 1 draws a damage overlay on top of the card. */
+    hp?: number;
   } = {},
 ) {
   const scale = opts.scale ?? 1;
@@ -1014,6 +1016,15 @@ export function drawCard(
     ctx.closePath();
     ctx.fill();
     ctx.restore();
+  }
+
+  // Damage overlay (for quickslot active petals)
+  const hp = opts.hp ?? 1;
+  if (hp < 1) {
+    const damageRatio = 1 - Math.max(0, Math.min(1, hp));
+    if (damageRatio > 0) {
+      drawDamageOverlay(ctx, r.x, r.y, r.w, damageRatio);
+    }
   }
 
   ctx.restore();
@@ -1178,7 +1189,8 @@ export function drawMob(
 
     // Antennae were previously 6x too long; shrink them to 1/6 of their
     // original reach and snap every coordinate to a whole pixel.
-    const ANTENNA_SHRINK = 1 / 6;
+    // Increased by +50% per user request.
+    const ANTENNA_SHRINK = (1 / 6) * 1.5;
     const ctrlX = Math.round(25 * scale * ANTENNA_SHRINK);
     const ctrlY = Math.round(15 * scale * ANTENNA_SHRINK);
     const tipX = Math.round(55 * scale * ANTENNA_SHRINK);

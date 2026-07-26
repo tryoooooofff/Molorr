@@ -204,6 +204,8 @@ export class GameClient {
   private bag: (Cell | null)[] = emptyCells(BAG_COUNT);
   /** Per-hotbar-slot reload progress (0..1, 1 = ready), streamed with each snapshot. */
   private slotReload: number[] = new Array(SLOT_COUNT).fill(1);
+  /** Per-hotbar-slot remaining health (0..1, 1 = full health), streamed with each snapshot. */
+  private slotHp: number[] = new Array(SLOT_COUNT).fill(1);
   private floaters: Floater[] = [];
   private killFeed: { msg: string; life: number }[] = [];
 
@@ -311,6 +313,7 @@ export class GameClient {
       mainCells: () => this.slots,
       secondaryCells: () => this.secondary,
       reloadProgress: (slot) => this.slotReload[slot] ?? 1,
+      slotHp: (slot) => this.slotHp[slot] ?? 1,
       draggingFrom: () => this.drag?.from ?? -1,
       requestSwapSlot: (slot) => this.sendSwapRow(slot),
       requestSwapAll: () => this.sendSwapRow(SWAP_ROW_ALL),
@@ -583,6 +586,10 @@ export class GameClient {
         // Trailing per-slot reload progress, one byte per hotbar slot.
         if (r.remaining >= SLOT_COUNT) {
           for (let i = 0; i < SLOT_COUNT; i++) this.slotReload[i] = r.u8() / 255;
+        }
+        // Trailing per-slot remaining health, one byte per hotbar slot.
+        if (r.remaining >= SLOT_COUNT) {
+          for (let i = 0; i < SLOT_COUNT; i++) this.slotHp[i] = r.u8() / 255;
         }
         break;
       }
@@ -2428,14 +2435,6 @@ drawItemIcon(ctx, i % ITEMS.length, px, this.h - py, 12 + (i % 4) * 3, t * (0.4 
   private drawPetalEnt(e: Ent) {
     const ctx = this.ctx;
     drawItemIcon(ctx, e.type, e.x, e.y, e.radius, this.time * 3 + e.id, 0);
-    // Damage overlay: chips away from the bottom of the petal's icon as it
-    // loses health, so its remaining health reads at a glance without a
-    // separate health bar cluttering the world.
-    const damageRatio = 1 - Math.max(0, Math.min(1, e.hp));
-    if (damageRatio > 0) {
-      const size = Math.max(1, Math.round(e.radius * 2));
-      drawDamageOverlay(ctx, e.x - size / 2, e.y - size / 2, size, damageRatio);
-    }
   }
 
   private drawMobEnt(e: Ent) {
