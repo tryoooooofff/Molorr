@@ -2225,16 +2225,9 @@ export function drawMob(
     default: drawRock(); break;
   }
 
-  if (friendly) {
-    ctx.save();
-    ctx.strokeStyle = "rgba(120,255,160,0.85)";
-    ctx.lineWidth = 3;
-    ctx.setLineDash([6, 6]);
-    ctx.beginPath();
-    ctx.arc(x, y, radius + 8, t * 2, t * 2 + Math.PI * 1.6);
-    ctx.stroke();
-    ctx.restore();
-  }
+  // Friendly mobs are already unmistakable from their gold/yellow palette
+  // (see the `friendly` colour branches in each drawer above), so no extra
+  // ring is drawn around them.
 }
 
 // ============================================
