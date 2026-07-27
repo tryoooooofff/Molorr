@@ -209,7 +209,8 @@ export interface ItemDef {
   damage: number;
   health: number;
   reload: number; // seconds
-  heal?: number; // hp per second while alive
+  /** One-shot HP restored when this consumable healing petal reaches its owner. */
+  heal?: number;
   speed?: number; // % move speed bonus
   petMob?: number; // mob type spawned when this is a summon
   /**
@@ -226,9 +227,16 @@ export interface ItemDef {
   desc: string;
 }
 
+/** Rose is the only item that restores player HP. */
+export const ROSE_ITEM = 30;
+/** Time a freshly spawned Rose orbits before it can be consumed. */
+export const ROSE_HEAL_DELAY = 1.0;
+/** Time the Rose spends travelling from its orbit into the player. */
+export const ROSE_ABSORB_TIME = 0.4;
+
 export const ITEMS: ItemDef[] = [
   { id: 0, name: "Basic", kind: "petal", color: "#ffffff", outline: "#cfcfcf", shape: "circle", radius: 8, damage: 10, health: 12, reload: 1.0, dropFactor: 1.0, desc: "A nice and simple petal." },
-  { id: 1, name: "Leaf", kind: "petal", color: "#39b54a", outline: "#2b8a38", shape: "leaf", radius: 9, damage: 8, health: 14, reload: 1.0, heal: 2.5, dropFactor: 0.7, desc: "Heals you slowly over time." },
+  { id: 1, name: "Leaf", kind: "petal", color: "#39b54a", outline: "#2b8a38", shape: "leaf", radius: 9, damage: 8, health: 14, reload: 1.0, dropFactor: 0.7, desc: "A light, sturdy leaf." },
   { id: 2, name: "Stinger", kind: "petal", color: "#333333", outline: "#111111", shape: "triangle", radius: 6, damage: 38, health: 4, reload: 1.6, dropFactor: 0.6, desc: "Hurts a lot, breaks fast." },
   { id: 3, name: "Rock", kind: "petal", color: "#8d8d8d", outline: "#6a6a6a", shape: "square", radius: 10, damage: 8, health: 55, reload: 2.2, dropFactor: 0.7, desc: "Heavy and very sturdy." },
   { id: 4, name: "Sand", kind: "petal", color: "#e0c068", outline: "#b89b45", shape: "circle", radius: 7, damage: 14, health: 16, reload: 1.2, dropFactor: 0.65, desc: "Gritty desert clump." },
@@ -252,10 +260,10 @@ export const ITEMS: ItemDef[] = [
   { id: 17, name: "Moon", kind: "petal", color: "#e8e8f0", outline: "#9a9aa8", shape: "circle", radius: 9, damage: 12, health: 18, reload: 1.3, dropFactor: 0.002, desc: "A pale sliver of moon. Almost never seen." },
   // ── Bee drops ───────────────────────────────────────────────────────────
   { id: 18, name: "Pollen", kind: "petal", color: "#f7e26b", outline: "#b59b1e", shape: "circle", radius: 7, damage: 7, health: 11, reload: 1.0, dropFactor: 0.7, desc: "A pinch of golden pollen." },
-  { id: 19, name: "Honey", kind: "petal", color: "#e89a18", outline: "#9a5e08", shape: "circle", radius: 8, damage: 5, health: 14, reload: 1.0, heal: 3.0, dropFactor: 0.7, desc: "Sticky, sweet, and soothing." },
+  { id: 19, name: "Honey", kind: "petal", color: "#e89a18", outline: "#9a5e08", shape: "circle", radius: 8, damage: 5, health: 14, reload: 1.0, dropFactor: 0.7, desc: "Sticky and sweet." },
   { id: 20, name: "Bee Egg", kind: "summon", color: "#fff0a8", outline: "#b59a1e", shape: "egg", radius: 10, damage: 5, health: 22, reload: 3.4, petMob: 1, dropFactor: 0.55, desc: "Hatches a buzzing bee." },
   // ── Starfish drops ──────────────────────────────────────────────────────
-  { id: 21, name: "Starfish", kind: "petal", color: "#f2799e", outline: "#bc4c72", shape: "star", radius: 10, damage: 11, health: 15, reload: 1.2, heal: 3.5, dropFactor: 0.65, desc: "A star from the seafloor. Heals you slowly over time." },
+  { id: 21, name: "Starfish", kind: "petal", color: "#f2799e", outline: "#bc4c72", shape: "star", radius: 10, damage: 11, health: 15, reload: 1.2, dropFactor: 0.65, desc: "A tough star from the seafloor." },
   { id: 22, name: "Salt", kind: "petal", color: "#ffffff", outline: "#c4c4c4", shape: "circle", radius: 7, damage: 10, health: 9, reload: 1.0, dropFactor: 0.6, desc: "Crystalline sea salt." },
   { id: 23, name: "Starfish Egg", kind: "summon", color: "#f8b6c8", outline: "#bc4c72", shape: "egg", radius: 10, damage: 4, health: 24, reload: 3.6, petMob: 9, dropFactor: 0.55, desc: "Hatches a starfish." },
   // ── Jellyfish drops ─────────────────────────────────────────────────────
@@ -267,7 +275,7 @@ export const ITEMS: ItemDef[] = [
   { id: 28, name: "Powder", kind: "petal", color: "#e6dcc4", outline: "#a89c80", shape: "circle", radius: 7, damage: 9, health: 11, reload: 1.0, dropFactor: 0.65, desc: "A puff of fine powder." },
   { id: 29, name: "Crab Egg", kind: "summon", color: "#f5a06b", outline: "#b2541f", shape: "egg", radius: 10, damage: 6, health: 26, reload: 3.8, petMob: 8, dropFactor: 0.55, desc: "Hatches a crab." },
   // ── Ladybug drops ───────────────────────────────────────────────────────
-  { id: 30, name: "Rose", kind: "petal", color: "#d6354a", outline: "#8a1f2c", shape: "circle", radius: 8, damage: 9, health: 12, reload: 1.1, heal: 3.0, dropFactor: 0.7, desc: "A perfect red rose. Heals you slowly over time." },
+  { id: 30, name: "Rose", kind: "petal", color: "#d6354a", outline: "#8a1f2c", shape: "circle", radius: 8, damage: 5, health: 5, reload: 3.5, heal: 7.5, dropFactor: 0.7, desc: "Absorbs into an injured flower, heals once, then reloads." },
   { id: 31, name: "Light", kind: "petal", color: "#fff3a8", outline: "#c79a1e", shape: "circle", radius: 8, damage: 6, health: 10, reload: 1.0, dropFactor: 0.85, desc: "A warm mote of light." },
   // Ladybug Egg = id 8 (defined above in the starting kit slot).
   // ── Sandstorm drops (desert) ─────────────────────────────────────────────

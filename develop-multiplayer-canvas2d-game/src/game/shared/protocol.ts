@@ -63,6 +63,8 @@ export const EVT = {
   ORACLE_FAIL: 8,
   TRADE_OK: 9,
   TRADE_FAIL: 10,
+  /** A Rose reached the player and restored HP. `value` is the rounded HP restored. */
+  HEAL: 11,
 } as const;
 
 

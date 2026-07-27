@@ -77,22 +77,33 @@ export class QuickSlot {
   private layout() {
     const w = this.host.viewWidth();
     const h = this.host.viewHeight();
-    const isMobile = w < 640 || /Mobi|Android/i.test(typeof navigator !== "undefined" ? navigator.userAgent : "");
+    const isMobile = w < 640 || /Mobi|Android|iPhone|iPad|iPod/i.test(typeof navigator !== "undefined" ? navigator.userAgent : "");
+    const shortMobile = isMobile && h <= 600;
 
-    // On phone, make hotbar slots slightly larger for touch, and lift a bit for joystick clearance
-    const mainSize = Math.min(this.MAIN_MAX_SIZE + (isMobile ? 8 : 0), isMobile ? w / 9.5 : w / 12);
-    const secSize = Math.max(isMobile ? 22 : 18, Math.round(mainSize * this.SECONDARY_SCALE));
+    // Landscape phones are short, so an oversized two-row bar can consume half
+    // the playfield. Keep touch targets usable while sizing from both axes.
+    const mainGap = isMobile ? (w < 430 ? 3 : 5) : this.MAIN_GAP;
+    const secondaryGap = isMobile ? 3 : this.SECONDARY_GAP;
+    const rowGap = isMobile ? 4 : this.ROW_GAP;
+    const sidePadding = isMobile ? 12 : 24;
+    const widthLimitedSize = (w - sidePadding * 2 - mainGap * (SLOT_COUNT - 1)) / SLOT_COUNT;
+    const heightLimitedSize = shortMobile ? Math.max(34, Math.min(46, h * 0.12)) : this.MAIN_MAX_SIZE;
+    const mainSize = Math.max(32, Math.min(this.MAIN_MAX_SIZE, widthLimitedSize, heightLimitedSize));
+    const secSize = Math.max(isMobile ? 18 : 18, Math.round(mainSize * (shortMobile ? 0.54 : this.SECONDARY_SCALE)));
 
-    const mainTotal = SLOT_COUNT * mainSize + (SLOT_COUNT - 1) * this.MAIN_GAP;
-    const secTotal = SECONDARY_SLOT_COUNT * secSize + (SECONDARY_SLOT_COUNT - 1) * this.SECONDARY_GAP;
+    const mainTotal = SLOT_COUNT * mainSize + (SLOT_COUNT - 1) * mainGap;
+    const secTotal = SECONDARY_SLOT_COUNT * secSize + (SECONDARY_SLOT_COUNT - 1) * secondaryGap;
 
-    const bottomMargin = this.BOTTOM_MARGIN + (isMobile ? 6 : 0);
+    const bottomMargin = isMobile ? 6 : this.BOTTOM_MARGIN;
     const secY = h - bottomMargin - secSize;
-    const mainY = secY - this.ROW_GAP - mainSize;
+    const mainY = secY - rowGap - mainSize;
 
     return {
+      isMobile,
       mainSize,
       secSize,
+      mainGap,
+      secondaryGap,
       mainX: (w - mainTotal) / 2,
       secX: (w - secTotal) / 2,
       mainY,
@@ -104,7 +115,7 @@ export class QuickSlot {
   mainRects(): Rect[] {
     const l = this.layout();
     return new Array(SLOT_COUNT).fill(0).map((_, i) => ({
-      x: l.mainX + i * (l.mainSize + this.MAIN_GAP),
+      x: l.mainX + i * (l.mainSize + l.mainGap),
       y: l.mainY,
       w: l.mainSize,
       h: l.mainSize,
@@ -115,7 +126,7 @@ export class QuickSlot {
   secondaryRects(): Rect[] {
     const l = this.layout();
     return new Array(SECONDARY_SLOT_COUNT).fill(0).map((_, i) => ({
-      x: l.secX + i * (l.secSize + this.SECONDARY_GAP),
+      x: l.secX + i * (l.secSize + l.secondaryGap),
       y: l.secY,
       w: l.secSize,
       h: l.secSize,
@@ -208,14 +219,16 @@ export class QuickSlot {
 
     // Hint so players know the rows are swappable.
     const l = this.layout();
-    text(
-      ctx,
-      `R swap all  ·  1-${SLOT_COUNT} swap one`,
-      this.host.viewWidth() / 2,
-      l.secY + l.secSize + 9,
-      10,
-      "rgba(255,255,255,0.45)",
-    );
+    if (!l.isMobile) {
+      text(
+        ctx,
+        `R swap all  ·  1-${SLOT_COUNT} swap one`,
+        this.host.viewWidth() / 2,
+        l.secY + l.secSize + 9,
+        10,
+        "rgba(255,255,255,0.45)",
+      );
+    }
 
     if (hoverCell) this.host.drawTooltip(hoverCell, this.mouseX + 14, this.mouseY - 10);
   }

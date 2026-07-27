@@ -32,6 +32,9 @@ import {
   ORACLE_SKIP,
   oracleRequiredCount,
   RARITIES,
+  ROSE_ABSORB_TIME,
+  ROSE_HEAL_DELAY,
+  ROSE_ITEM,
   SECONDARY_SLOT_COUNT,
   HOTBAR_CELLS,
   isBagCell,
@@ -101,6 +104,10 @@ interface PetalState {
   x: number;
   y: number;
   hitCd: number;
+  /** Delay before a freshly spawned Rose is allowed to heal. */
+  specialTimer: number;
+  /** Remaining travel time while a Rose is being absorbed by its owner. */
+  absorbTimer: number;
 }
 
 export interface PlayerSave {
@@ -256,22 +263,65 @@ function clamp(v: number, a: number, b: number) {
 }
 
 function collideWalls(walls: Wall[], x: number, y: number, r: number): [number, number] {
-  for (const w of walls) {
-    const cx = clamp(x, w.x, w.x + w.w);
-    const cy = clamp(y, w.y, w.y + w.h);
-    const dx = x - cx;
-    const dy = y - cy;
-    const d2 = dx * dx + dy * dy;
-    if (d2 < r * r) {
-      const d = Math.sqrt(d2) || 0.0001;
-      const push = r - d;
+  // Repeat a few times because being pushed out of one rectangle can put the
+  // circle into a neighbouring rectangle at corners.
+  for (let pass = 0; pass < 3; pass++) {
+    let moved = false;
+    for (const w of walls) {
+      const cx = clamp(x, w.x, w.x + w.w);
+      const cy = clamp(y, w.y, w.y + w.h);
+      const dx = x - cx;
+      const dy = y - cy;
+      const d2 = dx * dx + dy * dy;
+      if (d2 >= r * r) continue;
+
+      moved = true;
       if (d2 === 0) {
-        x = w.x + w.w * 0.5 < x ? w.x + w.w + r : w.x - r;
+        // The centre is inside the rectangle. Choose the nearest face rather
+        // than an arbitrary side so correction is small and deterministic.
+        const faces = [
+          { distance: x - w.x, axis: "x" as const, value: w.x - r },
+          { distance: w.x + w.w - x, axis: "x" as const, value: w.x + w.w + r },
+          { distance: y - w.y, axis: "y" as const, value: w.y - r },
+          { distance: w.y + w.h - y, axis: "y" as const, value: w.y + w.h + r },
+        ];
+        const face = faces.reduce((best, candidate) => candidate.distance < best.distance ? candidate : best);
+        if (face.axis === "x") x = face.value;
+        else y = face.value;
       } else {
+        const d = Math.sqrt(d2);
+        const push = r - d;
         x += (dx / d) * push;
         y += (dy / d) * push;
       }
     }
+    if (!moved) break;
+  }
+  return [x, y];
+}
+
+/**
+ * Move a circle in short collision-tested steps. Testing only the final point
+ * lets a delayed/throttled tick jump completely across a wall (most visible
+ * after returning to a background browser tab).
+ */
+function moveCircleWithWalls(
+  walls: Wall[],
+  x: number,
+  y: number,
+  dx: number,
+  dy: number,
+  r: number,
+): [number, number] {
+  const distance = Math.hypot(dx, dy);
+  const maxStep = Math.max(4, r * 0.45);
+  const steps = Math.max(1, Math.ceil(distance / maxStep));
+  const stepX = dx / steps;
+  const stepY = dy / steps;
+  for (let i = 0; i < steps; i++) {
+    x += stepX;
+    y += stepY;
+    [x, y] = collideWalls(walls, x, y, r);
   }
   return [x, y];
 }
@@ -1132,6 +1182,8 @@ export class GameServer {
         x: p.x,
         y: p.y,
         hitCd: 0,
+        specialTimer: cell?.item === ROSE_ITEM ? ROSE_HEAL_DELAY : 0,
+        absorbTimer: 0,
       });
       // A summon's pets only live while the exact same egg stays equipped in
       // that same main hotbar slot. Moving/removing/upgrading the egg despawns
@@ -1155,6 +1207,15 @@ export class GameServer {
 
     for (const p of players) this.updatePlayer(p, dt, players);
     for (let m = 0; m < MAPS.length; m++) this.updateWorld(m, dt, players);
+    // Mob/player separation happens in updateWorld and can displace a player.
+    // Never allow that secondary push to leave the authoritative circle in a wall.
+    for (const p of players) {
+      if (!p.alive) continue;
+      const map = MAPS[p.mapId];
+      [p.x, p.y] = collideWalls(map.walls, p.x, p.y, PLAYER_RADIUS);
+      p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
+      p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
+    }
     for (const p of players) this.updatePetals(p, dt);
     for (const p of players) this.pickupDrops(p);
 
@@ -1165,7 +1226,6 @@ export class GameServer {
     if (!p.alive) return;
     const map = MAPS[p.mapId];
     let speedBonus = 0;
-    let heal = 0;
     for (let i = 0; i < SLOT_COUNT; i++) {
       const cell = p.slots[i];
       if (!cell) continue;
@@ -1175,7 +1235,6 @@ export class GameServer {
       const alive = orbitsAsPetal(def.kind) ? p.petals[i]?.alive : true;
       if (!alive) continue;
       if (def.speed) speedBonus += def.speed * (1 + cell.rarity * 0.12);
-      if (def.heal) heal += def.heal * rarityMult(cell.rarity) * 0.5;
     }
     const speed = (190 + p.level * 0.8) * (1 + speedBonus / 100);
     const mag = Math.hypot(p.inDx, p.inDy);
@@ -1183,13 +1242,16 @@ export class GameServer {
     const ny = mag > 1 ? p.inDy / mag : p.inDy;
     p.vx += (nx * speed - p.vx) * Math.min(1, dt * 9);
     p.vy += (ny * speed - p.vy) * Math.min(1, dt * 9);
-    p.x += p.vx * dt;
-    p.y += p.vy * dt;
-    p.x = clamp(p.x, 20, map.width - 20);
-    p.y = clamp(p.y, 20, map.height - 20);
-    const [cx, cy] = collideWalls(map.walls, p.x, p.y, PLAYER_RADIUS);
-    p.x = cx;
-    p.y = cy;
+    [p.x, p.y] = moveCircleWithWalls(
+      map.walls,
+      p.x,
+      p.y,
+      p.vx * dt,
+      p.vy * dt,
+      PLAYER_RADIUS,
+    );
+    p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
+    p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
 
     // player vs player soft collision
     for (const o of players) {
@@ -1204,10 +1266,12 @@ export class GameServer {
       }
     }
 
-    if (heal > 0 && p.hp < p.maxHp) {
-      p.hp = Math.min(p.maxHp, p.hp + heal * dt);
-      p.statsDirty = true;
-    }
+    // Soft player collision above can push a flower into a nearby wall. Repair
+    // that displacement before this authoritative position is broadcast.
+    [p.x, p.y] = collideWalls(map.walls, p.x, p.y, PLAYER_RADIUS);
+    p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
+    p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
+
     p.hurtCd = Math.max(0, p.hurtCd - dt);
 
     const attack = (p.flags & 1) !== 0;
@@ -1246,6 +1310,8 @@ export class GameServer {
           st.alive = true;
           st.maxHp = def.health * rarityMult(cell.rarity);
           st.hp = st.maxHp;
+          st.specialTimer = cell.item === ROSE_ITEM ? ROSE_HEAL_DELAY : 0;
+          st.absorbTimer = 0;
         }
         continue;
       }
@@ -1259,10 +1325,48 @@ export class GameServer {
         st.timer = def.reload;
         continue;
       }
-      const tx = p.x + Math.cos(slotAngle) * p.orbit;
-      const ty = p.y + Math.sin(slotAngle) * p.orbit;
-      st.x += (tx - st.x) * Math.min(1, dt * 14);
-      st.y += (ty - st.y) * Math.min(1, dt * 14);
+      // Roses stay at the normal/defending orbit instead of being pushed out
+      // to attack. Once ready and the owner is hurt, the authoritative petal
+      // travels into the flower, heals exactly once, then starts its reload.
+      const orbitRadius = cell.item === ROSE_ITEM ? Math.min(p.orbit, 62) : p.orbit;
+      const tx = p.x + Math.cos(slotAngle) * orbitRadius;
+      const ty = p.y + Math.sin(slotAngle) * orbitRadius;
+
+      if (cell.item === ROSE_ITEM && def.heal) {
+        st.specialTimer = Math.max(0, st.specialTimer - dt);
+        if (st.absorbTimer > 0) {
+          const travelStep = Math.min(1, dt / Math.max(dt, st.absorbTimer));
+          st.x += (p.x - st.x) * travelStep;
+          st.y += (p.y - st.y) * travelStep;
+          st.absorbTimer = Math.max(0, st.absorbTimer - dt);
+          if (st.absorbTimer <= 0) {
+            const missingHp = Math.max(0, p.maxHp - p.hp);
+            if (missingHp > 0) {
+              const restored = Math.min(missingHp, def.heal * rarityMult(cell.rarity));
+              p.hp += restored;
+              p.statsDirty = true;
+              const owner = this.clientOf(p.id);
+              if (owner) this.pushEvent(owner, EVT.HEAL, p.x, p.y, Math.round(restored), ROSE_ITEM, cell.rarity);
+              st.alive = false;
+              st.hp = 0;
+              st.timer = def.reload;
+            }
+            // If another Rose filled the player first, this one remains alive
+            // and returns to orbit instead of wasting a reload cycle.
+          }
+          continue;
+        }
+
+        st.x += (tx - st.x) * Math.min(1, dt * 14);
+        st.y += (ty - st.y) * Math.min(1, dt * 14);
+        if (st.specialTimer <= 0 && p.hp < p.maxHp) {
+          st.absorbTimer = ROSE_ABSORB_TIME;
+          continue;
+        }
+      } else {
+        st.x += (tx - st.x) * Math.min(1, dt * 14);
+        st.y += (ty - st.y) * Math.min(1, dt * 14);
+      }
 
       const dmg = def.damage * rarityMult(cell.rarity);
       const pr = def.radius * (1 + cell.rarity * 0.06);
@@ -1292,6 +1396,8 @@ export class GameServer {
         if (st.hp <= 0) {
           st.alive = false;
           st.timer = def.reload;
+          st.specialTimer = 0;
+          st.absorbTimer = 0;
           if (isSummon) this.despawnPets(p, i);
         }
       }
