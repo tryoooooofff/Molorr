@@ -19,6 +19,8 @@ import {
   MOBS,
   ORACLE_SKIP,
   RARITIES,
+  ROSE_HEAL_DELAY,
+  ROSE_ITEM,
   SECONDARY_SLOT_COUNT,
   SLOT_COUNT,
   Wall,
@@ -79,6 +81,8 @@ interface Ent {
   rarity: number;
   name: string;
   seen: number;
+  /** Snapshot generation in which this entity was last present. */
+  seenSnapshot: number;
   hurt: number;
   spawn: number;
   spreadMode?: boolean;
@@ -256,9 +260,11 @@ class SettingsSystem {
             const rect = currentCanvas.getBoundingClientRect();
             const clientX = e.touches ? e.touches[0].clientX : e.clientX;
             const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            // Game UI coordinates are CSS pixels; the canvas backing store may
+            // be DPR-scaled, but GameClient resets the context transform.
             return {
-                x: (clientX - rect.left) * (currentCanvas.width / rect.width),
-                y: (clientY - rect.top) * (currentCanvas.height / rect.height)
+                x: clientX - rect.left,
+                y: clientY - rect.top
             };
         };
 
@@ -305,13 +311,11 @@ class SettingsSystem {
                 if (e.cancelable) e.preventDefault();
                 e.stopPropagation();
 
-                const rect = canvas.getBoundingClientRect();
                 const deltaY = e.touches[0].clientY - touchStartY;
-                const scaleY = canvas.height / rect.height;
 
                 this.scrollOffset = Math.max(0, Math.min(
                     this.maxScrollOffset,
-                    touchStartOffset - deltaY * scaleY
+                    touchStartOffset - deltaY
                 ));
                 this._forceRedraw();
             }
@@ -509,12 +513,12 @@ class SettingsSystem {
     draw(ctx: CanvasRenderingContext2D, x: number, y: number) {
         if (!this.panelOpen) return;
 
-        const panelW = 320;
         const viewW = x * 2;
         const viewH = y * 2;
+        const panelW = Math.min(320, Math.max(240, viewW - 24));
         const panelX = Math.min(118, Math.max(12, viewW - panelW - 12));
-        const panelY = 16;
-        const panelH = Math.max(300, Math.min(480, viewH - panelY - 16));
+        const panelY = viewH <= 600 ? 8 : 16;
+        const panelH = Math.max(160, Math.min(480, viewH - panelY * 2));
         this.panelRect = [panelX, panelY, panelW, panelH];
 
         const totalContentHeight = 880;
@@ -1183,6 +1187,171 @@ class ChatSystem {
   }
 }
 
+/**
+ * Shared, florr-style item tooltip used by the hotbar, bag, and craft browser.
+ * Text uses a heavy black outline so every stat remains readable over gameplay.
+ */
+class TooltipSystem {
+  static readonly STYLES = {
+    NAME: "#ffffff",
+    HEALTH: "#ff5e5e",
+    DAMAGE: "#7dc6ff",
+    MANA: "#4a90e2",
+    HEAL: "#ffcc66",
+    SPECIAL: "#ffcc66",
+    RELOAD: "#7dc6ff",
+    WHITE: "#ffffff",
+    BLACK: "#000000",
+  } as const;
+
+  static drawItemTooltip(
+    ctx: CanvasRenderingContext2D,
+    cell: Cell,
+    anchorX: number,
+    anchorY: number,
+    viewWidth: number,
+    viewHeight: number,
+  ) {
+    const def = ITEMS[cell.item];
+    const rarity = RARITIES[cell.rarity];
+    if (!def || !rarity) return;
+
+    const width = Math.min(400, Math.max(240, viewWidth - 16));
+    const innerWidth = width - 36;
+    const descriptionLines = this.wrapText(ctx, def.desc, innerWidth, 13);
+    const statLines: Array<{
+      text: string;
+      color: string;
+      suffix?: { text: string; color: string };
+    }> = [];
+    const mult = rarity.mult;
+
+    if (def.kind !== "trinket") {
+      if (def.damage > 0) statLines.push({ text: `Damage: ${(def.damage * mult).toFixed(0)}`, color: this.STYLES.DAMAGE });
+      if (def.health > 0) statLines.push({ text: `Health: ${(def.health * mult).toFixed(0)}`, color: this.STYLES.HEALTH });
+    }
+    if (def.heal) {
+      statLines.push({
+        text: `Heal: ${(def.heal * mult).toFixed(def.heal * mult % 1 ? 1 : 0)} HP`,
+        color: this.STYLES.HEAL,
+      });
+      statLines.push({ text: `Absorbs after ${ROSE_HEAL_DELAY.toFixed(1)}s, then reloads`, color: this.STYLES.SPECIAL });
+    }
+    if (def.speed) statLines.push({ text: `Speed: +${def.speed}%`, color: this.STYLES.SPECIAL });
+
+    if (def.kind === "summon") {
+      const summonCount = getSummonCount(def.id);
+      const summonRarity = def.noDowngrade ? cell.rarity : mapRarityToSummonRarity(cell.rarity);
+      const mobName = MOBS[def.petMob ?? 0]?.name ?? "Unknown";
+      const base = `×${summonCount} ${mobName}`;
+      statLines.push({
+        text: base,
+        color: this.STYLES.WHITE,
+        suffix: { text: ` (${RARITIES[summonRarity]?.name ?? "Common"})`, color: RARITIES[summonRarity]?.color ?? this.STYLES.WHITE },
+      });
+    } else if (def.kind === "trinket") {
+      statLines.push({ text: "Trade fodder — no combat use", color: this.STYLES.SPECIAL });
+    }
+
+    const descriptionHeight = descriptionLines.length * 20;
+    const statsHeight = statLines.length * 22;
+    const height = 76 + descriptionHeight + (descriptionLines.length ? 8 : 0) + statsHeight + 12;
+    let x = anchorX;
+    let y = anchorY;
+    if (x + width > viewWidth - 8) x = anchorX - width - 28;
+    x = Math.max(8, Math.min(x, viewWidth - width - 8));
+    y = Math.max(8, Math.min(y, viewHeight - height - 8));
+
+    ctx.save();
+    roundRect(ctx, x, y, width, height, 6);
+    ctx.fillStyle = "rgba(30,30,30,0.82)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(0,0,0,0.75)";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    const left = x + 18;
+    const right = x + width - 18;
+    let currentY = y + 24;
+    this.drawStrokedText(ctx, def.name, left, currentY, 22, "left", this.STYLES.NAME, 5);
+    if (def.reload > 0) {
+      this.drawStrokedText(ctx, `${def.reload.toFixed(1)}s ⟳`, right, currentY, 14, "right", this.STYLES.RELOAD, 4);
+    }
+
+    currentY += 28;
+    this.drawStrokedText(ctx, rarity.name, left, currentY, 13, "left", rarity.color, 5);
+    currentY += 24;
+
+    for (const line of descriptionLines) {
+      this.drawStrokedText(ctx, line, left, currentY, 13, "left", this.STYLES.WHITE, 4);
+      currentY += 20;
+    }
+    if (descriptionLines.length) currentY += 8;
+
+    for (const line of statLines) {
+      this.drawStrokedText(ctx, line.text, left, currentY, 12, "left", line.color, 4);
+      if (line.suffix) {
+        ctx.font = `900 12px ${FONT_FAMILY}`;
+        const suffixX = left + ctx.measureText(line.text).width;
+        this.drawStrokedText(ctx, line.suffix.text, suffixX, currentY, 12, "left", line.suffix.color, 4);
+      }
+      currentY += 22;
+    }
+    ctx.restore();
+  }
+
+  private static drawStrokedText(
+    ctx: CanvasRenderingContext2D,
+    value: string,
+    x: number,
+    y: number,
+    fontSize: number,
+    align: CanvasTextAlign,
+    fillColor: string,
+    strokeWidth: number,
+  ) {
+    ctx.save();
+    ctx.font = `900 ${fontSize}px ${FONT_FAMILY}`;
+    ctx.textAlign = align;
+    ctx.textBaseline = "middle";
+    ctx.lineJoin = "round";
+    ctx.miterLimit = 2;
+    ctx.strokeStyle = this.STYLES.BLACK;
+    ctx.lineWidth = strokeWidth;
+    ctx.strokeText(value, x, y);
+    ctx.fillStyle = fillColor;
+    ctx.fillText(value, x, y);
+    ctx.restore();
+  }
+
+  private static wrapText(ctx: CanvasRenderingContext2D, value: string, maxWidth: number, fontSize: number): string[] {
+    ctx.save();
+    ctx.font = `900 ${fontSize}px ${FONT_FAMILY}`;
+    const words = value.trim().split(/\s+/);
+    const lines: string[] = [];
+    let current = "";
+    for (const word of words) {
+      const candidate = current ? `${current} ${word}` : word;
+      if (ctx.measureText(candidate).width <= maxWidth) {
+        current = candidate;
+        continue;
+      }
+      if (current) lines.push(current);
+      current = word;
+      // Split an unusually long unbroken token so it cannot escape the panel.
+      while (ctx.measureText(current).width > maxWidth && current.length > 1) {
+        let cut = current.length - 1;
+        while (cut > 1 && ctx.measureText(current.slice(0, cut)).width > maxWidth) cut--;
+        lines.push(current.slice(0, cut));
+        current = current.slice(cut);
+      }
+    }
+    if (current) lines.push(current);
+    ctx.restore();
+    return lines;
+  }
+}
+
 export class GameClient {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -1211,16 +1380,8 @@ export class GameClient {
   private chat = new ChatSystem();
   private squadCode = "";
 
-  // Rose absorption animations & particles
-  private roseAbsorptions: Array<{
-    sx: number;
-    sy: number;
-    x: number;
-    y: number;
-    t: number;
-    duration: number;
-    rarity: number;
-  }> = [];
+  // Rose arrival burst. The absorption travel itself is authoritative petal
+  // movement streamed by the server, so every client sees the same animation.
   private roseParticles: Array<{
     x: number;
     y: number;
@@ -1244,6 +1405,7 @@ export class GameClient {
   private worldH = 3200;
   private walls: Wall[] = [];
   private ents = new Map<number, Ent>();
+  private snapshotSequence = 0;
   private camX = 0;
   private camY = 0;
   /** Current world->screen zoom, refreshed once per frame in renderGame(). Used to keep
@@ -1431,6 +1593,8 @@ export class GameClient {
   start() {
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("keyup", this.onKeyUp);
+    window.addEventListener("blur", this.onWindowBlur);
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
     this.canvas.addEventListener("pointerdown", this.onPointerDown);
     window.addEventListener("pointermove", this.onPointerMove);
     window.addEventListener("pointerup", this.onPointerUp);
@@ -1445,6 +1609,8 @@ export class GameClient {
     cancelAnimationFrame(this.raf);
     window.removeEventListener("keydown", this.onKeyDown);
     window.removeEventListener("keyup", this.onKeyUp);
+    window.removeEventListener("blur", this.onWindowBlur);
+    document.removeEventListener("visibilitychange", this.onVisibilityChange);
     this.canvas.removeEventListener("pointerdown", this.onPointerDown);
     window.removeEventListener("pointermove", this.onPointerMove);
     window.removeEventListener("pointerup", this.onPointerUp);
@@ -1473,10 +1639,13 @@ export class GameClient {
     // Show mobile controls only in game scene for better UX
     this.mobileControlsVisible = this.scene === "game";
     const hotbarH = this.hotbarHeight();
+    const shortLandscape = this.w > this.h && this.h <= 600;
     // Joystick bottom-left
-    const joyRadius = Math.min(62, Math.max(48, this.w * 0.13));
-    const joyCenterX = 90;
-    const joyCenterY = this.h - hotbarH - joyRadius - 18;
+    const joyRadius = shortLandscape
+      ? Math.min(52, Math.max(40, this.h * 0.12))
+      : Math.min(62, Math.max(48, this.w * 0.13));
+    const joyCenterX = shortLandscape ? joyRadius + 18 : 90;
+    const joyCenterY = this.h - hotbarH - joyRadius - (shortLandscape ? 10 : 18);
     this.mobileJoystick.radius = joyRadius;
     if (!this.mobileJoystick.active) {
       this.mobileJoystick.centerX = joyCenterX;
@@ -1491,10 +1660,10 @@ export class GameClient {
       h: (joyRadius + 16) * 2,
     };
     // Action buttons bottom-right (Spread = Space, Contract = Shift)
-    const btnSize = Math.min(70, Math.max(54, this.w * 0.15));
-    const gap = 12;
-    const rightX = this.w - btnSize - 18;
-    const baseY = this.h - hotbarH - btnSize * 2 - gap - 22;
+    const btnSize = shortLandscape ? 54 : Math.min(70, Math.max(54, this.w * 0.15));
+    const gap = shortLandscape ? 8 : 12;
+    const rightX = this.w - btnSize - (shortLandscape ? 12 : 18);
+    const baseY = this.h - hotbarH - btnSize * 2 - gap - (shortLandscape ? 10 : 22);
     this.mobileSpreadRect = { x: rightX, y: baseY, w: btnSize, h: btnSize };
     this.mobileContractRect = { x: rightX, y: baseY + btnSize + gap, w: btnSize, h: btnSize };
   }
@@ -1647,7 +1816,6 @@ export class GameClient {
   private connect() {
     this.net?.close();
     this.ents.clear();
-    this.roseAbsorptions.length = 0;
     this.roseParticles.length = 0;
     const net = createTransport();
     this.net = net;
@@ -1713,7 +1881,6 @@ export class GameClient {
           this.walls.push({ x: r.u16(), y: r.u16(), w: r.u16(), h: r.u16() });
         }
         this.ents.clear();
-        this.roseAbsorptions.length = 0;
         this.roseParticles.length = 0;
         this.mapFlash = 1;
         this.chat.addMessage("Welcome! Press [Enter] to chat. Commands: /claim, /create_public_squad, /create_private_squad, /join_squad <CODE>, /leave_squad, /find_public_squad", "System", true);
@@ -1721,6 +1888,7 @@ export class GameClient {
       }
       case S2C.SNAPSHOT: {
         r.u32();
+        const snapshotSequence = ++this.snapshotSequence;
         const count = r.u16();
         for (let i = 0; i < count; i++) {
           const kind = r.u8();
@@ -1741,7 +1909,7 @@ export class GameClient {
           if (!e) {
             e = {
               id, kind, type: etype, team, x, y, tx: x, ty: y, angle,
-              radius, hp, displayHp: hp, rarity, name, seen: this.time, hurt: 0, spawn: 0,
+              radius, hp, displayHp: hp, rarity, name, seen: this.time, seenSnapshot: snapshotSequence, hurt: 0, spawn: 0,
             };
             this.ents.set(id, e);
           }
@@ -1757,7 +1925,14 @@ export class GameClient {
           e.rarity = rarity;
           if (name) e.name = name;
           e.seen = this.time;
+          e.seenSnapshot = snapshotSequence;
           if (e.spawn < 1) e.spawn = Math.min(1, e.spawn + 0.12);
+        }
+        // Petals are authoritative, short-lived entities. Remove one as soon
+        // as it is absent so an absorbed Rose does not sit over the player for
+        // the generic stale-entity grace period.
+        for (const [id, entity] of this.ents) {
+          if (entity.kind === ENT.PETAL && entity.seenSnapshot !== snapshotSequence) this.ents.delete(id);
         }
         // Trailing per-slot reload progress, one byte per hotbar slot.
         if (r.remaining >= SLOT_COUNT) {
@@ -1857,18 +2032,8 @@ export class GameClient {
           msg: `${RARITIES[rarity].name} ${ITEMS[item]?.name ?? "?"}`,
           color: RARITIES[rarity].color,
           life: 1.6,
-          vy: -22,        });
-        if (item === 30) { // Rose
-          this.roseAbsorptions.push({
-            sx: x,
-            sy: y,
-            x: x,
-            y: y,
-            t: 0,
-            duration: 0.8,
-            rarity: rarity,
-          });
-        }
+          vy: -22,
+        });
         break;
       case EVT.HIT:
         this.floaters.push({ x, y, msg: `-${value}`, color: "#ff6f6f", life: 0.9, vy: -40 });
@@ -1906,6 +2071,24 @@ export class GameClient {
         break;
       case EVT.TRADE_FAIL:
         this.craftRefused("Trade refused — check the requirement and cooldown.");
+        break;
+      case EVT.HEAL:
+        if (item !== ROSE_ITEM) break;
+        this.floaters.push({ x, y: y - 18, msg: `+${value} HP`, color: "#ffcc66", life: 1.1, vy: -28 });
+        for (let k = 0; k < 12; k++) {
+          const angle = Math.random() * Math.PI * 2;
+          const speed = 40 + Math.random() * 80;
+          this.roseParticles.push({
+            x,
+            y,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            color: Math.random() > 0.5 ? "#ff6578" : "#d6354a",
+            size: 4 + Math.random() * 5,
+            life: 0.6,
+            maxLife: 0.6,
+          });
+        }
         break;
       case EVT.DEATH:
         this.alive = false;
@@ -1965,34 +2148,9 @@ export class GameClient {
     // This drives pentagon contraction, fill cards, delayed results, and particles.
     this.craftUpdate(dt);
 
-    const mePlayer = this.ents.get(this.selfId);
-    const targetX = mePlayer ? mePlayer.x : this.camX;
-    const targetY = mePlayer ? mePlayer.y : this.camY;
-
-    // Update Rose absorptions
-    for (let i = this.roseAbsorptions.length - 1; i >= 0; i--) {
-      const a = this.roseAbsorptions[i];
-      a.t += dt;
-      if (a.t >= a.duration) {
-        // Hit the player! Spawn burst particles
-        for (let k = 0; k < 12; k++) {
-          const angle = Math.random() * Math.PI * 2;
-          const speed = 40 + Math.random() * 80;
-          this.roseParticles.push({
-            x: targetX,
-            y: targetY,
-            vx: Math.cos(angle) * speed,
-            vy: Math.sin(angle) * speed,
-            color: Math.random() > 0.5 ? "#ff3b50" : "#d6354a",
-            size: 4 + Math.random() * 5,
-            life: 0.6,
-            maxLife: 0.6,
-          });
-        }
-        this.roseAbsorptions.splice(i, 1);
-      }
-    }
-
+    // Update Rose arrival particles.
+    // Travel into the player is represented by the Rose petal entity itself.
+    // This burst starts only after the authoritative HEAL event arrives.
     // Update Rose particles
     for (let i = this.roseParticles.length - 1; i >= 0; i--) {
       const rp = this.roseParticles[i];
@@ -2057,7 +2215,7 @@ export class GameClient {
     let dy = 0;
     const uiBusy = this.drag !== null || this.bagAnim > 0.4 || this.craftAnim > 0.4 || this.chat.inputActive;
 
-    if (this.isMobile && this.mobileJoystick.active) {
+    if (!uiBusy && this.isMobile && this.mobileJoystick.active) {
       // Joystick overrides mouse movement on phone
       const jdx = this.mobileJoystick.currX - this.mobileJoystick.centerX;
       const jdy = this.mobileJoystick.currY - this.mobileJoystick.centerY;
@@ -2113,14 +2271,21 @@ export class GameClient {
   }
 
   private bagPanelRect(): Rect {
-    // Mobile: almost full width for easier touch
     const isMobileLayout = this.isMobile || this.w < 640;
-    const w = isMobileLayout ? Math.min(440, this.w * 0.96) : Math.min(400, this.w * 0.92);
-    const hotbarH = this.hotbarHeight();
-    const maxH = this.h - hotbarH - (isMobileLayout ? 40 : 130);
-    const h = Math.min(isMobileLayout ? this.h * 0.86 : 560, Math.max(320, maxH));
+    const shortMobile = isMobileLayout && this.h <= 600;
+    const w = isMobileLayout
+      ? Math.min(shortMobile ? 520 : 440, this.w - 16)
+      : Math.min(400, this.w * 0.92);
+    // Phone panels are modal and cover the HUD, so they can use the short
+    // screen's full height instead of reserving another hotbar-sized strip.
+    const reservedHotbar = this.scene === "game" && !isMobileLayout ? this.hotbarHeight() : 0;
+    const topGap = shortMobile ? 8 : 18;
+    const bottomGap = shortMobile ? 8 : 26;
+    const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
+    const idealH = shortMobile ? 390 : 560;
+    const h = Math.min(idealH, availableH);
     const hidden = this.h + 20;
-    const shown = this.h - hotbarH - h - (isMobileLayout ? 10 : 26);
+    const shown = topGap;
     const t = ease.outCubic(this.bagAnim);
     return { x: (this.w - w) / 2, y: hidden + (shown - hidden) * t, w, h };
   }
@@ -2128,27 +2293,29 @@ export class GameClient {
   /** Geometry for the scrollable item grid + header widgets inside the bag panel. */
   private bagLayout() {
     const p = this.bagPanelRect();
-    const cols = 5;
-    const gap = 10;
-    const pad = 15;
-    const slotSize = Math.floor((p.w - pad * 2 - gap * (cols - 1)) / cols);
+    const compact = (this.isMobile || this.w < 640) && this.h <= 600;
+    const cols = compact && p.w >= 480 ? 6 : 5;
+    const gap = compact ? 6 : 10;
+    const pad = compact ? 10 : 15;
+    const slotSize = Math.max(28, Math.floor((p.w - pad * 2 - gap * (cols - 1)) / cols));
     const itemHeight = slotSize + gap;
-    const headerH = 44;
+    const headerH = compact ? 34 : 44;
     const barY = p.y + headerH;
-    const barH = 28;
-    const dropW = Math.min(120, p.w * 0.3);
+    const barH = compact ? 24 : 28;
+    const dropW = Math.min(compact ? 100 : 120, p.w * 0.3);
     const barGap = 6;
     const barW = p.w - dropW - barGap - pad * 2;
     const barX = p.x + pad;
     const dropX = barX + barW + barGap;
-    const statsH = 92;
-    const gridTop = barY + barH + 12;
+    const statsH = compact ? 72 : 92;
+    const gridTop = barY + barH + (compact ? 8 : 12);
     const gridBottom = p.y + p.h - statsH - 6;
-    const gridH = Math.max(itemHeight, gridBottom - gridTop);
+    const gridH = Math.max(1, gridBottom - gridTop);
     const maxVisibleRows = Math.max(1, Math.floor(gridH / itemHeight));
     const scrollTrack: Rect = { x: p.x + p.w - pad + 2, y: gridTop, w: 6, h: gridH };
     return {
       panel: p,
+      compact,
       cols,
       gap,
       pad,
@@ -2238,23 +2405,24 @@ export class GameClient {
   }
 
   private craftPanelRect(): Rect {
-    // WIDER panel as requested — 760px ideal, responsive down to 92% of screen
-    // On mobile, use almost full width and slide from bottom instead of side for better touch
     const isMobileLayout = this.isMobile || this.w < 640;
-    const idealW = isMobileLayout ? this.w * 0.96 : 780;
-    const w = Math.min(idealW, Math.floor(this.w * (isMobileLayout ? 0.96 : 0.92)));
-    const hotbarH = this.hotbarHeight();
-    const maxH = this.h - hotbarH - (isMobileLayout ? 12 : 40);
-    const h = Math.min(isMobileLayout ? this.h * 0.88 : 620, Math.max(560, maxH, this.h - 40));
+    const shortMobile = isMobileLayout && this.h <= 600;
+    const w = isMobileLayout
+      ? Math.min(this.w - 16, 840)
+      : Math.min(780, Math.floor(this.w * 0.92));
+    const reservedHotbar = this.scene === "game" && !isMobileLayout ? this.hotbarHeight() : 0;
+    const topGap = shortMobile ? 8 : 12;
+    const bottomGap = shortMobile ? 8 : 18;
+    const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
+    const h = Math.min(shortMobile ? 420 : 620, availableH);
     const t = ease.outCubic(this.craftAnim);
     if (isMobileLayout) {
       const hidden = this.h + 20;
-      const shown = this.h - hotbarH - h - 10;
-      return { x: (this.w - w) / 2, y: hidden + (shown - hidden) * t, w, h };
+      return { x: (this.w - w) / 2, y: hidden + (topGap - hidden) * t, w, h };
     }
     const hidden = this.w + 20;
     const shown = this.w - w - 16;
-    return { x: hidden + (shown - hidden) * t, y: Math.max(12, this.h - hotbarH - h - 18), w, h };
+    return { x: hidden + (shown - hidden) * t, y: topGap, w, h };
   }
 
   /**
@@ -2266,20 +2434,27 @@ export class GameClient {
    */
   private craftLayout() {
     const p = this.craftPanelRect();
-    const pad = 14;
-    const headerH = 42;
-    const tabsH = 32;
-    const barH = 26;
+    const compact = (this.isMobile || this.w < 640) && this.h <= 600;
+    const pad = compact ? 10 : 14;
+    const headerH = compact ? 32 : 42;
+    const tabsH = compact ? 28 : 32;
+    const barH = compact ? 22 : 26;
 
-    // Craft log and compact mode selectors share the top row.
-    const logRect: Rect = { x: p.x + pad, y: p.y + 10, w: 150, h: 82 };
-    const tabsY = p.y + 10;
+    // On a short landscape screen every vertical region scales down together:
+    // animation, filters, status, and the scrollable item matrix all remain
+    // inside the panel rather than relying on a desktop minimum height.
+    const logRect: Rect = {
+      x: p.x + pad,
+      y: p.y + (compact ? 7 : 10),
+      w: compact ? Math.min(120, p.w * 0.18) : 150,
+      h: compact ? 70 : 82,
+    };
+    const tabsY = p.y + (compact ? 7 : 10);
 
-    // CraftAnimation geometry: radius 80 and slot size 70.
-    const bigSize = 70;
-    const radius = 80;
-    const cx = p.x + p.w * 0.38;
-    const cy = p.y + 148;
+    const bigSize = compact ? Math.max(34, Math.min(44, p.h * 0.13)) : 70;
+    const radius = compact ? Math.max(38, Math.min(48, p.h * 0.14)) : 80;
+    const cx = p.x + p.w * (compact ? 0.36 : 0.38);
+    const cy = p.y + (compact ? Math.max(82, Math.min(112, p.h * 0.29)) : 148);
 
     const bigSlots: Rect[] = [];
     for (let i = 0; i < CRAFT_CARD_COUNT; i++) {
@@ -2290,41 +2465,41 @@ export class GameClient {
     }
     const singleSlot: Rect = { x: cx - bigSize / 2, y: cy - bigSize / 2, w: bigSize, h: bigSize };
 
-    const resultSize = 88;
+    const resultSize = compact ? Math.min(66, bigSize * 1.45) : 88;
     const resultRect: Rect = { x: cx - resultSize / 2, y: cy - resultSize / 2, w: resultSize, h: resultSize };
 
-    // Pin the action to the right edge, centered beside the pentagon.
-    const actionW = 110;
-    const actionH = 36;
-    const actionRect: Rect = { x: p.x + p.w - 124, y: cy - actionH / 2, w: actionW, h: actionH };
-    const closeRect: Rect = { x: p.x + p.w - 34, y: p.y + 10, w: 24, h: 24 };
+    const actionW = compact ? 88 : 110;
+    const actionH = compact ? 32 : 36;
+    const actionRect: Rect = { x: p.x + p.w - actionW - 14, y: cy - actionH / 2, w: actionW, h: actionH };
+    const closeRect: Rect = { x: p.x + p.w - 34, y: p.y + (compact ? 7 : 10), w: 24, h: 24 };
 
-    const craftBottom = cy + radius + bigSize / 2 + 24;
-
-    // Filters are directly above the prompt and matrix: biome first, search second.
-    const barGap = 8;
-    const dropW = 110;
-    const barW = Math.min(210, p.w * 0.34);
+    const craftBottom = cy + radius + bigSize / 2 + (compact ? 8 : 24);
+    const barGap = compact ? 5 : 8;
+    const dropW = compact ? Math.min(92, p.w * 0.2) : 110;
+    const barW = compact ? Math.min(170, p.w * 0.3) : Math.min(210, p.w * 0.34);
     const dropX = p.x + pad;
-    const barY = craftBottom + 4;
+    const barY = craftBottom + (compact ? 2 : 4);
     const barX = dropX + dropW + barGap;
-    const infoY = barY + barH + 10;
-    const gridTop = infoY + 38;
-    const gridBottom = p.y + p.h - 10;
+    const infoY = barY + barH + (compact ? 6 : 10);
+    const gridTop = infoY + (compact ? 32 : 38);
+    const gridBottom = p.y + p.h - (compact ? 7 : 10);
 
-    // Matrix columns map directly to rarity indexes; rows map to item types.
-    const slotSizeSmall = 40;
-    const gapSmall = 6;
-    const itemHeightSmall = slotSizeSmall + gapSmall;
     const cols = RARITIES.length;
+    const gapSmall = compact ? 3 : 6;
+    const maxGridWidth = p.w - pad * 2 - 18;
+    const widthLimitedSlot = Math.floor((maxGridWidth - gapSmall * (cols - 1)) / cols);
+    const availableGridH = Math.max(1, gridBottom - gridTop);
+    const slotSizeSmall = Math.max(18, Math.min(compact ? 32 : 40, widthLimitedSlot, availableGridH));
+    const itemHeightSmall = slotSizeSmall + gapSmall;
     const totalGridWidth = cols * (slotSizeSmall + gapSmall) - gapSmall;
     const gridStartX = p.x + p.w / 2 - totalGridWidth / 2;
-    const gridH = Math.max(itemHeightSmall, gridBottom - gridTop);
+    const gridH = availableGridH;
     const maxVisibleRows = Math.max(1, Math.floor(gridH / itemHeightSmall));
-    const scrollTrack: Rect = { x: gridStartX + totalGridWidth + 10, y: gridTop, w: 6, h: gridH };
+    const scrollTrack: Rect = { x: gridStartX + totalGridWidth + (compact ? 5 : 10), y: gridTop, w: 6, h: gridH };
 
     return {
       panel: p,
+      compact,
       cols,
       gap: gapSmall,
       pad,
@@ -2749,9 +2924,21 @@ export class GameClient {
 
   private hudButtons(): { id: string; rect: Rect; label: string; color: string }[] {
     const isMobileLayout = this.isMobile || this.w < 640;
+    const isLandscapePhone = isMobileLayout && this.w > this.h && this.h <= 600;
     const bw = isMobileLayout ? Math.min(100, this.w * 0.22) : Math.min(120, this.w / 8);
     const bh = isMobileLayout ? 44 : 38;
     const invLabel = isMobileLayout ? "Bag" : "Inventory";
+    if (isLandscapePhone) {
+      const compactW = Math.min(76, (this.w * 0.42 - 12) / 3);
+      const compactH = 34;
+      const gap = 6;
+      const y = 82;
+      return [
+        { id: "bag", rect: { x: 12, y, w: compactW, h: compactH }, label: invLabel, color: "#3d8bd6" },
+        { id: "craft", rect: { x: 12 + compactW + gap, y, w: compactW, h: compactH }, label: "Craft", color: "#c9762b" },
+        { id: "menu", rect: { x: 12 + (compactW + gap) * 2, y, w: compactW, h: compactH }, label: "Menu", color: "#8a4d4d" },
+      ];
+    }
     if (isMobileLayout) {
       return [
         { id: "bag", rect: { x: 16, y: this.hudButtonRowY(0), w: bw, h: bh }, label: invLabel, color: "#3d8bd6" },
@@ -2771,21 +2958,63 @@ export class GameClient {
 
   private mapButtons(): { id: number; rect: Rect }[] {
     const isMobileLayout = this.isMobile || this.w < 640;
-    const bw = isMobileLayout ? 78 : 92;
-    const bh = isMobileLayout ? 36 : 38;
-    const x = this.w - (bw + 8) * MAPS.length - 16;
-    
-    // On mobile, position them in the bottom-right corner above the action buttons to avoid overlap.
+    const isLandscapePhone = isMobileLayout && this.w > this.h && this.h <= 600;
+    const bw = isLandscapePhone ? 62 : isMobileLayout ? 78 : 92;
+    const bh = isLandscapePhone ? 34 : isMobileLayout ? 36 : 38;
+    const buttonGap = isLandscapePhone ? 5 : 8;
+    const totalW = MAPS.length * bw + (MAPS.length - 1) * buttonGap;
+    const x = this.w - totalW - 12;
+
+    // Landscape phones put both navigation groups on one compact row beneath
+    // the status cards. Action controls remain lower down at the screen edges.
     const btnSize = Math.min(70, Math.max(54, this.w * 0.15));
     const gap = 12;
-    const baseY = isMobileLayout 
-      ? (this.h - this.hotbarHeight() - btnSize * 2 - gap - 22 - bh - 12) 
-      : this.hudButtonRowY(0);
-      
-    return MAPS.map((m, idx) => ({ id: m.id, rect: { x: x + idx * (bw + 8), y: baseY, w: bw, h: bh } }));
+    const baseY = isLandscapePhone
+      ? 82
+      : isMobileLayout
+        ? (this.h - this.hotbarHeight() - btnSize * 2 - gap - 22 - bh - 12)
+        : this.hudButtonRowY(0);
+
+    return MAPS.map((m, idx) => ({ id: m.id, rect: { x: x + idx * (bw + buttonGap), y: baseY, w: bw, h: bh } }));
   }
 
   // ---------------------------------------------------------------- events
+  private sendNeutralInput() {
+    if (!this.net || !this.connected || this.scene !== "game") return;
+    const w = new Writer(4);
+    w.u8(C2S.INPUT).i8(0).i8(0).u8(0);
+    this.net.send(w.bytes());
+  }
+
+  /** Stop stale movement immediately when the browser backgrounds this tab. */
+  private releaseGameplayInput(send = true) {
+    this.keys.clear();
+    this.mouseDown = false;
+    this.rightDown = false;
+    this.mobileSpreadActive = false;
+    this.mobileContractActive = false;
+    this.mobileJoystick.active = false;
+    this.mobileJoystick.pointerId = null;
+    this.mobileJoystick.currX = this.mobileJoystick.centerX;
+    this.mobileJoystick.currY = this.mobileJoystick.centerY;
+    if (send) this.sendNeutralInput();
+  }
+
+  private onWindowBlur = () => {
+    this.releaseGameplayInput(true);
+  };
+
+  private onVisibilityChange = () => {
+    if (document.hidden) {
+      this.releaseGameplayInput(true);
+      return;
+    }
+    // requestAnimationFrame pauses in a hidden tab. Do not feed that elapsed
+    // wall-clock gap into camera/UI animation when it resumes.
+    this.last = performance.now();
+    this.inputTimer = 0;
+  };
+
   private onContext = (e: Event) => e.preventDefault();
 
   private onKeyDown = (e: KeyboardEvent) => {
@@ -2934,7 +3163,7 @@ export class GameClient {
         this.tryEnterFullscreen();
         return;
       }
-      if (this.scene === "game") {
+      if (this.scene === "game" && this.bagAnim < 0.2 && this.craftAnim < 0.2) {
         if (this.mobileSpreadRect && hit(this.mobileSpreadRect, p.x, p.y)) {
           this.mobileSpreadActive = true;
           this.lastTouchTime = performance.now();
@@ -4108,7 +4337,9 @@ export class GameClient {
   }
 
   private bonusModalRect(): Rect {
-    return { x: this.w / 2 - 175, y: this.h / 2 - 145, w: 350, h: 290 };
+    const w = Math.min(350, this.w - 24);
+    const h = Math.min(290, this.h - 24);
+    return { x: (this.w - w) / 2, y: (this.h - h) / 2, w, h };
   }
 
   private renderBonusModal() {
@@ -4208,10 +4439,8 @@ export class GameClient {
       else if (e.kind === ENT.PLAYER) this.drawPlayerEnt(e);
     }
 
-    const mePlayerRender = this.ents.get(this.selfId);
-    const targetXRender = mePlayerRender ? mePlayerRender.x : this.camX;
-    const targetYRender = mePlayerRender ? mePlayerRender.y : this.camY;
-
+    // Draw the burst produced when a Rose reaches the flower.
+    // The moving Rose is the normal ENT.PETAL drawn above.
     // Draw Rose particles
     for (const rp of this.roseParticles) {
       ctx.save();
@@ -4220,46 +4449,6 @@ export class GameClient {
       ctx.beginPath();
       ctx.arc(rp.x, rp.y, rp.size, 0, Math.PI * 2);
       ctx.fill();
-      ctx.restore();
-    }
-
-    // Draw Rose absorptions
-    for (const a of this.roseAbsorptions) {
-      const p = a.t / a.duration;
-      // Linear interpolation
-      const lx = a.sx + (targetXRender - a.sx) * p;
-      const ly = a.sy + (targetYRender - a.sy) * p;
-      // Add a nice organic swaying wave offset
-      const wave = Math.sin(p * Math.PI) * 45;
-      const angle = Math.atan2(targetYRender - a.sy, targetXRender - a.sx) + Math.PI / 2;
-      const rx = lx + Math.cos(angle) * wave;
-      const ry = ly + Math.sin(angle) * wave;
-
-      // Draw trailing small red circles (particles trail)
-      for (let k = 0; k < 5; k++) {
-        const trailP = Math.max(0, p - k * 0.05);
-        if (trailP > 0) {
-          const tlx = a.sx + (targetXRender - a.sx) * trailP;
-          const tly = a.sy + (targetYRender - a.sy) * trailP;
-          const twave = Math.sin(trailP * Math.PI) * 45;
-          const tangle = Math.atan2(targetYRender - a.sy, targetXRender - a.sx) + Math.PI / 2;
-          const trx = tlx + Math.cos(tangle) * twave;
-          const try_ = tly + Math.sin(tangle) * twave;
-          ctx.save();
-          ctx.globalAlpha = (1 - trailP) * 0.6;
-          ctx.fillStyle = "#ff6578";
-          ctx.beginPath();
-          ctx.arc(trx, try_, 6 * (1 - trailP), 0, Math.PI * 2);
-          ctx.fill();
-          ctx.restore();
-        }
-      }
-
-      ctx.save();
-      // Draw the rotating Rose item icon
-      const size = 18 * (1 - p * 0.5);
-      const rotation = this.time * 6 + a.sx; // unique rotation
-      drawItemIcon(ctx, 30, rx, ry, size, rotation, a.rarity);
       ctx.restore();
     }
 
@@ -5091,15 +5280,17 @@ export class GameClient {
 
   private renderHud() {
     const ctx = this.ctx;
+    const shortMobile = this.isMobile && this.w > this.h && this.h <= 600;
     // xp / level bar
-    const barW = Math.min(340, this.w * 0.32);
-    panel(ctx, { x: 16, y: 16, w: barW, h: 66 }, "rgba(18,24,32,0.75)");
+    const barW = shortMobile ? Math.min(238, this.w * 0.38) : Math.min(340, this.w * 0.32);
+    const statusH = shortMobile ? 54 : 66;
+    panel(ctx, { x: 16, y: 16, w: barW, h: statusH }, "rgba(18,24,32,0.75)");
     const need = xpForLevel(this.level + 1);
     const prev = xpForLevel(this.level);
     const pct = Math.max(0, Math.min(1, (this.xp - prev) / Math.max(1, need - prev)));
-    text(ctx, `Lv ${this.level} ${this.playerName}`, 30, 36, 16, "#ffe763", "left");
-    healthBar(ctx, 30, 50, barW - 28, 14, pct, "#ffd34a");
-    text(ctx, `${this.xp} XP`, 30 + (barW - 28) / 2, 57, 11, "#3a2b00");
+    text(ctx, `Lv ${this.level} ${this.playerName}`, 30, shortMobile ? 32 : 36, shortMobile ? 14 : 16, "#ffe763", "left");
+    healthBar(ctx, 30, shortMobile ? 43 : 50, barW - 28, shortMobile ? 12 : 14, pct, "#ffd34a");
+    text(ctx, `${this.xp} XP`, 30 + (barW - 28) / 2, shortMobile ? 49 : 57, shortMobile ? 9 : 11, "#3a2b00");
 
     // health — sits just above the dual-row hotbar
     const hpW = Math.min(300, this.w * 0.28);
@@ -5108,14 +5299,14 @@ export class GameClient {
     text(ctx, `${Math.max(0, Math.round(this.hp))} / ${this.maxHp}`, this.w / 2, hpY + 9, 12, "#ffffff");
 
     // buttons
-    for (const b of this.hudButtons()) button(ctx, b.rect, b.label, b.color, hit(b.rect, this.mx, this.my), 16);
+    for (const b of this.hudButtons()) button(ctx, b.rect, b.label, b.color, hit(b.rect, this.mx, this.my), shortMobile ? 13 : 16);
     for (const b of this.mapButtons()) {
       const active = b.id === this.mapId;
-      button(ctx, b.rect, MAPS[b.id].name, active ? "#3fae60" : "#41505f", hit(b.rect, this.mx, this.my), 15);
+      button(ctx, b.rect, MAPS[b.id].name, active ? "#3fae60" : "#41505f", hit(b.rect, this.mx, this.my), shortMobile ? 11 : 15);
     }
 
     // minimap
-    const mm = 132;
+    const mm = shortMobile ? 82 : 132;
     const mx = this.w - mm - 16;
     const my = 16;
     panel(ctx, { x: mx, y: my, w: mm, h: mm }, "rgba(10,16,22,0.72)");
@@ -5135,8 +5326,8 @@ export class GameClient {
     ctx.restore();
     text(ctx, MAPS[this.mapId]?.name ?? "", mx + mm / 2, my + mm - 10, 12, "rgba(255,255,255,0.85)");
 
-    // kill feed
-    this.killFeed.forEach((k, i) => {
+    // kill feed (hidden on short phones where it would cover action buttons)
+    if (!shortMobile) this.killFeed.forEach((k, i) => {
       ctx.save();
       ctx.globalAlpha = Math.min(1, k.life);
       text(ctx, k.msg, this.w - 16, my + mm + 24 + i * 20, 14, "#d9ffd9", "right");
@@ -5147,7 +5338,7 @@ export class GameClient {
     this.quickSlot.draw(ctx);
 
     // Mobile controls: joystick + Spread (Space) / Contract (Shift) buttons
-    if (this.isMobile && this.mobileControlsVisible) {
+    if (this.isMobile && this.mobileControlsVisible && this.bagAnim < 0.2 && this.craftAnim < 0.2) {
       // Joystick base
       const joy = this.mobileJoystick;
       ctx.save();
@@ -5192,7 +5383,7 @@ export class GameClient {
     }
 
     // Mobile hint: show controls help if mobile
-    if (this.isMobile && this.scene === "game" && this.w > 0) {
+    if (this.isMobile && !shortMobile && this.scene === "game" && this.w > 0) {
       const hintY = 90;
       ctx.save();
       ctx.globalAlpha = 0.85;
@@ -5219,7 +5410,7 @@ export class GameClient {
     ctx.strokeStyle = "#3f7dc2";
     ctx.stroke();
 
-    text(ctx, "Inventory", p.x + p.w / 2, p.y + 24, 20, "#ffffff");
+    text(ctx, "Inventory", p.x + p.w / 2, p.y + (layout.compact ? 18 : 24), layout.compact ? 17 : 20, "#ffffff");
 
     // close button
     button(ctx, layout.closeRect, "x", "#e53232", hit(layout.closeRect, this.mx, this.my), 15);
@@ -5308,7 +5499,7 @@ export class GameClient {
 
     const stats = this.bagRarityStats();
     const total = stats.reduce((sum, s) => sum + s.count, 0);
-    text(ctx, `Summary: ${this.formatBagNumber(total)}`, panelX + 12, panelY + 16, 12, "#ffffff", "left");
+    text(ctx, `Summary: ${this.formatBagNumber(total)}`, panelX + 12, panelY + (layout.compact ? 12 : 16), layout.compact ? 10 : 12, "#ffffff", "left");
 
     const visible = stats.filter((s) => s.count > 0).reverse();
     if (visible.length === 0) {
@@ -5317,21 +5508,23 @@ export class GameClient {
       return;
     }
 
-    const cols = 3;
+    const cols = layout.compact ? 4 : 3;
     const colWidth = (panelW - 16) / cols;
-    const rowHeight = 18;
+    const rowHeight = layout.compact ? 14 : 18;
     const startX = panelX + 10;
-    const startY = panelY + 40;
+    const startY = panelY + (layout.compact ? 30 : 40);
+    const fontSize = layout.compact ? 9 : 10;
     visible.forEach((s, i) => {
       const col = i % cols;
       const row = Math.floor(i / cols);
       const x = startX + col * colWidth;
       const y = startY + row * rowHeight;
-      const label = s.name.length > 10 ? s.name.slice(0, 4) + ".." : s.name;
-      text(ctx, label, x, y, 10, "#ffffff", "left");
-      ctx.font = "10px sans-serif";
+      const maxName = layout.compact ? 5 : 10;
+      const label = s.name.length > maxName ? s.name.slice(0, layout.compact ? 3 : 4) + ".." : s.name;
+      text(ctx, label, x, y, fontSize, "#ffffff", "left");
+      ctx.font = `${fontSize}px sans-serif`;
       const tw = ctx.measureText(label).width;
-      text(ctx, this.formatBagNumber(s.count), x + tw + 6, y, 10, s.color, "left");
+      text(ctx, this.formatBagNumber(s.count), x + tw + 4, y, fontSize, s.color, "left");
     });
     ctx.restore();
   }
@@ -5343,42 +5536,7 @@ export class GameClient {
   }
 
   private tooltip(cell: Cell, x: number, y: number) {
-    const ctx = this.ctx;
-    const def = ITEMS[cell.item];
-    const mult = RARITIES[cell.rarity].mult;
-
-    // Stat lines are collected first so the panel can size itself to fit.
-    const lines: { label: string; color: string }[] = [];
-    if (def.kind === "petal") {
-      lines.push({ label: `Damage ${(def.damage * mult).toFixed(0)}`, color: "#ffffff" });
-      lines.push({ label: `Health ${(def.health * mult).toFixed(0)}`, color: "#ffffff" });
-      if (def.heal) lines.push({ label: `Heal ${(def.heal * mult).toFixed(1)}/s`, color: "#8fffa8" });
-      if (def.speed) lines.push({ label: `Speed +${def.speed}%`, color: "#8fd8ff" });
-      lines.push({ label: `Reload ${def.reload.toFixed(1)}s`, color: "#ffd54a" });
-    } else if (def.kind === "summon") {
-      const count = getSummonCount(def.id);
-      const petRarity = def.noDowngrade ? cell.rarity : mapRarityToSummonRarity(cell.rarity);
-      const petName = MOBS[def.petMob ?? 0].name;
-      lines.push({
-        label: `Summons ${count > 1 ? `${count}x ` : ""}${RARITIES[petRarity].name} ${petName}`,
-        color: "#8fffa8",
-      });
-      lines.push({ label: `Health ${(def.health * mult).toFixed(0)}`, color: "#ffffff" });
-      lines.push({ label: `Reload ${def.reload.toFixed(1)}s per summon`, color: "#ffd54a" });
-    } else {
-      lines.push({ label: "Trade fodder — no combat use", color: "#ffd54a" });
-    }
-
-    const w = 216;
-    const lineH = 18;
-    const h = 52 + lines.length * lineH + 26;
-    const px = Math.min(x, this.w - w - 8);
-    const py = Math.max(8, Math.min(y - h, this.h - h - 8));
-    panel(ctx, { x: px, y: py, w, h }, "rgba(12,18,26,0.95)");
-    text(ctx, def.name, px + 12, py + 20, 17, RARITIES[cell.rarity].color, "left");
-    text(ctx, RARITIES[cell.rarity].name, px + 12, py + 40, 13, RARITIES[cell.rarity].color, "left");
-    lines.forEach((l, i) => text(ctx, l.label, px + 12, py + 62 + i * lineH, 13, l.color, "left"));
-    text(ctx, def.desc, px + 12, py + h - 10, 12, "rgba(255,255,255,0.7)", "left");
+    TooltipSystem.drawItemTooltip(this.ctx, cell, x, y, this.w, this.h);
   }
 
   /**
@@ -5482,7 +5640,7 @@ export class GameClient {
     ctx.strokeStyle = "rgba(255,255,255,0.12)";
     ctx.lineWidth = 1;
     ctx.stroke();
-    text(ctx, "Craft Log", r.x + 8, r.y + 12, 11, "#ffffff", "left");
+    text(ctx, "Craft Log", r.x + 8, r.y + (layout.compact ? 10 : 12), layout.compact ? 9 : 11, "#ffffff", "left");
     const logs = [
       { t: `Used: ${this.craftLogPetals}`, c: "#00E5FF" },
       { t: `Crafted: ${this.craftLogCrafted}`, c: "#FF5555" },
@@ -5491,7 +5649,7 @@ export class GameClient {
       { t: `${this.craftLogLast.slice(0, 18)}`, c: "#7db3ff" },
     ];
     logs.forEach((log, i) => {
-      text(ctx, log.t, r.x + 8, r.y + 26 + i * 12, 10, log.c, "left");
+      text(ctx, log.t, r.x + 8, r.y + (layout.compact ? 21 : 26) + i * (layout.compact ? 10 : 12), layout.compact ? 8 : 10, log.c, "left");
     });
     ctx.restore();
   }
@@ -5621,7 +5779,8 @@ export class GameClient {
     // Color-coded rarity headings make each matrix column easy to scan.
     for (let col = 0; col < layout.cols; col++) {
       const x = layout.gridStartX + col * (layout.slotSize + layout.gap) + layout.slotSize / 2;
-      text(ctx, RARITIES[col]?.name ?? "", x, layout.gridTop - 10, 9, RARITIES[col]?.color ?? "rgba(255,255,255,0.6)");
+      const rarityName = RARITIES[col]?.name ?? "";
+      text(ctx, layout.compact ? rarityName.slice(0, 3) : rarityName, x, layout.gridTop - (layout.compact ? 7 : 10), layout.compact ? 7 : 9, RARITIES[col]?.color ?? "rgba(255,255,255,0.6)");
     }
 
     if (rows.length === 0) {
@@ -5650,8 +5809,10 @@ export class GameClient {
     const submitting = this.craftPhase === "rotating" || this.craftPhase === "waiting";
     const spin = this.craftSpin > 0 ? ease.inOutCubic(1 - this.craftSpin / 0.8) * Math.PI * 2 : 0;
 
-    text(ctx, "Combine cards to upgrade rarity", p.x + p.w * 0.38, (layout as any).craftBottom - 46, 11, "rgba(255,255,255,0.85)");
-    text(ctx, "Click: load 5 cards · Shift+click: load all (unlimited)", p.x + p.w * 0.38, (layout as any).craftBottom - 34, 9, "rgba(255,255,255,0.55)");
+    if (!layout.compact) {
+      text(ctx, "Combine cards to upgrade rarity", p.x + p.w * 0.38, layout.craftBottom - 46, 11, "rgba(255,255,255,0.85)");
+      text(ctx, "Click: load 5 cards · Shift+click: load all (unlimited)", p.x + p.w * 0.38, layout.craftBottom - 34, 9, "rgba(255,255,255,0.55)");
+    }
 
     // Draw animated slots (pentagon with rotation/contraction)
     layout.bigSlots.forEach((baseRect, i) => {
