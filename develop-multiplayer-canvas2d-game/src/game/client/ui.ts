@@ -708,9 +708,10 @@ export function drawItemIcon(
     case 39: { // Magnet — a two-tone horseshoe magnet (red pole / blue pole)
       // Authored on a 300×300 canvas around (cx, cy) = (150, 115). The drawn
       // shape spans x 89..211 and y 54..186, so its bounding box is centered on
-      // (150, 120) and measures 122×132. Scaling by size/82 keeps the icon's
-      // footprint in line with the other petals, and the translate below moves
-      // that bounding-box center onto the icon origin.
+      // (150, 120) and measures 122×132. Scaling by size/66 makes the magnet
+      // read at a full `size` half-height, matching round petals like Pearl
+      // instead of sitting noticeably small, and the translate below moves that
+      // bounding-box center onto the icon origin.
       const cx = 150;
       const cy = 115;
       const radius = 45;
@@ -718,7 +719,7 @@ export function drawItemIcon(
       const thickness = 32;
 
       ctx.save();
-      ctx.scale(size / 82, size / 82);
+      ctx.scale(size / 66, size / 66);
       ctx.translate(-cx, -120);
 
       ctx.lineWidth = thickness;

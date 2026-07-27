@@ -1940,7 +1940,9 @@ export class GameServer {
       const dist = Math.hypot(d.x - p.x, d.y - p.y);
       // Magnet attraction: pull drops toward the player within magnet range.
       if (magnetRange > 0 && dist < magnetRange && dist > 46) {
-        const pull = Math.min(1, 8 / dist) * 60;
+        // Pull speed doubled (60 -> 120). Clamped to the remaining gap so the
+        // faster step can never overshoot the player and jitter the card.
+        const pull = Math.min(Math.min(1, 8 / dist) * 120, dist - 46);
         d.x += ((p.x - d.x) / dist) * pull;
         d.y += ((p.y - d.y) / dist) * pull;
       }
