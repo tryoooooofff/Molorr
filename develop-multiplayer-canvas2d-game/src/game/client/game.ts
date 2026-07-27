@@ -1430,6 +1430,7 @@ export class GameClient {
   // player state
   private hp = 100;
   private maxHp = 100;
+  private shield = 0;
   private xp = 0;
   private level = 1;
   private alive = true;
@@ -1981,6 +1982,7 @@ export class GameClient {
         const now = Date.now();
         this.nextOracleAt = oracleSecLeft > 0 ? now + oracleSecLeft * 1000 : 0;
         this.nextTradeAt = tradeSecLeft > 0 ? now + tradeSecLeft * 1000 : 0;
+        if (r.remaining >= 2) this.shield = r.u16();
         break;
       }
       case S2C.EVENT: {
@@ -5321,6 +5323,17 @@ export class GameClient {
     const hpW = Math.min(300, this.w * 0.28);
     const hpY = this.h - this.hotbarHeight() - 26;
     healthBar(ctx, this.w / 2 - hpW / 2, hpY, hpW, 18, this.hp / Math.max(1, this.maxHp), "#57e36a");
+    // Shield bar: white bar centered within the health bar (max shield = maxHp).
+    if (this.shield > 0) {
+      const shieldPct = Math.min(1, this.shield / Math.max(1, this.maxHp));
+      const shieldW = (hpW - 4) * shieldPct;
+      const shieldX = this.w / 2 - shieldW / 2;
+      ctx.save();
+      roundRect(ctx, shieldX, hpY + 6, shieldW, 6, 3);
+      ctx.fillStyle = "rgba(255,255,255,0.85)";
+      ctx.fill();
+      ctx.restore();
+    }
     text(ctx, `${Math.max(0, Math.round(this.hp))} / ${this.maxHp}`, this.w / 2, hpY + 9, 12, "#ffffff");
 
     // buttons
