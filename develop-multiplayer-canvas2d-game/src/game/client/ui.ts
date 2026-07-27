@@ -624,8 +624,10 @@ export function drawItemIcon(
       ctx.restore();
       break;
     }
-    case 38: { // Shell — a small fan-shaped seashell icon
-      const k = size / 55;
+    case 38: { // Shell — a fan-shaped seashell icon
+      // Enlarged ~25% (was size / 55) so the shell reads as big as round
+      // petals like Pearl instead of sitting noticeably small.
+      const k = size / 44;
       ctx.save();
       ctx.scale(k, k);
       ctx.translate(0, 12);
@@ -716,7 +718,9 @@ export function drawItemIcon(
       const cy = 115;
       const radius = 45;
       const legLength = 10;
-      const thickness = 32;
+      // Thicker bars (was 32) per request — the horseshoe reads chunkier
+      // while the pole gap stays clearly open.
+      const thickness = 42;
 
       ctx.save();
       ctx.scale(size / 66, size / 66);
