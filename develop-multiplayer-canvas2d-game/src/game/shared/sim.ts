@@ -281,12 +281,28 @@ function clamp(v: number, a: number, b: number) {
   return v < a ? a : v > b ? b : v;
 }
 
-function collideWalls(walls: Wall[], x: number, y: number, r: number): [number, number] {
+/**
+ * Mutable counter threaded through the collision helpers below so
+ * `GameServer` can report a live "collision checks per tick" debug metric
+ * without every call site needing to know about it individually.
+ */
+export interface CollisionCounter {
+  n: number;
+}
+
+function collideWalls(
+  walls: Wall[],
+  x: number,
+  y: number,
+  r: number,
+  counter?: CollisionCounter,
+): [number, number] {
   // Repeat a few times because being pushed out of one rectangle can put the
   // circle into a neighbouring rectangle at corners.
   for (let pass = 0; pass < 3; pass++) {
     let moved = false;
     for (const w of walls) {
+      if (counter) counter.n++;
       const cx = clamp(x, w.x, w.x + w.w);
       const cy = clamp(y, w.y, w.y + w.h);
       const dx = x - cx;
@@ -331,6 +347,7 @@ function moveCircleWithWalls(
   dx: number,
   dy: number,
   r: number,
+  counter?: CollisionCounter,
 ): [number, number] {
   const distance = Math.hypot(dx, dy);
   const maxStep = Math.max(4, r * 0.45);
@@ -340,7 +357,7 @@ function moveCircleWithWalls(
   for (let i = 0; i < steps; i++) {
     x += stepX;
     y += stepY;
-    [x, y] = collideWalls(walls, x, y, r);
+    [x, y] = collideWalls(walls, x, y, r, counter);
   }
   return [x, y];
 }
@@ -357,6 +374,13 @@ export class GameServer {
   private mobCapScale: number;
   /** All active squads, keyed by their 6-character code. */
   private squads = new Map<string, Squad>();
+  /**
+   * Wall/circle collision tests performed during the most recently completed
+   * tick. Exposed for the client's debug overlay (`collisionChecks()`); reset
+   * at the start of every `tick()` so it always reflects one tick's worth of
+   * work rather than accumulating forever.
+   */
+  private collisionCounter: CollisionCounter = { n: 0 };
 
   constructor(options: GameServerOptions = {}) {
     this.mobCapScale =
@@ -370,6 +394,23 @@ export class GameServer {
     let count = 0;
     for (const c of this.clients.values()) if (c.player) count++;
     return count;
+  }
+
+  /** Total entities (players + mobs + petals + drops) currently simulated across every map. */
+  entityCount(): number {
+    let count = 0;
+    for (const c of this.clients.values()) {
+      if (!c.player) continue;
+      count++;
+      for (const st of c.player.petals) if (st && st.alive) count++;
+    }
+    for (const w of this.worlds) count += w.mobs.length + w.drops.length;
+    return count;
+  }
+
+  /** Wall/circle collision checks performed during the last completed tick. */
+  collisionChecks(): number {
+    return this.collisionCounter.n;
   }
 
   private mobCapForMap(mapId: number) {
@@ -1360,6 +1401,7 @@ export class GameServer {
   // ------------------------------------------------------------------ tick
   tick(dt: number) {
     this.tickCount++;
+    this.collisionCounter = { n: 0 };
     this.updateAfk(dt);
     const players: Player[] = [];
     for (const c of this.clients.values()) if (c.player) players.push(c.player);
@@ -1371,7 +1413,7 @@ export class GameServer {
     for (const p of players) {
       if (!p.alive) continue;
       const map = MAPS[p.mapId];
-      [p.x, p.y] = collideWalls(map.walls, p.x, p.y, PLAYER_RADIUS);
+      [p.x, p.y] = collideWalls(map.walls, p.x, p.y, PLAYER_RADIUS, this.collisionCounter);
       p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
       p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
     }
@@ -1408,6 +1450,7 @@ export class GameServer {
       p.vx * dt,
       p.vy * dt,
       PLAYER_RADIUS,
+      this.collisionCounter,
     );
     p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
     p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
@@ -1415,6 +1458,7 @@ export class GameServer {
     // player vs player soft collision
     for (const o of players) {
       if (o === p || o.mapId !== p.mapId || !o.alive) continue;
+      this.collisionCounter.n++;
       const dx = p.x - o.x;
       const dy = p.y - o.y;
       const d = Math.hypot(dx, dy);
@@ -1427,7 +1471,7 @@ export class GameServer {
 
     // Soft player collision above can push a flower into a nearby wall. Repair
     // that displacement before this authoritative position is broadcast.
-    [p.x, p.y] = collideWalls(map.walls, p.x, p.y, PLAYER_RADIUS);
+    [p.x, p.y] = collideWalls(map.walls, p.x, p.y, PLAYER_RADIUS, this.collisionCounter);
     p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
     p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
 
@@ -1566,6 +1610,7 @@ export class GameServer {
       let totalIncoming = 0;
       for (const mob of world.mobs) {
         if (mob.friendly) continue;
+        this.collisionCounter.n++;
         const d = Math.hypot(mob.x - st.x, mob.y - st.y);
         if (d >= mob.radius + pr) continue;
         totalIncoming += mob.damage * 0.5;
@@ -1767,13 +1812,14 @@ export class GameServer {
       mob.y += mob.vy * dt;
       mob.x = clamp(mob.x, mob.radius, map.width - mob.radius);
       mob.y = clamp(mob.y, mob.radius, map.height - mob.radius);
-      const [cx, cy] = collideWalls(map.walls, mob.x, mob.y, mob.radius);
+      const [cx, cy] = collideWalls(map.walls, mob.x, mob.y, mob.radius, this.collisionCounter);
       mob.x = cx;
       mob.y = cy;
 
       // mob vs mob collision box
       for (const other of world.mobs) {
         if (other === mob) continue;
+        this.collisionCounter.n++;
         const dx = mob.x - other.x;
         const dy = mob.y - other.y;
         const d = Math.hypot(dx, dy);
@@ -1805,6 +1851,7 @@ export class GameServer {
       // hostile mob vs players
       if (!mob.friendly) {
         for (const p of here) {
+          this.collisionCounter.n++;
           const d = Math.hypot(p.x - mob.x, p.y - mob.y);
           if (d < mob.radius + PLAYER_RADIUS) {
             const push = (mob.radius + PLAYER_RADIUS - d) * 0.5;
@@ -2249,6 +2296,14 @@ export class GameServer {
         .u32(tradeSecLeft)
         .u16(Math.max(0, Math.round(p.shield)));
       c.send(sw.bytes());
+    }
+    // Debug-overlay telemetry (collision checks + live entity count). Sent
+    // roughly once a second (every 20 ticks @ 20 TPS) — a diagnostic number,
+    // not something that needs the full 20 Hz snapshot cadence.
+    if (this.tickCount % 20 === 0) {
+      const dw = new Writer(8);
+      dw.u8(S2C.DEBUG).u32(this.collisionCounter.n).u16(Math.min(65535, this.entityCount()));
+      c.send(dw.bytes());
     }
     for (const e of c.events) c.send(e);
     c.events.length = 0;

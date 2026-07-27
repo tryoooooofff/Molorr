@@ -578,6 +578,26 @@ export function drawItemIcon(
       ctx.stroke();
       break;
     }
+    case 19: { // Honey — a flat-topped hexagon (honeycomb cell)
+      const radius = size;
+      const sides = 6;
+      ctx.beginPath();
+      for (let i = 0; i < sides; i++) {
+        const a = (i * 2 * Math.PI) / sides - Math.PI / 2;
+        const px = radius * Math.cos(a);
+        const py = radius * Math.sin(a);
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.fillStyle = "#FFD700";
+      ctx.fill();
+      ctx.strokeStyle = "#B9A000";
+      ctx.lineWidth = Math.max(2, size * 0.2);
+      ctx.lineJoin = "round";
+      ctx.stroke();
+      break;
+    }
     case 21: { // Starfish — a rounded coral triangle with three pale dots
       const cT = (
         p1: { x: number; y: number },
@@ -671,40 +691,34 @@ export function drawItemIcon(
       ctx.restore();
       break;
     }
-    case 41: { // Cactus — a round, ribbed green pad studded with spines
-      const R = size * 0.95;
+    case 41: { // Cactus — a scalloped flower-like pad (outer tips + concave waists)
+      // Ported from a fixed-pixel reference (outerRadius 52 / innerRadius 40 /
+      // 8 points on a 100x80 canvas) but scaled by `size` so it matches every
+      // icon context (hotbar, bag, card, drag) like the rest of drawItemIcon.
+      const outerRadius = size;
+      const innerRadius = size * (40 / 52);
+      const points = 8;
+      const angleStep = (Math.PI * 2) / points;
       ctx.beginPath();
-      ctx.arc(0, 0, R, 0, Math.PI * 2);
-      ctx.fillStyle = "#4caf50";
-      ctx.fill();
-      ctx.lineWidth = Math.max(2, size * 0.18);
-      ctx.strokeStyle = "#357a38";
+      const startX = outerRadius * Math.cos(-Math.PI / 2);
+      const startY = outerRadius * Math.sin(-Math.PI / 2);
+      ctx.moveTo(startX, startY);
+      for (let i = 0; i < points; i++) {
+        const nextOuterAngle = (i + 1) * angleStep - Math.PI / 2;
+        const innerAngle = i * angleStep + angleStep / 2 - Math.PI / 2;
+        const cpX = innerRadius * Math.cos(innerAngle);
+        const cpY = innerRadius * Math.sin(innerAngle);
+        const nextX = outerRadius * Math.cos(nextOuterAngle);
+        const nextY = outerRadius * Math.sin(nextOuterAngle);
+        ctx.quadraticCurveTo(cpX, cpY, nextX, nextY);
+      }
+      ctx.closePath();
+      ctx.fillStyle = "#5CAE53";
+      ctx.strokeStyle = "#2D6B33";
+      ctx.lineWidth = Math.max(2, size * 0.15);
+      ctx.lineJoin = "round";
       ctx.stroke();
-      // Vertical ribs.
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(0, 0, R, 0, Math.PI * 2);
-      ctx.clip();
-      ctx.strokeStyle = "#3d9142";
-      ctx.lineWidth = Math.max(1, size * 0.1);
-      for (const rx of [-0.45, 0, 0.45]) {
-        ctx.beginPath();
-        ctx.moveTo(R * rx, -R);
-        ctx.lineTo(R * rx, R);
-        ctx.stroke();
-      }
-      ctx.restore();
-      // Radiating spines.
-      ctx.strokeStyle = "#e8f0d8";
-      ctx.lineWidth = Math.max(1, size * 0.09);
-      ctx.lineCap = "round";
-      for (let i = 0; i < 8; i++) {
-        const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
-        ctx.beginPath();
-        ctx.moveTo(Math.cos(a) * R * 0.72, Math.sin(a) * R * 0.72);
-        ctx.lineTo(Math.cos(a) * R * 1.22, Math.sin(a) * R * 1.22);
-        ctx.stroke();
-      }
+      ctx.fill();
       break;
     }
     case 39: { // Magnet — a two-tone horseshoe magnet (red pole / blue pole)

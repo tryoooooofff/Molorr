@@ -163,6 +163,12 @@ function emptyCells(n: number): (Cell | null)[] {
   return new Array(n).fill(null);
 }
 
+/** Formats a byte count for the debug overlay's throughput readout (e.g. "1.2 KB", "980 B"). */
+function formatDebugBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  return `${(n / 1024).toFixed(1)} KB`;
+}
+
 function generateWallData(worldW: number, worldH: number, walls: {x: number, y: number, w: number, h: number}[]) {
   const size = Math.round(worldW / 64);
   const cellW = worldW / size;
@@ -209,6 +215,8 @@ class SettingsSystem {
     showProjectileHitbox: boolean = false;
     showAdvancedDPS: boolean = false;
     showMovementHelper: boolean = true;  // 移动指示器
+    /** Debug overlay (ping, throughput, object count, FPS, collision checks) in the bottom-right corner. */
+    showDebugInfo: boolean = false;
     maxMagicAnts: number = 20;
     maxParticles: number = 200;
     performanceMode: string = "auto";
@@ -400,6 +408,7 @@ class SettingsSystem {
                 this.photoHardware = data.photoHardware || false;
                 this.lowQualityWall = data.lowQualityWall !== undefined ? data.lowQualityWall : false;
                 this.showMovementHelper = data.showMovementHelper !== undefined ? data.showMovementHelper : true;
+                this.showDebugInfo = data.showDebugInfo !== undefined ? data.showDebugInfo : false;
             }
         } catch(e) {}
         this._forceRedraw();
@@ -424,7 +433,8 @@ class SettingsSystem {
                 photoHardware: this.photoHardware,
                 lowQualityWall: this.lowQualityWall,
                 performanceMode: this.performanceMode,
-                showMovementHelper: this.showMovementHelper
+                showMovementHelper: this.showMovementHelper,
+                showDebugInfo: this.showDebugInfo
             }));
         } catch(e) {}
         this._forceRedraw();
@@ -590,10 +600,10 @@ class SettingsSystem {
         const items = ['showHitbox', 'showRarity', 'showDamageNumbers', 'showParticles',
                        'showEnhancedHealthBar', 'showEnemyPanel', 'showFPS',
                        'showProjectileHitbox', 'showAdvancedDPS', 'photoHardware',
-                       'showMovementHelper','lowQualityWall'];
+                       'showMovementHelper','lowQualityWall','showDebugInfo'];
         const labels = ['Show Hitbox', 'Show Rarity', 'Show Damage', 'Show Particles',
                         'Health Bar', 'Enemy Panel', 'Show FPS', 'Show Projectile Hitbox',
-                        'Show Advanced DPS', 'Potato Hardware', 'Movement Helper','Low Quality Wall'];
+                        'Show Advanced DPS', 'Potato Hardware', 'Movement Helper','Low Quality Wall','Debug Info'];
 
         items.forEach((item, i) => {
             const itemY = curY + i * 32;
@@ -849,7 +859,7 @@ class SettingsSystem {
         const items = ['showHitbox', 'showRarity', 'showDamageNumbers', 'showParticles',
                        'showEnhancedHealthBar', 'showEnemyPanel', 'showFPS',
                        'showProjectileHitbox', 'showAdvancedDPS', 'photoHardware',
-                       'showMovementHelper','lowQualityWall'];
+                       'showMovementHelper','lowQualityWall','showDebugInfo'];
 
         for (let i = 0; i < items.length; i++) {
             const itemY = checkYStart + i * itemH - this.scrollOffset;
@@ -1421,6 +1431,26 @@ export class GameClient {
   private selfId = 0;
   private inputTimer = 0;
 
+  // ---- Debug overlay (Settings → Debug Info) ----
+  /** Smoothed frames-per-second, recomputed once a second from real (unclamped) frame deltas. */
+  private debugFps = 0;
+  private debugFpsAccum = 0;
+  private debugFpsFrames = 0;
+  /** Round-trip time to the server in milliseconds, measured via C2S.PING / S2C.PONG. */
+  private debugPingMs = 0;
+  private debugPingTimer = 0;
+  private debugPingStamp = 0;
+  /** Bytes sent/received since the last throughput sample, and the latest per-second rate. */
+  private debugBytesInWindow = 0;
+  private debugBytesOutWindow = 0;
+  private debugThroughputInWindow = 0;
+  private debugThroughputOutWindow = 0;
+  private debugThroughputTimer = 0;
+  /** Wall/circle collision checks the server performed on its most recent tick. */
+  private debugCollisionChecks = 0;
+  /** Total simulated entities (players + mobs + petals + drops), server-wide. */
+  private debugEntityCount = 0;
+
   // Packet-loss / stall handling
   /**
    * Seconds since the last SNAPSHOT arrived. While this exceeds
@@ -1889,6 +1919,14 @@ export class GameClient {
     this.roseParticles.length = 0;
     const net = createTransport();
     this.net = net;
+    // Wrap `send` once here so every outbound packet is counted for the
+    // debug-overlay throughput readout, regardless of which call site sent
+    // it — cheaper than threading a counter through every send() call.
+    const rawSend = net.send.bind(net);
+    net.send = (data: Uint8Array) => {
+      this.debugBytesOutWindow += data.byteLength;
+      rawSend(data);
+    };
     this.afkPending = false;
     this.afkSecondsLeft = 0;
     this.afkSmoothSeconds = 0;
@@ -1911,6 +1949,26 @@ export class GameClient {
       }
     };
     net.onMessage = (data) => this.handlePacket(data);
+  }
+
+  /** Sends a ping timestamp; the reply latency drives the debug overlay's ping readout. */
+  private sendPing() {
+    if (!this.net || !this.connected) return;
+    this.debugPingStamp = Date.now() >>> 0;
+    const w = new Writer(5);
+    w.u8(C2S.PING).u32(this.debugPingStamp);
+    this.net.send(w.bytes());
+  }
+
+  /** Rolls the byte counters into a per-second rate once a second has elapsed. */
+  private updateDebugThroughput(dt: number) {
+    this.debugThroughputTimer += dt;
+    if (this.debugThroughputTimer < 1) return;
+    this.debugThroughputTimer = 0;
+    this.debugThroughputInWindow = this.debugBytesInWindow;
+    this.debugThroughputOutWindow = this.debugBytesOutWindow;
+    this.debugBytesInWindow = 0;
+    this.debugBytesOutWindow = 0;
   }
 
   private sendJoin() {
@@ -1951,6 +2009,7 @@ export class GameClient {
   }
 
   private handlePacket(data: Uint8Array) {
+    this.debugBytesInWindow += data.byteLength;
     const r = new Reader(data);
     const type = r.u8();
     switch (type) {
@@ -2107,6 +2166,19 @@ export class GameClient {
         }
         break;
       }
+      case S2C.PONG: {
+        const stamp = r.u32();
+        // Guards against a stray/late reply from before a reconnect throwing
+        // off the reading with a huge or negative delta.
+        const rtt = (Date.now() >>> 0) - stamp;
+        if (rtt >= 0 && rtt < 60000) this.debugPingMs = rtt;
+        break;
+      }
+      case S2C.DEBUG: {
+        this.debugCollisionChecks = r.u32();
+        this.debugEntityCount = r.u16();
+        break;
+      }
       default:
         break;
     }
@@ -2230,12 +2302,26 @@ export class GameClient {
   // ------------------------------------------------------------- main loop
   private loop = (now: number) => {
     this.raf = requestAnimationFrame(this.loop);
-    const dt = Math.min(0.05, (now - this.last) / 1000);
+    const rawDt = (now - this.last) / 1000;
+    const dt = Math.min(0.05, rawDt);
     this.last = now;
     this.time += dt;
+    this.updateDebugFps(rawDt);
     this.update(dt);
     this.render(dt);
   };
+
+  /** Recomputes `debugFps` once a second from real (unclamped) frame deltas. */
+  private updateDebugFps(rawDt: number) {
+    if (rawDt <= 0 || rawDt > 2) return; // ignore the first frame / tab-hidden gaps
+    this.debugFpsFrames++;
+    this.debugFpsAccum += rawDt;
+    if (this.debugFpsAccum >= 1) {
+      this.debugFps = this.debugFpsFrames / this.debugFpsAccum;
+      this.debugFpsFrames = 0;
+      this.debugFpsAccum = 0;
+    }
+  }
 
   private update(dt: number) {
     // scene fade
@@ -2350,6 +2436,16 @@ export class GameClient {
           this.persist();
         }
       }
+      // Debug overlay: only ping the server while the panel is actually
+      // shown, so leaving it off costs nothing on the wire.
+      if (this.settings.showDebugInfo && this.connected) {
+        this.debugPingTimer -= dt;
+        if (this.debugPingTimer <= 0) {
+          this.debugPingTimer = 1;
+          this.sendPing();
+        }
+      }
+      this.updateDebugThroughput(dt);
     }
   }
 
@@ -4274,6 +4370,44 @@ export class GameClient {
       }
       ctx.restore();
     }
+
+    // Debug overlay always renders last (over menu/game/loading fade) and in
+    // both scenes, so toggling it never depends on being in a match.
+    if (this.settings.showDebugInfo) this.renderDebugOverlay(ctx);
+  }
+
+  /**
+   * Bottom-right debug panel: ping, throughput, live object count, FPS and
+   * the collision-check count the server performed on its last tick. Purely
+   * a diagnostic HUD — toggled from Settings → Debug Info.
+   */
+  private renderDebugOverlay(ctx: CanvasRenderingContext2D) {
+    const lines: string[] = [
+      `FPS: ${this.debugFps >= 1 ? Math.round(this.debugFps) : "--"}`,
+      `Ping: ${this.connected ? (this.debugPingMs > 0 ? `${this.debugPingMs} ms` : "..." ) : "--"}`,
+      `Throughput: ↓${formatDebugBytes(this.debugThroughputInWindow)}/s ↑${formatDebugBytes(this.debugThroughputOutWindow)}/s`,
+      `Objects: ${this.connected ? this.debugEntityCount : this.ents.size}`,
+      `Collision checks: ${this.connected ? this.debugCollisionChecks : "--"}`,
+    ];
+
+    const fontSize = 12;
+    const lineH = 16;
+    const padX = 10;
+    const padY = 8;
+    ctx.save();
+    ctx.font = `900 ${fontSize}px "Trebuchet MS", "Segoe UI", sans-serif`;
+    let maxW = 0;
+    for (const line of lines) maxW = Math.max(maxW, ctx.measureText(line).width);
+    ctx.restore();
+
+    const w = maxW + padX * 2;
+    const h = lines.length * lineH + padY * 2 - 4;
+    const x = this.w - w - 12;
+    const y = this.h - h - 12;
+    panel(ctx, { x, y, w, h }, "rgba(10,16,22,0.78)");
+    lines.forEach((line, i) => {
+      text(ctx, line, x + padX, y + padY + i * lineH + lineH / 2, fontSize, "rgba(255,255,255,0.92)", "left");
+    });
   }
 
   private renderMenu(dt: number) {
