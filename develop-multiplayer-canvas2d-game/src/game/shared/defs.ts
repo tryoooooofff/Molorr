@@ -1089,6 +1089,19 @@ const RARITY_DROP_RATES: Record<string, Record<string, number>> = {
 };
 
 /**
+ * The non-zero card-rarity probabilities for a mob rarity tier. This is
+ * exposed for read-only UI such as the Mob Gallery; combat still uses
+ * `getDropRarityByItem` below to roll the actual card rarity.
+ */
+export function dropRarityChancesForMob(mobRarity: number): { rarity: string; chance: number }[] {
+  const rarityName = RARITIES[Math.max(0, Math.min(MAX_RARITY, mobRarity | 0))]?.name ?? "Common";
+  const base = RARITY_DROP_RATES[rarityName] ?? RARITY_DROP_RATES.Common;
+  return RARITY_ORDER
+    .map((rarity) => ({ rarity, chance: Math.max(0, base[rarity] ?? 0) }))
+    .filter((entry) => entry.chance > 0);
+}
+
+/**
  * Pick the rarity of a single drop from the mob's rarity row.
  *
  * This intentionally follows `RARITY_DROP_RATES` directly:
