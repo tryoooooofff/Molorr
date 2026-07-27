@@ -255,7 +255,7 @@ export const ITEMS: ItemDef[] = [
   { id: 19, name: "Honey", kind: "petal", color: "#e89a18", outline: "#9a5e08", shape: "circle", radius: 8, damage: 5, health: 14, reload: 1.0, heal: 3.0, dropFactor: 0.7, desc: "Sticky, sweet, and soothing." },
   { id: 20, name: "Bee Egg", kind: "summon", color: "#fff0a8", outline: "#b59a1e", shape: "egg", radius: 10, damage: 5, health: 22, reload: 3.4, petMob: 1, dropFactor: 0.55, desc: "Hatches a buzzing bee." },
   // ── Starfish drops ──────────────────────────────────────────────────────
-  { id: 21, name: "Starfish", kind: "petal", color: "#f2799e", outline: "#bc4c72", shape: "star", radius: 10, damage: 11, health: 15, reload: 1.2, dropFactor: 0.65, desc: "A star from the seafloor." },
+  { id: 21, name: "Starfish", kind: "petal", color: "#f2799e", outline: "#bc4c72", shape: "star", radius: 10, damage: 11, health: 15, reload: 1.2, heal: 3.5, dropFactor: 0.65, desc: "A star from the seafloor. Heals you slowly over time." },
   { id: 22, name: "Salt", kind: "petal", color: "#ffffff", outline: "#c4c4c4", shape: "circle", radius: 7, damage: 10, health: 9, reload: 1.0, dropFactor: 0.6, desc: "Crystalline sea salt." },
   { id: 23, name: "Starfish Egg", kind: "summon", color: "#f8b6c8", outline: "#bc4c72", shape: "egg", radius: 10, damage: 4, health: 24, reload: 3.6, petMob: 9, dropFactor: 0.55, desc: "Hatches a starfish." },
   // ── Jellyfish drops ─────────────────────────────────────────────────────
@@ -267,7 +267,7 @@ export const ITEMS: ItemDef[] = [
   { id: 28, name: "Powder", kind: "petal", color: "#e6dcc4", outline: "#a89c80", shape: "circle", radius: 7, damage: 9, health: 11, reload: 1.0, dropFactor: 0.65, desc: "A puff of fine powder." },
   { id: 29, name: "Crab Egg", kind: "summon", color: "#f5a06b", outline: "#b2541f", shape: "egg", radius: 10, damage: 6, health: 26, reload: 3.8, petMob: 8, dropFactor: 0.55, desc: "Hatches a crab." },
   // ── Ladybug drops ───────────────────────────────────────────────────────
-  { id: 30, name: "Rose", kind: "petal", color: "#d6354a", outline: "#8a1f2c", shape: "circle", radius: 8, damage: 9, health: 12, reload: 1.1, dropFactor: 0.7, desc: "A perfect red rose." },
+  { id: 30, name: "Rose", kind: "petal", color: "#d6354a", outline: "#8a1f2c", shape: "circle", radius: 8, damage: 9, health: 12, reload: 1.1, heal: 3.0, dropFactor: 0.7, desc: "A perfect red rose. Heals you slowly over time." },
   { id: 31, name: "Light", kind: "petal", color: "#fff3a8", outline: "#c79a1e", shape: "circle", radius: 8, damage: 6, health: 10, reload: 1.0, dropFactor: 0.85, desc: "A warm mote of light." },
   // Ladybug Egg = id 8 (defined above in the starting kit slot).
   // ── Sandstorm drops (desert) ─────────────────────────────────────────────

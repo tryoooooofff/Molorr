@@ -1211,6 +1211,27 @@ export class GameClient {
   private chat = new ChatSystem();
   private squadCode = "";
 
+  // Rose absorption animations & particles
+  private roseAbsorptions: Array<{
+    sx: number;
+    sy: number;
+    x: number;
+    y: number;
+    t: number;
+    duration: number;
+    rarity: number;
+  }> = [];
+  private roseParticles: Array<{
+    x: number;
+    y: number;
+    vx: number;
+    vy: number;
+    color: string;
+    size: number;
+    life: number;
+    maxLife: number;
+  }> = [];
+
   // net
   private net: Transport | null = null;
   private connected = false;
@@ -1626,6 +1647,8 @@ export class GameClient {
   private connect() {
     this.net?.close();
     this.ents.clear();
+    this.roseAbsorptions.length = 0;
+    this.roseParticles.length = 0;
     const net = createTransport();
     this.net = net;
     net.onOpen = () => {
@@ -1690,6 +1713,8 @@ export class GameClient {
           this.walls.push({ x: r.u16(), y: r.u16(), w: r.u16(), h: r.u16() });
         }
         this.ents.clear();
+        this.roseAbsorptions.length = 0;
+        this.roseParticles.length = 0;
         this.mapFlash = 1;
         this.chat.addMessage("Welcome! Press [Enter] to chat. Commands: /claim, /create_public_squad, /create_private_squad, /join_squad <CODE>, /leave_squad, /find_public_squad", "System", true);
         break;
@@ -1833,6 +1858,17 @@ export class GameClient {
           color: RARITIES[rarity].color,
           life: 1.6,
           vy: -22,        });
+        if (item === 30) { // Rose
+          this.roseAbsorptions.push({
+            sx: x,
+            sy: y,
+            x: x,
+            y: y,
+            t: 0,
+            duration: 0.8,
+            rarity: rarity,
+          });
+        }
         break;
       case EVT.HIT:
         this.floaters.push({ x, y, msg: `-${value}`, color: "#ff6f6f", life: 0.9, vy: -40 });
@@ -1928,6 +1964,47 @@ export class GameClient {
     // Keep the complete CraftAnimation port alive even while the panel is sliding.
     // This drives pentagon contraction, fill cards, delayed results, and particles.
     this.craftUpdate(dt);
+
+    const mePlayer = this.ents.get(this.selfId);
+    const targetX = mePlayer ? mePlayer.x : this.camX;
+    const targetY = mePlayer ? mePlayer.y : this.camY;
+
+    // Update Rose absorptions
+    for (let i = this.roseAbsorptions.length - 1; i >= 0; i--) {
+      const a = this.roseAbsorptions[i];
+      a.t += dt;
+      if (a.t >= a.duration) {
+        // Hit the player! Spawn burst particles
+        for (let k = 0; k < 12; k++) {
+          const angle = Math.random() * Math.PI * 2;
+          const speed = 40 + Math.random() * 80;
+          this.roseParticles.push({
+            x: targetX,
+            y: targetY,
+            vx: Math.cos(angle) * speed,
+            vy: Math.sin(angle) * speed,
+            color: Math.random() > 0.5 ? "#ff3b50" : "#d6354a",
+            size: 4 + Math.random() * 5,
+            life: 0.6,
+            maxLife: 0.6,
+          });
+        }
+        this.roseAbsorptions.splice(i, 1);
+      }
+    }
+
+    // Update Rose particles
+    for (let i = this.roseParticles.length - 1; i >= 0; i--) {
+      const rp = this.roseParticles[i];
+      rp.life -= dt;
+      rp.x += rp.vx * dt;
+      rp.y += rp.vy * dt;
+      rp.vx *= 0.92;
+      rp.vy *= 0.92;
+      if (rp.life <= 0) {
+        this.roseParticles.splice(i, 1);
+      }
+    }
 
     for (const e of this.ents.values()) {
       const k = Math.min(1, dt * 16);
@@ -2659,11 +2736,15 @@ export class GameClient {
    * The HUD button stacks sit directly above the dual-row quick-slot bar, so
    * they follow it instead of using fixed offsets from the bottom edge.
    */
-  private hudButtonRowY(row: 0 | 1): number {
+  private hudButtonRowY(row: number): number {
     const isMobileLayout = this.isMobile || this.w < 640;
     const mobileOffset = isMobileLayout ? 130 : 0; // lift above joystick
     const bottom = this.h - this.hotbarHeight() - 34 - mobileOffset;
-    return bottom - (1 - row) * 46 - 38;
+    if (isMobileLayout) {
+      return bottom - (2 - row) * 46 - 38;
+    } else {
+      return bottom - (1 - row) * 46 - 38;
+    }
   }
 
   private hudButtons(): { id: string; rect: Rect; label: string; color: string }[] {
@@ -2671,23 +2752,36 @@ export class GameClient {
     const bw = isMobileLayout ? Math.min(100, this.w * 0.22) : Math.min(120, this.w / 8);
     const bh = isMobileLayout ? 44 : 38;
     const invLabel = isMobileLayout ? "Bag" : "Inventory";
-    return [
-      { id: "bag", rect: { x: 16, y: this.hudButtonRowY(0), w: bw, h: bh }, label: invLabel, color: "#3d8bd6" },
-      { id: "craft", rect: { x: 16, y: this.hudButtonRowY(1), w: bw, h: bh }, label: "Craft", color: "#c9762b" },
-      // Settings is a main-menu-only panel: it is deliberately absent from the
-      // in-game HUD (neither the button nor the panel is drawn while playing).
-      { id: "menu", rect: { x: this.w - (isMobileLayout ? 88 : 108), y: this.hudButtonRowY(1), w: isMobileLayout ? 72 : 92, h: bh }, label: "Menu", color: "#8a4d4d" },
-    ];
+    if (isMobileLayout) {
+      return [
+        { id: "bag", rect: { x: 16, y: this.hudButtonRowY(0), w: bw, h: bh }, label: invLabel, color: "#3d8bd6" },
+        { id: "craft", rect: { x: 16, y: this.hudButtonRowY(1), w: bw, h: bh }, label: "Craft", color: "#c9762b" },
+        { id: "menu", rect: { x: 16, y: this.hudButtonRowY(2), w: bw, h: bh }, label: "Menu", color: "#8a4d4d" },
+      ];
+    } else {
+      return [
+        { id: "bag", rect: { x: 16, y: this.hudButtonRowY(0), w: bw, h: bh }, label: invLabel, color: "#3d8bd6" },
+        { id: "craft", rect: { x: 16, y: this.hudButtonRowY(1), w: bw, h: bh }, label: "Craft", color: "#c9762b" },
+        // Settings is a main-menu-only panel: it is deliberately absent from the
+        // in-game HUD (neither the button nor the panel is drawn while playing).
+        { id: "menu", rect: { x: this.w - 108, y: this.hudButtonRowY(1), w: 92, h: bh }, label: "Menu", color: "#8a4d4d" },
+      ];
+    }
   }
 
   private mapButtons(): { id: number; rect: Rect }[] {
     const isMobileLayout = this.isMobile || this.w < 640;
     const bw = isMobileLayout ? 78 : 92;
     const bh = isMobileLayout ? 36 : 38;
-    // On mobile, show map buttons centered at top or just above hotbar but shifted right to avoid joystick overlap
-    const x = isMobileLayout ? this.w * 0.32 : this.w - (bw + 8) * MAPS.length - 8;
-    const baseY = this.hudButtonRowY(0);
-    // If mobile, put map buttons slightly lower than inventory to avoid overlap?
+    const x = this.w - (bw + 8) * MAPS.length - 16;
+    
+    // On mobile, position them in the bottom-right corner above the action buttons to avoid overlap.
+    const btnSize = Math.min(70, Math.max(54, this.w * 0.15));
+    const gap = 12;
+    const baseY = isMobileLayout 
+      ? (this.h - this.hotbarHeight() - btnSize * 2 - gap - 22 - bh - 12) 
+      : this.hudButtonRowY(0);
+      
     return MAPS.map((m, idx) => ({ id: m.id, rect: { x: x + idx * (bw + 8), y: baseY, w: bw, h: bh } }));
   }
 
@@ -2862,17 +2956,33 @@ export class GameClient {
           try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
           return;
         }
-        // Allow starting joystick from any left-bottom touch as fallback
-        if (p.x < this.w * 0.45 && p.y > this.h * 0.35) {
-          this.mobileJoystick.active = true;
-          this.mobileJoystick.pointerId = e.pointerId;
-          this.mobileJoystick.centerX = p.x;
-          this.mobileJoystick.centerY = p.y;
-          this.mobileJoystick.currX = p.x;
-          this.mobileJoystick.currY = p.y;
-          this.lastTouchTime = performance.now();
-          try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
-          return;
+        // Check if the touch hits any HUD button or Map button first!
+        let hitHud = false;
+        for (const b of this.hudButtons()) {
+          if (hit(b.rect, p.x, p.y)) {
+            hitHud = true;
+            break;
+          }
+        }
+        for (const b of this.mapButtons()) {
+          if (hit(b.rect, p.x, p.y)) {
+            hitHud = true;
+            break;
+          }
+        }
+        if (!hitHud) {
+          // Allow starting joystick from any left-bottom touch as fallback
+          if (p.x < this.w * 0.45 && p.y > this.h * 0.35) {
+            this.mobileJoystick.active = true;
+            this.mobileJoystick.pointerId = e.pointerId;
+            this.mobileJoystick.centerX = p.x;
+            this.mobileJoystick.centerY = p.y;
+            this.mobileJoystick.currX = p.x;
+            this.mobileJoystick.currY = p.y;
+            this.lastTouchTime = performance.now();
+            try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
+            return;
+          }
         }
       }
     }
@@ -3068,17 +3178,16 @@ export class GameClient {
   private menuLayout() {
     // Mobile responsive: single column on phone, 3 columns on desktop
     const isMobileLayout = this.isMobile || this.w < 640;
-    const COLS = isMobileLayout ? 1 : 3;
-    const BIOME_W = isMobileLayout ? Math.min(280, this.w * 0.82) : 180;
-    const BIOME_H = isMobileLayout ? 52 : 45;
-    const BIOME_GAP = isMobileLayout ? 12 : 15;
-    const gridYOffset = isMobileLayout ? 40 : 80;
+    const COLS = isMobileLayout ? 3 : 3;
+    const BIOME_W = isMobileLayout ? Math.min(105, (this.w - 32) / 3) : 180;
+    const BIOME_H = isMobileLayout ? 38 : 45;
+    const BIOME_GAP = isMobileLayout ? 6 : 15;
 
     const gridW = COLS * BIOME_W + (COLS - 1) * BIOME_GAP;
     const gridX = this.w / 2 - gridW / 2;
-    const gridY = this.h / 2 - gridYOffset;
+    const gridY = isMobileLayout ? (this.h * 0.35) : (this.h / 2 - 80);
 
-    return { gridX, gridY, gridW, BIOME_W, BIOME_H, BIOME_GAP };
+    return { gridX, gridY, gridW, BIOME_W, BIOME_H, BIOME_GAP, COLS };
   }
 
   /** Rects for biome buttons in grid layout */
@@ -3086,7 +3195,7 @@ export class GameClient {
     const layout = this.menuLayout();
     const buttons: Record<number, { x: number; y: number; w: number; h: number }> = {};
     
-    const COLS = 3;
+    const COLS = layout.COLS;
     const totalRows = Math.ceil(MAPS.length / COLS);
     
     MAPS.forEach((map, i) => {
@@ -3115,12 +3224,12 @@ export class GameClient {
 
     if (isMobileLayout) {
       // Phone: bottom horizontal bar with 4 buttons
-      const BTN_W = Math.min(78, (W - 40) / 4);
-      const BTN_H = 42;
-      const GAP = 8;
+      const BTN_W = Math.min(78, (W - 32) / 4);
+      const BTN_H = 36;
+      const GAP = 6;
       const totalW = BTN_W * 4 + GAP * 3;
       const startX = (W - totalW) / 2;
-      const y = H - BTN_H - 58; // above instructions
+      const y = H - BTN_H - 45; // above instructions
       buttons['left_inventory'] = { x: startX, y, w: BTN_W, h: BTN_H };
       buttons['left_craft'] = { x: startX + BTN_W + GAP, y, w: BTN_W, h: BTN_H };
       buttons['left_bonus'] = { x: startX + (BTN_W + GAP) * 2, y, w: BTN_W, h: BTN_H };
@@ -3196,11 +3305,11 @@ export class GameClient {
   private menuPlayButtonRect(): Rect | null {
     const layout = this.menuLayout();
     const isMobileLayout = this.isMobile || this.w < 640;
-    const cols = isMobileLayout ? 1 : 3;
+    const cols = layout.COLS;
     const totalRows = Math.ceil(MAPS.length / cols);
-    const playBtnY = layout.gridY + totalRows * (layout.BIOME_H + layout.BIOME_GAP) + 30;
-    const playBtnW = isMobileLayout ? Math.min(300, this.w * 0.86) : 180;
-    const playBtnH = isMobileLayout ? 60 : 52;
+    const playBtnY = layout.gridY + totalRows * (layout.BIOME_H + layout.BIOME_GAP) + (isMobileLayout ? 12 : 30);
+    const playBtnW = isMobileLayout ? Math.min(260, this.w * 0.8) : 180;
+    const playBtnH = isMobileLayout ? 48 : 52;
     return { x: this.w / 2 - playBtnW / 2, y: playBtnY, w: playBtnW, h: playBtnH };
   }
 
@@ -3800,9 +3909,10 @@ export class GameClient {
     };
     
     // ─── Title ───
-    const titleSize = Math.max(28, Math.min(60, W * 0.07));
+    const isMobileLayout = this.isMobile || W < 640;
+    const titleSize = isMobileLayout ? Math.max(26, Math.min(44, W * 0.12)) : Math.max(28, Math.min(60, W * 0.07));
     const bob = Math.sin(t * 1.6) * 6;
-    const titleY = Math.max(60, this.h * 0.12);
+    const titleY = isMobileLayout ? Math.max(35, this.h * 0.08) : Math.max(60, this.h * 0.12);
     
     ctx.font = `bold ${titleSize}px ${FONT_FAMILY}`;
     ctx.textAlign = 'center';
@@ -3815,10 +3925,10 @@ export class GameClient {
     
     // ─── Name Field (above biome buttons) ───
     const layout = this.menuLayout();
-    const nameFieldW = Math.min(300, W * 0.4);
-    const nameFieldH = 42;
+    const nameFieldW = isMobileLayout ? Math.min(260, W * 0.8) : Math.min(300, W * 0.4);
+    const nameFieldH = isMobileLayout ? 36 : 42;
     const nameFieldX = W / 2 - nameFieldW / 2;
-    const nameFieldY = layout.gridY - 70;
+    const nameFieldY = isMobileLayout ? (layout.gridY - 48) : (layout.gridY - 70);
     
     // Draw name field
     roundRect(ctx, nameFieldX, nameFieldY, nameFieldW, nameFieldH, 8);
@@ -3831,7 +3941,7 @@ export class GameClient {
     const caret = this.focus === 'name' && Math.floor(t * 2) % 2 === 0 ? '|' : '';
     const nameText = this.playerName || 'Flower name';
     const nameColor = this.playerName ? '#ffffff' : 'rgba(255,255,255,0.45)';
-    ctx.font = `18px ${FONT_FAMILY}`;
+    ctx.font = `${isMobileLayout ? 16 : 18}px ${FONT_FAMILY}`;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     ctx.strokeStyle = 'rgba(0,0,0,0.8)';
@@ -3862,7 +3972,7 @@ export class GameClient {
       const baseColor = isHovered ? this.BIOME_HOVER_COLORS[map.name] : this.BIOME_COLORS[map.name];
       
       drawBtn(rect, baseColor, isSelected);
-      drawBtnLabel(rect, map.name, 16);
+      drawBtnLabel(rect, map.name, isMobileLayout ? 13 : 16);
     }
     
     // ─── Play Button (below biome grid) ───
@@ -3872,7 +3982,7 @@ export class GameClient {
       const playColor: [number, number, number] = isPlayHovered ? [50, 190, 80] : [63, 174, 96];
       drawBtn(playBtnRect, playColor);
       
-      ctx.font = `bold 26px ${FONT_FAMILY}`;
+      ctx.font = `bold ${isMobileLayout ? 20 : 26}px ${FONT_FAMILY}`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.strokeStyle = 'rgba(0,0,0,0.8)';
@@ -3905,15 +4015,15 @@ export class GameClient {
       const color = isHov ? leftBtnHoverColors[key] : leftBtnColors[key];
       drawBtn(rect, color);
       
-      ctx.font = `bold 11px ${FONT_FAMILY}`;
+      ctx.font = `bold ${isMobileLayout ? 10 : 11}px ${FONT_FAMILY}`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.strokeStyle = 'rgba(0,0,0,0.8)';
       ctx.lineWidth = 2;
       ctx.lineJoin = 'round';
       const labels: Record<string, string> = { 
-        left_inventory: '[I]nventory', 
-        left_craft: '[C]raft', 
+        left_inventory: isMobileLayout ? 'Bag' : '[I]nventory', 
+        left_craft: isMobileLayout ? 'Craft' : '[C]raft', 
         left_bonus: 'Bonus',
         left_settings: 'Settings'
       };
@@ -3923,31 +4033,33 @@ export class GameClient {
     }
     
     // ─── Version text ───
-    ctx.font = `14px ${FONT_FAMILY}`;
+    ctx.font = `${isMobileLayout ? 11 : 14}px ${FONT_FAMILY}`;
     ctx.textAlign = 'right';
     ctx.textBaseline = 'alphabetic';
     ctx.strokeStyle = 'black';
     ctx.lineWidth = 3;
-    ctx.strokeText('v0.4.3', W - 10, H - 10);
+    ctx.strokeText('v0.4.3', W - 10, isMobileLayout ? H - 8 : H - 10);
     ctx.fillStyle = 'rgba(255,255,255,0.7)';
-    ctx.fillText('v0.4.3', W - 10, H - 10);
+    ctx.fillText('v0.4.3', W - 10, isMobileLayout ? H - 8 : H - 10);
     
     // ─── Instructions ───
     ctx.textAlign = 'center';
-    ctx.font = `14px ${FONT_FAMILY}`;
+    ctx.font = `${isMobileLayout ? 11 : 14}px ${FONT_FAMILY}`;
     ctx.strokeStyle = 'rgba(0,0,0,0.8)';
     ctx.lineWidth = 3;
     ctx.lineJoin = 'round';
     const instrText = 'Select a biome and press PLAY to enter the world';
-    ctx.strokeText(instrText, W / 2, H - 30);
+    const instrY = isMobileLayout ? H - 12 : H - 30;
+    ctx.strokeText(instrText, W / 2, instrY);
     ctx.fillStyle = 'rgba(255,255,255,0.8)';
-    ctx.fillText(instrText, W / 2, H - 30);
+    ctx.fillText(instrText, W / 2, instrY);
     
     // ─── Auth status ───
-    ctx.font = `13px ${FONT_FAMILY}`;
-    ctx.strokeText(this.authStatus, W / 2, H - 50);
+    ctx.font = `${isMobileLayout ? 11 : 13}px ${FONT_FAMILY}`;
+    const authY = isMobileLayout ? H - 26 : H - 50;
+    ctx.strokeText(this.authStatus, W / 2, authY);
     ctx.fillStyle = 'rgba(255,255,255,0.65)';
-    ctx.fillText(this.authStatus, W / 2, H - 50);
+    ctx.fillText(this.authStatus, W / 2, authY);
 
     // Craft / Inventory panels can be opened right from the main menu, reusing
     // the same in-game panel drawers.
@@ -4094,6 +4206,61 @@ export class GameClient {
       if (e.kind === ENT.PETAL) this.drawPetalEnt(e);
       else if (e.kind === ENT.MOB) this.drawMobEnt(e);
       else if (e.kind === ENT.PLAYER) this.drawPlayerEnt(e);
+    }
+
+    const mePlayerRender = this.ents.get(this.selfId);
+    const targetXRender = mePlayerRender ? mePlayerRender.x : this.camX;
+    const targetYRender = mePlayerRender ? mePlayerRender.y : this.camY;
+
+    // Draw Rose particles
+    for (const rp of this.roseParticles) {
+      ctx.save();
+      ctx.globalAlpha = rp.life / rp.maxLife;
+      ctx.fillStyle = rp.color;
+      ctx.beginPath();
+      ctx.arc(rp.x, rp.y, rp.size, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Draw Rose absorptions
+    for (const a of this.roseAbsorptions) {
+      const p = a.t / a.duration;
+      // Linear interpolation
+      const lx = a.sx + (targetXRender - a.sx) * p;
+      const ly = a.sy + (targetYRender - a.sy) * p;
+      // Add a nice organic swaying wave offset
+      const wave = Math.sin(p * Math.PI) * 45;
+      const angle = Math.atan2(targetYRender - a.sy, targetXRender - a.sx) + Math.PI / 2;
+      const rx = lx + Math.cos(angle) * wave;
+      const ry = ly + Math.sin(angle) * wave;
+
+      // Draw trailing small red circles (particles trail)
+      for (let k = 0; k < 5; k++) {
+        const trailP = Math.max(0, p - k * 0.05);
+        if (trailP > 0) {
+          const tlx = a.sx + (targetXRender - a.sx) * trailP;
+          const tly = a.sy + (targetYRender - a.sy) * trailP;
+          const twave = Math.sin(trailP * Math.PI) * 45;
+          const tangle = Math.atan2(targetYRender - a.sy, targetXRender - a.sx) + Math.PI / 2;
+          const trx = tlx + Math.cos(tangle) * twave;
+          const try_ = tly + Math.sin(tangle) * twave;
+          ctx.save();
+          ctx.globalAlpha = (1 - trailP) * 0.6;
+          ctx.fillStyle = "#ff6578";
+          ctx.beginPath();
+          ctx.arc(trx, try_, 6 * (1 - trailP), 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+      }
+
+      ctx.save();
+      // Draw the rotating Rose item icon
+      const size = 18 * (1 - p * 0.5);
+      const rotation = this.time * 6 + a.sx; // unique rotation
+      drawItemIcon(ctx, 30, rx, ry, size, rotation, a.rarity);
+      ctx.restore();
     }
 
     // floaters live in world space
