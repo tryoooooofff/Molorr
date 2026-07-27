@@ -20,6 +20,12 @@ export const C2S = {
   BONUS_STATUS: 11,
   /** Chat message or command (e.g. /claim, /create_public_squad). Payload: utf8 string. */
   CHAT: 12,
+  /**
+   * Player clicked the [AFK CHECK] button. Clears the pending check and resets
+   * the idle timer. Payload: none — the server only cares that it arrived, and
+   * it is deliberately NOT sent by ordinary input so a stuck key can't pass it.
+   */
+  AFK_ACK: 13,
 } as const;
 
 /** SWAP_ROW payload meaning "swap the entire row", not a single slot. */
@@ -36,6 +42,12 @@ export const S2C = {
   CHAT: 7,
   /** Squad state update (joined/created/left/auto-joined). */
   SQUAD_UPDATE: 8,
+  /**
+   * AFK check state. Payload: u8 active (1 while the button should be shown)
+   * followed by u16 secondsLeft until the kick. Sent once when the check opens,
+   * once per second while it counts down, and once with active=0 when cleared.
+   */
+  AFK_CHECK: 9,
 } as const;
 
 export const ENT = {

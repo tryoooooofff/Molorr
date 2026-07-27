@@ -6,6 +6,10 @@
  * drag & drop of item cards, panel/scene animations.
  */
 import {
+  AFK_CHECK_SECONDS,
+  AFK_CLOSE_CODE,
+  SNAPSHOT_STALL_SECONDS,
+  SNAPSHOT_STALL_NOTICE_SECONDS,
   BAG_COUNT,
   BAG_MAX,
   CRAFT_CARD_COUNT,
@@ -1417,6 +1421,30 @@ export class GameClient {
   private selfId = 0;
   private inputTimer = 0;
 
+  // Packet-loss / stall handling
+  /**
+   * Seconds since the last SNAPSHOT arrived. While this exceeds
+   * SNAPSHOT_STALL_SECONDS the client is missing packets, so it freezes the
+   * last known scene instead of letting entities expire and vanish.
+   */
+  private sinceSnapshot = 0;
+  /** True while the snapshot stream is considered stalled. */
+  private snapshotStalled = false;
+  /** Fades the "waiting for server" notice in after a longer stall. */
+  private stallNoticeAnim = 0;
+
+  // AFK check
+  /** True while the server wants the [AFK CHECK] button clicked. */
+  private afkPending = false;
+  /** Seconds left before the AFK kick, mirrored from the server. */
+  private afkSecondsLeft = 0;
+  /** Locally decremented between server updates so the countdown looks smooth. */
+  private afkSmoothSeconds = 0;
+  /** Grows while the prompt is up; drives the pulse/scale-in animation. */
+  private afkAnim = 0;
+  /** Set when the connection closed with AFK_CLOSE_CODE, to explain the kick. */
+  private afkKicked = false;
+
   // world
   private mapId = 0;
   private worldW = 3200;
@@ -1598,6 +1626,29 @@ export class GameClient {
       requestSwapAll: () => this.sendSwapRow(SWAP_ROW_ALL),
       drawTooltip: (cell, x, y) => this.tooltip(cell, x, y),
     };
+  }
+
+  /**
+   * Screen-centre rect for the [AFK CHECK] button. Sized for both mouse and
+   * thumb, and kept clear of the hotbar/panels because it is modal anyway.
+   */
+  private afkButtonRect(): Rect {
+    const w = Math.min(300, Math.max(220, this.w * 0.34));
+    const h = this.isMobile ? 68 : 62;
+    return { x: this.w / 2 - w / 2, y: this.h / 2 - h / 2 + 18, w, h };
+  }
+
+  /** Confirms the player is present, clearing the check server-side. */
+  private sendAfkAck() {
+    if (!this.net || !this.connected) return;
+    const w = new Writer(2);
+    w.u8(C2S.AFK_ACK);
+    this.net.send(w.bytes());
+    // Optimistic local clear so the button disappears on the same frame it is
+    // clicked; the server echoes an AFK_CHECK(active=0) right after.
+    this.afkPending = false;
+    this.afkSecondsLeft = 0;
+    this.afkSmoothSeconds = 0;
   }
 
   /** Tells the server to swap one slot (0-based) or, with SWAP_ROW_ALL, both rows. */
@@ -1838,12 +1889,26 @@ export class GameClient {
     this.roseParticles.length = 0;
     const net = createTransport();
     this.net = net;
+    this.afkPending = false;
+    this.afkSecondsLeft = 0;
+    this.afkSmoothSeconds = 0;
+    this.afkAnim = 0;
+    this.afkKicked = false;
+    this.sinceSnapshot = 0;
+    this.snapshotStalled = false;
+    this.stallNoticeAnim = 0;
     net.onOpen = () => {
       this.connected = true;
       this.sendJoin();
     };
-    net.onClose = () => {
+    net.onClose = (code) => {
       this.connected = false;
+      // Distinguish an AFK kick from a normal drop so the overlay can say why
+      // the session ended instead of showing "connecting to server...".
+      if (code === AFK_CLOSE_CODE) {
+        this.afkKicked = true;
+        this.afkPending = false;
+      }
     };
     net.onMessage = (data) => this.handlePacket(data);
   }
@@ -1907,6 +1972,11 @@ export class GameClient {
       }
       case S2C.SNAPSHOT: {
         r.u32();
+        // A snapshot landed, so the stream is healthy again. Entity ageing
+        // resumes from *now*: the seen-timestamps were held still during the
+        // stall, so nothing expires just because packets were late.
+        this.sinceSnapshot = 0;
+        this.snapshotStalled = false;
         const snapshotSequence = ++this.snapshotSequence;
         const count = r.u16();
         for (let i = 0; i < count; i++) {
@@ -2017,6 +2087,15 @@ export class GameClient {
         const isCraftReport = r.u8() === 1;
         const isSelf = sender === this.playerName;
         this.chat.addMessage(text, sender, isSystem, isCraftReport, isSelf);
+        break;
+      }
+      case S2C.AFK_CHECK: {
+        const active = r.u8() === 1;
+        const secondsLeft = r.u16();
+        if (active && !this.afkPending) this.afkAnim = 0;
+        this.afkPending = active;
+        this.afkSecondsLeft = secondsLeft;
+        this.afkSmoothSeconds = secondsLeft;
         break;
       }
       case S2C.SQUAD_UPDATE: {
@@ -2199,6 +2278,22 @@ export class GameClient {
       }
     }
 
+    // Packet-loss detection. Snapshots arrive at the tick rate; when they stop
+    // the stream is stalled, and the right thing to do is hold the last scene
+    // rather than expire entities that the server never said were gone.
+    if (this.scene === "game" && this.connected) {
+      this.sinceSnapshot += dt;
+      this.snapshotStalled = this.sinceSnapshot > SNAPSHOT_STALL_SECONDS;
+    } else {
+      this.sinceSnapshot = 0;
+      this.snapshotStalled = false;
+    }
+    const showStallNotice =
+      this.snapshotStalled && this.sinceSnapshot > SNAPSHOT_STALL_NOTICE_SECONDS && !this.afkPending;
+    this.stallNoticeAnim = showStallNotice
+      ? Math.min(1, this.stallNoticeAnim + dt * 3)
+      : Math.max(0, this.stallNoticeAnim - dt * 5);
+
     for (const e of this.ents.values()) {
       const k = Math.min(1, dt * 16);
       e.x += (e.tx - e.x) * k;
@@ -2208,7 +2303,13 @@ export class GameClient {
       // as a brief red trail draining off the bar instead of an instant cut.
       if (e.displayHp === undefined) e.displayHp = e.hp;
       e.displayHp += (e.hp - e.displayHp) * Math.min(1, dt * 6);
-      if (this.time - e.seen > 0.6) this.ents.delete(e.id);
+      // Only expire entities while the stream is healthy. During a stall the
+      // absence of an entity means "no news", not "it despawned", so keeping
+      // it on screen is what makes lost packets read as a brief freeze.
+      // Timestamps are pushed along with the clock so nothing expires in a
+      // burst the instant the connection recovers.
+      if (this.snapshotStalled) e.seen += dt;
+      else if (this.time - e.seen > 0.6) this.ents.delete(e.id);
     }
     for (let i = this.floaters.length - 1; i >= 0; i--) {
       const f = this.floaters[i];
@@ -2219,6 +2320,15 @@ export class GameClient {
     for (let i = this.killFeed.length - 1; i >= 0; i--) {
       this.killFeed[i].life -= dt;
       if (this.killFeed[i].life <= 0) this.killFeed.splice(i, 1);
+    }
+
+    // AFK prompt: ease the panel in and tick the countdown locally between
+    // the once-per-second server updates so the number never looks frozen.
+    this.afkAnim = this.afkPending
+      ? Math.min(1, this.afkAnim + dt * 4)
+      : Math.max(0, this.afkAnim - dt * 6);
+    if (this.afkPending && this.afkSmoothSeconds > 0) {
+      this.afkSmoothSeconds = Math.max(0, this.afkSmoothSeconds - dt);
     }
 
     if (this.scene === "game") {
@@ -2245,6 +2355,16 @@ export class GameClient {
 
   private sendInput() {
     if (!this.net || !this.connected) return;
+
+    // While the AFK prompt is up the world is frozen for this player: send a
+    // neutral packet so a parked mouse/held key can't keep driving the flower
+    // (and, since it never changes, it can't satisfy the check either).
+    if (this.afkPending) {
+      const w = new Writer(8);
+      w.u8(C2S.INPUT).i8(0).i8(0).u8(0);
+      this.net.send(w.bytes());
+      return;
+    }
 
     let dx = 0;
     let dy = 0;
@@ -3197,6 +3317,13 @@ export class GameClient {
     const p = this.pointerPos(e);
     this.mx = p.x;
     this.my = p.y;
+    // The AFK prompt outranks every other pointer target, including the mobile
+    // joystick and action buttons which would otherwise swallow the touch.
+    if (this.scene === "game" && (this.afkPending || this.afkKicked)) {
+      if (e.button === 2) return;
+      this.gameClick(p.x, p.y, e.shiftKey);
+      return;
+    }
     // Mobile controls: spread (Space) / contract (Shift) / joystick
     if (this.isMobile) {
       if (this.scene === "menu" && this.mobileFullscreenBtn && hit(this.mobileFullscreenBtn, p.x, p.y)) {
@@ -3628,6 +3755,11 @@ export class GameClient {
       this.net?.close();
       this.net = null;
       this.connected = false;
+      this.afkPending = false;
+      this.afkKicked = false;
+      this.afkAnim = 0;
+      this.afkSecondsLeft = 0;
+      this.afkSmoothSeconds = 0;
       this.bagOpen = false;
       this.craftOpen = false;
       this.craftSearchActive = false;
@@ -3638,6 +3770,19 @@ export class GameClient {
 
   // ------------------------------------------------------------ game input
   private gameClick(mx: number, my: number, shiftKey = false) {
+    // The AFK prompt is modal: while it is up, the only click that does
+    // anything is the one on the button itself. Clicking elsewhere must not
+    // dismiss it, otherwise a cat on the keyboard would pass the check.
+    if (this.afkPending) {
+      if (hit(this.afkButtonRect(), mx, my)) this.sendAfkAck();
+      return;
+    }
+    // After an AFK kick the only thing left to do is go back to the menu.
+    if (this.afkKicked) {
+      const bw = 200;
+      if (hit({ x: this.w / 2 - bw / 2, y: this.h / 2 + 30, w: bw, h: 52 }, mx, my)) this.gotoMenu();
+      return;
+    }
     if (!this.alive) {
       const bw = 180;
       const cx = this.w / 2;      if (hit({ x: cx - bw - 10, y: this.h / 2 + 40, w: bw, h: 52 }, mx, my)) {
@@ -4538,9 +4683,22 @@ export class GameClient {
       });
     }
     if (!this.alive) this.renderDeath();
-    if (!this.connected) {
+    // The AFK prompt sits above the death screen: answering it matters even
+    // while dead, since an idle corpse still holds a server slot.
+    if (this.afkAnim > 0.01) this.renderAfkCheck();
+    if (this.afkKicked) this.renderAfkKicked();
+    else if (!this.connected) {
       panel(ctx, { x: this.w / 2 - 120, y: 16, w: 240, h: 40 });
       text(ctx, "connecting to server...", this.w / 2, 36, 16, "#ffe763");
+    } else if (this.stallNoticeAnim > 0.01) {
+      // Still connected, but snapshots stopped arriving. The world above is
+      // the last known scene, held until the stream recovers.
+      ctx.save();
+      ctx.globalAlpha = this.stallNoticeAnim;
+      panel(ctx, { x: this.w / 2 - 130, y: 16, w: 260, h: 40 });
+      const dots = ".".repeat(1 + (Math.floor(this.time * 2) % 3));
+      text(ctx, `waiting for server${dots}`, this.w / 2, 36, 16, "#ffb066");
+      ctx.restore();
     }
   }
 
@@ -6063,6 +6221,112 @@ export class GameClient {
       return { text: "ORACLE", enabled };
     }
     return { text: "TRADE", enabled: !!sel && avail >= 1 && this.craftCooldownLeft("trade") <= 0 };
+  }
+
+  /**
+   * Modal [AFK CHECK] prompt drawn dead-centre. It dims the world, states why
+   * it appeared, and counts down to the disconnect. Clicking the button is the
+   * only way to dismiss it (see gameClick/onPointerDown).
+   */
+  private renderAfkCheck() {
+    const ctx = this.ctx;
+    const t = ease.outCubic(this.afkAnim);
+    const secs = Math.max(0, Math.ceil(this.afkSmoothSeconds));
+    // Urgency ramps up as the countdown drains: red text and a faster pulse.
+    const urgent = secs <= 10;
+    const pulse = 1 + Math.sin(this.time * (urgent ? 9 : 4.5)) * 0.035 * t;
+
+    ctx.save();
+    ctx.globalAlpha = t;
+    ctx.fillStyle = "rgba(8,10,14,0.72)";
+    ctx.fillRect(0, 0, this.w, this.h);
+
+    const cx = this.w / 2;
+    const cy = this.h / 2;
+    const panelW = Math.min(460, this.w - 32);
+    const panelH = this.isMobile ? 260 : 250;
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.scale(pulse, pulse);
+    ctx.translate(-cx, -cy);
+
+    panel(ctx, { x: cx - panelW / 2, y: cy - panelH / 2 - 26, w: panelW, h: panelH }, "rgba(24,30,40,0.96)");
+    text(ctx, "ARE YOU STILL THERE?", cx, cy - panelH / 2 + 12, this.isMobile ? 24 : 27, "#ffe763");
+    text(
+      ctx,
+      "No activity detected for a while.",
+      cx,
+      cy - panelH / 2 + 48,
+      15,
+      "#c9d6e4",
+    );
+    text(
+      ctx,
+      "Click the button to stay in the game.",
+      cx,
+      cy - panelH / 2 + 70,
+      15,
+      "#c9d6e4",
+    );
+
+    // Countdown ring + seconds, sitting just above the button.
+    const ringY = cy - 18;
+    const ringR = 26;
+    const frac = Math.max(0, Math.min(1, this.afkSmoothSeconds / AFK_CHECK_SECONDS));
+    ctx.save();
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = "rgba(0,0,0,0.35)";
+    ctx.beginPath();
+    ctx.arc(cx, ringY, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = urgent ? "#ff6f6f" : "#3fae60";
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.arc(cx, ringY, ringR, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+    text(ctx, `${secs}`, cx, ringY, 24, urgent ? "#ff8080" : "#ffffff");
+
+    const r = this.afkButtonRect();
+    button(
+      ctx,
+      r,
+      "AFK CHECK",
+      urgent ? "#c9452b" : "#3fae60",
+      hit(r, this.mx, this.my),
+      this.isMobile ? 22 : 24,
+    );
+    text(
+      ctx,
+      "You will be disconnected when the timer runs out.",
+      cx,
+      r.y + r.h + 24,
+      13,
+      "#98a7b8",
+    );
+    ctx.restore();
+    ctx.restore();
+  }
+
+  /** Shown after the server dropped us for failing the AFK check. */
+  private renderAfkKicked() {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.fillStyle = "rgba(8,10,14,0.8)";
+    ctx.fillRect(0, 0, this.w, this.h);
+    text(ctx, "Disconnected — AFK", this.w / 2, this.h / 2 - 60, 38, "#ffb066");
+    text(
+      ctx,
+      "You did not respond to the AFK check.",
+      this.w / 2,
+      this.h / 2 - 16,
+      17,
+      "#ffffff",
+    );
+    const bw = 200;
+    const r = { x: this.w / 2 - bw / 2, y: this.h / 2 + 30, w: bw, h: 52 };
+    button(ctx, r, "Main menu", "#41505f", hit(r, this.mx, this.my), 20);
+    ctx.restore();
   }
 
   private renderDeath() {

@@ -1,5 +1,5 @@
 import { GameServer } from "../shared/sim";
-import { TICK_MS } from "../shared/defs";
+import { AFK_CLOSE_CODE, TICK_MS } from "../shared/defs";
 
 export interface Transport {
   send(data: Uint8Array): void;
@@ -7,7 +7,8 @@ export interface Transport {
   readonly kind: "local" | "remote";
   onMessage: (data: Uint8Array) => void;
   onOpen: () => void;
-  onClose: () => void;
+  /** `code` is the WebSocket close code; AFK_CLOSE_CODE means an AFK kick. */
+  onClose: (code?: number) => void;
 }
 
 /** Runs the real authoritative server inside the browser (single player / offline). */
@@ -15,7 +16,7 @@ export class LocalTransport implements Transport {
   readonly kind = "local";
   onMessage: (data: Uint8Array) => void = () => {};
   onOpen: () => void = () => {};
-  onClose: () => void = () => {};
+  onClose: (code?: number) => void = () => {};
   private server = new GameServer();
   private timer: ReturnType<typeof setInterval> | null = null;
   private id = 1;
@@ -31,6 +32,9 @@ export class LocalTransport implements Transport {
       const dt = Math.min(0.25, (now - this.last) / 1000);
       this.last = now;
       this.server.tick(dt);
+      // Offline play runs the same AFK rules; ignoring the check ends the
+      // session exactly as it would against a hosted server.
+      if (this.server.drainKicks().includes(this.id)) this.close(AFK_CLOSE_CODE);
     }, TICK_MS);
     setTimeout(() => this.onOpen(), 0);
   }
@@ -39,11 +43,11 @@ export class LocalTransport implements Transport {
     this.server.handleMessage(this.id, data);
   }
 
-  close() {
+  close(code?: number) {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
     this.server.removeClient(this.id);
-    this.onClose();
+    this.onClose(code);
   }
 }
 
@@ -52,14 +56,14 @@ export class RemoteTransport implements Transport {
   readonly kind = "remote";
   onMessage: (data: Uint8Array) => void = () => {};
   onOpen: () => void = () => {};
-  onClose: () => void = () => {};
+  onClose: (code?: number) => void = () => {};
   private ws: WebSocket;
 
   constructor(url: string) {
     this.ws = new WebSocket(url);
     this.ws.binaryType = "arraybuffer";
     this.ws.onopen = () => this.onOpen();
-    this.ws.onclose = () => this.onClose();
+    this.ws.onclose = (ev) => this.onClose(ev.code);
     this.ws.onerror = () => this.onClose();
     this.ws.onmessage = (ev) => {
       if (ev.data instanceof ArrayBuffer) this.onMessage(new Uint8Array(ev.data));

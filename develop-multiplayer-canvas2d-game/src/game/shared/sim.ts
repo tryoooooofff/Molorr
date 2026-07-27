@@ -2,6 +2,8 @@
 // and, when no remote server is configured, inside the browser (local transport).
 
 import {
+  AFK_CHECK_SECONDS,
+  AFK_IDLE_SECONDS,
   BAG_COUNT,
   BAG_MAX,
   BLOCK_GRID_COLS,
@@ -259,6 +261,20 @@ interface ClientState {
   send(data: Uint8Array): void;
   player: Player | null;
   events: Uint8Array[];
+  /** Seconds since the last meaningful (non-neutral) client action. */
+  idleSeconds: number;
+  /** True once the [AFK CHECK] button has been shown and is awaiting a click. */
+  afkPending: boolean;
+  /** Seconds left on the visible AFK countdown; only meaningful while pending. */
+  afkSecondsLeft: number;
+  /** Last countdown value pushed to the client, so we only resend on change. */
+  afkLastSent: number;
+  /** Set by the AFK sweep; the host closes the socket on the next drain. */
+  kick: boolean;
+  /** Last INPUT payload seen, so only a *change* in input counts as activity. */
+  lastInDx: number;
+  lastInDy: number;
+  lastFlags: number;
 }
 
 function clamp(v: number, a: number, b: number) {
@@ -362,7 +378,105 @@ export class GameServer {
 
   // ---------------------------------------------------------------- clients
   addClient(id: number, send: (data: Uint8Array) => void) {
-    this.clients.set(id, { send, player: null, events: [] });
+    this.clients.set(id, {
+      send,
+      player: null,
+      events: [],
+      idleSeconds: 0,
+      afkPending: false,
+      afkSecondsLeft: 0,
+      afkLastSent: -1,
+      kick: false,
+      lastInDx: 0,
+      lastInDy: 0,
+      lastFlags: 0,
+    });
+  }
+
+  /**
+   * Marks the client as active, restarting the idle countdown.
+   *
+   * `canDismiss` is false for ordinary gameplay packets: once the prompt is up,
+   * only an explicit AFK_ACK (the button click) may take it down. That keeps
+   * the check meaningful — a stuck key, a bumped mouse, or the neutral input
+   * the client starts sending when the prompt opens must not answer it.
+   */
+  private markActive(c: ClientState, canDismiss = false) {
+    if (c.afkPending) {
+      if (!canDismiss) return;
+      c.afkPending = false;
+      c.afkSecondsLeft = 0;
+      c.idleSeconds = 0;
+      this.sendAfkState(c);
+      return;
+    }
+    c.idleSeconds = 0;
+  }
+
+  /** Pushes the current AFK check state (active flag + countdown) to a client. */
+  private sendAfkState(c: ClientState) {
+    const w = new Writer(4);
+    w.u8(S2C.AFK_CHECK).u8(c.afkPending ? 1 : 0).u16(Math.max(0, Math.ceil(c.afkSecondsLeft)));
+    c.send(w.bytes());
+    c.afkLastSent = c.afkPending ? Math.ceil(c.afkSecondsLeft) : -1;
+  }
+
+  /**
+   * Advances every client's idle timer, opens the AFK check when idle passes
+   * AFK_IDLE_SECONDS, and flags a kick when the check expires unanswered.
+   * Clients without a player (still on the menu) are never checked.
+   */
+  private updateAfk(dt: number) {
+    for (const c of this.clients.values()) {
+      if (!c.player || c.kick) continue;
+      if (c.afkPending) {
+        c.afkSecondsLeft -= dt;
+        if (c.afkSecondsLeft <= 0) {
+          c.afkSecondsLeft = 0;
+          c.kick = true;
+          this.sendAfkState(c);
+          continue;
+        }
+        // Only resend when the whole-second value actually changes.
+        const secs = Math.ceil(c.afkSecondsLeft);
+        if (secs !== c.afkLastSent) this.sendAfkState(c);
+        continue;
+      }
+      c.idleSeconds += dt;
+      if (c.idleSeconds >= AFK_IDLE_SECONDS) {
+        c.afkPending = true;
+        c.afkSecondsLeft = AFK_CHECK_SECONDS;
+        this.sendAfkState(c);
+        this.sendChatToClient(
+          c,
+          `Are you still there? Click [AFK CHECK] within ${AFK_CHECK_SECONDS}s or you will be disconnected.`,
+          "System",
+          true,
+          false,
+        );
+      }
+    }
+  }
+
+  /**
+   * Returns the ids of clients the AFK sweep decided to disconnect and clears
+   * the flag. Hosts poll this right after tick() and close the matching socket;
+   * the resulting close event still routes through removeClient() as usual.
+   */
+  drainKicks(): number[] {
+    const ids: number[] = [];
+    for (const [id, c] of this.clients) {
+      if (c.kick) {
+        c.kick = false;
+        ids.push(id);
+      }
+    }
+    return ids;
+  }
+
+  /** True while the client should be showing the [AFK CHECK] button. */
+  isAfkPending(id: number): boolean {
+    return this.clients.get(id)?.afkPending ?? false;
   }
 
   removeClient(id: number) {
@@ -398,6 +512,13 @@ export class GameServer {
     if (!c) return;
     const r = new Reader(data);
     const type = r.u8();
+    // Every packet except INPUT is a deliberate act, so it resets the idle
+    // timer. INPUT is judged on its payload below. Only AFK_ACK may dismiss an
+    // open prompt; PING/BONUS_STATUS are client-driven housekeeping and prove
+    // nothing about the human.
+    if (type !== C2S.INPUT && type !== C2S.PING && type !== C2S.BONUS_STATUS) {
+      this.markActive(c, type === C2S.AFK_ACK);
+    }
     switch (type) {
       case C2S.JOIN: {
         const name = r.str().slice(0, 14) || "flower";
@@ -445,6 +566,21 @@ export class GameServer {
         p.inDx = r.i8() / 100;
         p.inDy = r.i8() / 100;
         p.flags = r.u8();
+        // Activity is a *change* in input, not merely non-zero input. Movement
+        // follows the mouse, so a player who walks away leaves the cursor
+        // parked and the client keeps resending an identical non-zero packet
+        // at 20 Hz forever — that must read as idle, not as activity.
+        if (p.inDx !== c.lastInDx || p.inDy !== c.lastInDy || p.flags !== c.lastFlags) {
+          c.lastInDx = p.inDx;
+          c.lastInDy = p.inDy;
+          c.lastFlags = p.flags;
+          this.markActive(c);
+        }
+        break;
+      }
+      case C2S.AFK_ACK: {
+        // The button was clicked. markActive() already ran above and cleared
+        // the pending check, so there is nothing else to do.
         break;
       }
       case C2S.BONUS_STATUS: {
@@ -1224,6 +1360,7 @@ export class GameServer {
   // ------------------------------------------------------------------ tick
   tick(dt: number) {
     this.tickCount++;
+    this.updateAfk(dt);
     const players: Player[] = [];
     for (const c of this.clients.values()) if (c.player) players.push(c.player);
 

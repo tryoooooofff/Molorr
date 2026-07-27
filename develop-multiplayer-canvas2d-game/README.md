@@ -38,6 +38,50 @@ Shared code (used by *both* sides, so the browser can host an offline server too
 Controls: `WASD` / arrows move · left mouse attack · right mouse (or space) defend ·
 `E` bag · `C` craft · `Esc` back to menu.
 
+## Packet loss
+
+Snapshots arrive at the tick rate (20 Hz). If they stop, the client does **not** let the
+world dissolve — it keeps drawing the **last known scene** until the next packet lands.
+
+* After **`SNAPSHOT_STALL_SECONDS` (0.35s ≈ 7 missed ticks)** with no `SNAPSHOT`, the
+  stream is treated as stalled. Entity expiry is suspended and each entity's
+  last-seen timestamp is advanced with the clock, so nothing ages out while the
+  connection is quiet — and nothing expires in a burst the moment it recovers.
+* After **`SNAPSHOT_STALL_NOTICE_SECONDS` (1.2s)** a small *"waiting for server"*
+  notice fades in at the top of the screen. The world underneath stays frozen and
+  fully rendered.
+* When a snapshot finally arrives, ageing resumes and any entity the server really
+  did drop is cleaned up on the next healthy frame.
+
+Ordinary jitter (a gap shorter than the threshold) never trips this, and genuine
+despawns are unaffected while the stream is healthy. Petals are still purged the
+instant a snapshot omits them, since that check only runs on a packet that actually
+arrived.
+
+## AFK check
+
+Idle players are asked to prove they are still there before the server drops them, so a
+forgotten tab cannot sit on one of the `GAME_MAX_PLAYERS` slots forever.
+
+* After **`AFK_IDLE_SECONDS` (180s)** with no activity the world freezes for that player
+  and a modal **`[AFK CHECK]`** button appears in the centre of the screen with a
+  countdown ring.
+* Clicking it (`C2S.AFK_ACK`) clears the check and restarts the idle timer.
+* Ignoring it for **`AFK_CHECK_SECONDS` (45s)** closes the connection with code
+  **`4001`**, and the client shows a *"Disconnected — AFK"* screen with a Main-menu
+  button.
+
+What counts as activity is deliberately strict, because movement follows the mouse:
+only a **change** in the `INPUT` payload counts, so a parked cursor (which keeps
+resending an identical non-zero packet at 20 Hz) still goes idle, as does a backgrounded
+tab (which sends a neutral packet on blur). Any other deliberate packet — swap, craft,
+chat, map change, respawn — also resets the timer, but **only `AFK_ACK` can dismiss a
+prompt that is already open**, so a stuck key or a bumped mouse cannot answer the check.
+Clients still sitting in the menu are never checked.
+
+Tune the two windows in `src/game/shared/defs.ts`; the C++ server mirrors them as
+constants at the top of `server-cpp/main.cpp`.
+
 ## Accounts
 
 * **Guest** — progress (petals, bag, XP, map) is stored in `localStorage`.
@@ -96,6 +140,7 @@ All packets are raw binary, big-endian, first byte = packet id.
 | 5 | CHANGE_MAP | `u8 mapId` |
 | 6 | RESPAWN | — |
 | 7 | PING | `u32 stamp` |
+| 13 | AFK_ACK | — (the on-screen `[AFK CHECK]` button was clicked) |
 
 `cell` = `u8 itemId (255 = empty)`, `u8 rarity`, `u16 count`.
 `str` = `u8 length` + ASCII bytes.
@@ -110,6 +155,7 @@ All packets are raw binary, big-endian, first byte = packet id.
 | 4 | STATS | `u32 xp`, `u16 level`, `u16 hp`, `u16 maxHp`, `u8 mapId`, `u8 alive` |
 | 5 | EVENT | `u8 kind`, `i16 x`, `i16 y`, `u32 value`, `u8 item`, `u8 rarity` |
 | 6 | PONG | `u32 stamp` |
+| 9 | AFK_CHECK | `u8 active` (1 = show the button), `u16 secondsLeft` |
 
 entity = `u8 kind` (0 player, 1 mob, 2 petal, 3 drop), `u16 id`, `u8 type`,
 `u8 team` (0 hostile, 1 friendly, 2 self — for drops this field carries the rarity),
