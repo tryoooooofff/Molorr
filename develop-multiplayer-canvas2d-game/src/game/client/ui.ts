@@ -705,39 +705,46 @@ export function drawItemIcon(
       }
       break;
     }
-    case 39: { // Magnet — a red horseshoe magnet
-      const k = size / 50;
+    case 39: { // Magnet — a two-tone horseshoe magnet (red pole / blue pole)
+      // Authored on a 300×300 canvas around (cx, cy) = (150, 115). The drawn
+      // shape spans x 89..211 and y 54..186, so its bounding box is centered on
+      // (150, 120) and measures 122×132. Scaling by size/82 keeps the icon's
+      // footprint in line with the other petals, and the translate below moves
+      // that bounding-box center onto the icon origin.
+      const cx = 150;
+      const cy = 115;
+      const radius = 45;
+      const legLength = 10;
+      const thickness = 32;
+
       ctx.save();
-      ctx.scale(k, k);
-      ctx.lineWidth = 14;
+      ctx.scale(size / 82, size / 82);
+      ctx.translate(-cx, -120);
+
+      ctx.lineWidth = thickness;
       ctx.lineCap = "round";
-      // Horseshoe arc
+      ctx.lineJoin = "round";
+
+      // ── Left half: arc quarter + leg, all red ──
+      ctx.strokeStyle = "#9c3838";
       ctx.beginPath();
-      ctx.arc(0, -5, 28, Math.PI * 0.15, Math.PI * 0.85, false);
-      ctx.strokeStyle = "#e05555";
-      ctx.stroke();
-      // Two legs
-      ctx.beginPath();
-      ctx.moveTo(-24, 8);
-      ctx.lineTo(-24, 30);
-      ctx.strokeStyle = "#e05555";
+      ctx.moveTo(cx - radius, cy);
+      ctx.lineTo(cx - radius, cy + radius + legLength);
       ctx.stroke();
       ctx.beginPath();
-      ctx.moveTo(24, 8);
-      ctx.lineTo(24, 30);
-      ctx.strokeStyle = "#e05555";
+      ctx.arc(cx, cy, radius, -Math.PI / 2, Math.PI, true);
       ctx.stroke();
-      // Silver tips
+
+      // ── Right half: arc quarter + leg, all blue ──
+      ctx.strokeStyle = "#3d3f99";
       ctx.beginPath();
-      ctx.moveTo(-24, 24);
-      ctx.lineTo(-24, 34);
-      ctx.strokeStyle = "#c0c0c0";
+      ctx.moveTo(cx + radius, cy);
+      ctx.lineTo(cx + radius, cy + radius + legLength);
       ctx.stroke();
       ctx.beginPath();
-      ctx.moveTo(24, 24);
-      ctx.lineTo(24, 34);
-      ctx.strokeStyle = "#c0c0c0";
+      ctx.arc(cx, cy, radius, 0, -Math.PI / 2, true);
       ctx.stroke();
+
       ctx.restore();
       break;
     }
