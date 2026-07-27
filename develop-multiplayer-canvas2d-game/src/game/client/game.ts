@@ -20,7 +20,8 @@ import {
   ORACLE_SKIP,
   RARITIES,
   ROSE_HEAL_DELAY,
-  ROSE_ITEM,
+  SHELL_ITEM,
+  isAbsorbItem,
   SECONDARY_SLOT_COUNT,
   SLOT_COUNT,
   Wall,
@@ -1236,6 +1237,20 @@ class TooltipSystem {
         text: `Heal: ${(def.heal * mult).toFixed(def.heal * mult % 1 ? 1 : 0)} HP`,
         color: this.STYLES.HEAL,
       });
+    }
+    if (def.shield) {
+      statLines.push({
+        text: `Shield: ${(def.shield * mult).toFixed(def.shield * mult % 1 ? 1 : 0)}`,
+        color: this.STYLES.MANA,
+      });
+    }
+    if (def.healthBonus) {
+      statLines.push({
+        text: `Max Health: +${(def.healthBonus * mult).toFixed(0)}`,
+        color: this.STYLES.HEALTH,
+      });
+    }
+    if (def.heal || def.shield) {
       statLines.push({ text: `Absorbs after ${ROSE_HEAL_DELAY.toFixed(1)}s, then reloads`, color: this.STYLES.SPECIAL });
     }
     if (def.speed) statLines.push({ text: `Speed: +${def.speed}%`, color: this.STYLES.SPECIAL });
@@ -2080,9 +2095,20 @@ export class GameClient {
       case EVT.TRADE_FAIL:
         this.craftRefused("Trade refused — check the requirement and cooldown.");
         break;
-      case EVT.HEAL:
-        if (item !== ROSE_ITEM) break;
-        this.floaters.push({ x, y: y - 18, msg: `+${value} HP`, color: "#ffcc66", life: 1.1, vy: -28 });
+      case EVT.HEAL: {
+        // Rose restores HP, Shell plates on shield — same absorb feedback,
+        // different label and particle palette.
+        if (!isAbsorbItem(item)) break;
+        const isShield = item === SHELL_ITEM;
+        this.floaters.push({
+          x,
+          y: y - 18,
+          msg: isShield ? `+${value} Shield` : `+${value} HP`,
+          color: isShield ? "#f2d96e" : "#ffcc66",
+          life: 1.1,
+          vy: -28,
+        });
+        const palette = isShield ? ["#f8e8a0", "#c8a030"] : ["#ff6578", "#d6354a"];
         for (let k = 0; k < 12; k++) {
           const angle = Math.random() * Math.PI * 2;
           const speed = 40 + Math.random() * 80;
@@ -2091,13 +2117,14 @@ export class GameClient {
             y,
             vx: Math.cos(angle) * speed,
             vy: Math.sin(angle) * speed,
-            color: Math.random() > 0.5 ? "#ff6578" : "#d6354a",
+            color: Math.random() > 0.5 ? palette[0] : palette[1],
             size: 4 + Math.random() * 5,
             life: 0.6,
             maxLife: 0.6,
           });
         }
         break;
+      }
       case EVT.DEATH:
         this.alive = false;
         this.floaters.length = 0;

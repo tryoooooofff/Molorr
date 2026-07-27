@@ -34,7 +34,8 @@ import {
   RARITIES,
   ROSE_ABSORB_TIME,
   ROSE_HEAL_DELAY,
-  ROSE_ITEM,
+  SHELL_ITEM,
+  isAbsorbItem,
   SECONDARY_SLOT_COUNT,
   HOTBAR_CELLS,
   isBagCell,
@@ -1141,13 +1142,31 @@ export class GameServer {
     this.worlds[mapId].mobs.push(new Mob(this.nextId++, type, mapId, x, y, rarity));
   }
 
+  /**
+   * Flat max-HP granted by equipped petals (Cactus). Only the main hotbar row
+   * counts — the secondary row is inert standby storage, like everywhere else.
+   */
+  private healthBonusOf(p: Player): number {
+    let bonus = 0;
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const cell = p.slots[i];
+      if (!cell) continue;
+      const def = ITEMS[cell.item];
+      if (def?.healthBonus) bonus += def.healthBonus * rarityMult(cell.rarity);
+    }
+    return bonus;
+  }
+
   private applyLevel(p: Player) {
     const lvl = levelFromXp(p.xp);
-    const maxHp = 110 + lvl * 16;
+    const maxHp = Math.round(110 + lvl * 16 + this.healthBonusOf(p));
     if (maxHp !== p.maxHp) {
       const ratio = p.hp / p.maxHp;
       p.maxHp = maxHp;
       p.hp = Math.min(maxHp, Math.max(1, ratio * maxHp));
+      // Shield is capped at maxHp, so a shrinking pool must be trimmed too.
+      if (p.shield > maxHp) p.shield = maxHp;
+      p.statsDirty = true;
     }
     if (lvl !== p.level) {
       p.level = lvl;
@@ -1185,7 +1204,7 @@ export class GameServer {
         x: p.x,
         y: p.y,
         hitCd: 0,
-        specialTimer: cell?.item === ROSE_ITEM ? ROSE_HEAL_DELAY : 0,
+        specialTimer: cell && isAbsorbItem(cell.item) ? ROSE_HEAL_DELAY : 0,
         absorbTimer: 0,
       });
       // A summon's pets only live while the exact same egg stays equipped in
@@ -1313,7 +1332,7 @@ export class GameServer {
           st.alive = true;
           st.maxHp = def.health * rarityMult(cell.rarity);
           st.hp = st.maxHp;
-          st.specialTimer = cell.item === ROSE_ITEM ? ROSE_HEAL_DELAY : 0;
+          st.specialTimer = isAbsorbItem(cell.item) ? ROSE_HEAL_DELAY : 0;
           st.absorbTimer = 0;
         }
         continue;
@@ -1328,14 +1347,20 @@ export class GameServer {
         st.timer = def.reload;
         continue;
       }
-      // Roses stay at the normal/defending orbit instead of being pushed out
-      // to attack. Once ready and the owner is hurt, the authoritative petal
-      // travels into the flower, heals exactly once, then starts its reload.
-      const orbitRadius = cell.item === ROSE_ITEM ? Math.min(p.orbit, 62) : p.orbit;
+      // Absorb petals (Rose, Shell) stay at the normal/defending orbit instead
+      // of being pushed out to attack. Once ready and the owner has something
+      // to top up, the authoritative petal travels into the flower, applies its
+      // one-shot effect exactly once, then starts its reload.
+      const absorbs = isAbsorbItem(cell.item) && (!!def.heal || !!def.shield);
+      const orbitRadius = absorbs ? Math.min(p.orbit, 62) : p.orbit;
       const tx = p.x + Math.cos(slotAngle) * orbitRadius;
       const ty = p.y + Math.sin(slotAngle) * orbitRadius;
 
-      if (cell.item === ROSE_ITEM && def.heal) {
+      if (absorbs) {
+        // Rose fills HP; Shell fills the shield pool (capped at maxHp).
+        const missing = def.heal
+          ? Math.max(0, p.maxHp - p.hp)
+          : Math.max(0, p.maxHp - p.shield);
         st.specialTimer = Math.max(0, st.specialTimer - dt);
         if (st.absorbTimer > 0) {
           const travelStep = Math.min(1, dt / Math.max(dt, st.absorbTimer));
@@ -1343,18 +1368,18 @@ export class GameServer {
           st.y += (p.y - st.y) * travelStep;
           st.absorbTimer = Math.max(0, st.absorbTimer - dt);
           if (st.absorbTimer <= 0) {
-            const missingHp = Math.max(0, p.maxHp - p.hp);
-            if (missingHp > 0) {
-              const restored = Math.min(missingHp, def.heal * rarityMult(cell.rarity));
-              p.hp += restored;
+            if (missing > 0) {
+              const amount = Math.min(missing, (def.heal ?? def.shield ?? 0) * rarityMult(cell.rarity));
+              if (def.heal) p.hp += amount;
+              else p.shield += amount;
               p.statsDirty = true;
               const owner = this.clientOf(p.id);
-              if (owner) this.pushEvent(owner, EVT.HEAL, p.x, p.y, Math.round(restored), ROSE_ITEM, cell.rarity);
+              if (owner) this.pushEvent(owner, EVT.HEAL, p.x, p.y, Math.round(amount), cell.item, cell.rarity);
               st.alive = false;
               st.hp = 0;
               st.timer = def.reload;
             }
-            // If another Rose filled the player first, this one remains alive
+            // If another petal filled the player first, this one remains alive
             // and returns to orbit instead of wasting a reload cycle.
           }
           continue;
@@ -1362,7 +1387,7 @@ export class GameServer {
 
         st.x += (tx - st.x) * Math.min(1, dt * 14);
         st.y += (ty - st.y) * Math.min(1, dt * 14);
-        if (st.specialTimer <= 0 && p.hp < p.maxHp) {
+        if (st.specialTimer <= 0 && missing > 0) {
           st.absorbTimer = ROSE_ABSORB_TIME;
           continue;
         }
@@ -1485,7 +1510,10 @@ export class GameServer {
       m.hp = m.maxHp;
       // Keep summon damage fair: a friendly mob hits exactly as hard as the
       // same wild mob at the same rarity.
-      m.speed = Math.max(70, m.speed * 1.5);
+      // Stationary mobs (Rock, Cactus) stay rooted as pets: the old
+      // `Math.max(70, ...)` floor gave every summon a walking speed, which made
+      // friendly rocks chase things they are not supposed to be able to chase.
+      if (m.speed > 0) m.speed = Math.max(70, m.speed * 1.5);
       m.spawnProtection = protection;
       this.worlds[p.mapId].mobs.push(m);
       pets.push(m);
@@ -1912,7 +1940,9 @@ export class GameServer {
       const dist = Math.hypot(d.x - p.x, d.y - p.y);
       // Magnet attraction: pull drops toward the player within magnet range.
       if (magnetRange > 0 && dist < magnetRange && dist > 46) {
-        const pull = Math.min(1, 8 / dist) * 60;
+        // Pull speed doubled (60 -> 120). Clamped to the remaining gap so the
+        // faster step can never overshoot the player and jitter the card.
+        const pull = Math.min(Math.min(1, 8 / dist) * 120, dist - 46);
         d.x += ((p.x - d.x) / dist) * pull;
         d.y += ((p.y - d.y) / dist) * pull;
       }
