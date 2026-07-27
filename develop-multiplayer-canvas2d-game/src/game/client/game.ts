@@ -1966,8 +1966,8 @@ export class GameClient {
     this.craftUpdate(dt);
 
     const mePlayer = this.ents.get(this.selfId);
-    const targetX = mePlayer ? mePlayer.x : this.px;
-    const targetY = mePlayer ? mePlayer.y : this.py;
+    const targetX = mePlayer ? mePlayer.x : this.camX;
+    const targetY = mePlayer ? mePlayer.y : this.camY;
 
     // Update Rose absorptions
     for (let i = this.roseAbsorptions.length - 1; i >= 0; i--) {
@@ -4209,8 +4209,8 @@ export class GameClient {
     }
 
     const mePlayerRender = this.ents.get(this.selfId);
-    const targetXRender = mePlayerRender ? mePlayerRender.x : this.px;
-    const targetYRender = mePlayerRender ? mePlayerRender.y : this.py;
+    const targetXRender = mePlayerRender ? mePlayerRender.x : this.camX;
+    const targetYRender = mePlayerRender ? mePlayerRender.y : this.camY;
 
     // Draw Rose particles
     for (const rp of this.roseParticles) {
