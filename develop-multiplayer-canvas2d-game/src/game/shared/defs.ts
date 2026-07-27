@@ -219,6 +219,16 @@ export interface ItemDef {
   magnetRange?: number;
   /** Shield points granted per second while orbiting (1 shield absorbs 2 damage). */
   shieldPerSec?: number;
+  /**
+   * One-shot shield granted when this petal absorbs into its owner (Shell).
+   * Works exactly like `heal`, but fills the shield pool instead of HP.
+   */
+  shield?: number;
+  /**
+   * Flat maximum-HP bonus granted to the owner while this petal is equipped.
+   * Scales with rarity (`healthBonus * rarityMult(rarity)`).
+   */
+  healthBonus?: number;
   speed?: number; // % move speed bonus
   petMob?: number; // mob type spawned when this is a summon
   /**
@@ -237,10 +247,23 @@ export interface ItemDef {
 
 /** Rose is the only item that restores player HP. */
 export const ROSE_ITEM = 30;
-/** Time a freshly spawned Rose orbits before it can be consumed. */
+/** Shell absorbs into the flower like a Rose, but refills shield instead of HP. */
+export const SHELL_ITEM = 38;
+/** Time a freshly spawned absorb petal (Rose / Shell) orbits before it can be consumed. */
 export const ROSE_HEAL_DELAY = 1.0;
-/** Time the Rose spends travelling from its orbit into the player. */
+/** Time an absorb petal spends travelling from its orbit into the player. */
 export const ROSE_ABSORB_TIME = 0.4;
+
+/**
+ * Petals that fly into their owner, apply a one-shot effect, then reload.
+ * Rose restores HP; Shell tops the shield pool back up.
+ */
+export const ABSORB_ITEMS: readonly number[] = [ROSE_ITEM, SHELL_ITEM];
+
+/** True when this item uses the Rose-style "absorb into the flower" behaviour. */
+export function isAbsorbItem(itemId: number): boolean {
+  return ABSORB_ITEMS.includes(itemId);
+}
 
 export const ITEMS: ItemDef[] = [
   { id: 0, name: "Basic", kind: "petal", color: "#ffffff", outline: "#cfcfcf", shape: "circle", radius: 8, damage: 10, health: 12, reload: 1.0, dropFactor: 1.0, desc: "A nice and simple petal." },
@@ -297,9 +320,12 @@ export const ITEMS: ItemDef[] = [
   { id: 36, name: "Iris", kind: "petal", color: "#5b3aa0", outline: "#2c1a5e", shape: "circle", radius: 8, damage: 10, health: 12, reload: 1.1, dropFactor: 0.6, desc: "A deep-purple iris." },
   { id: 37, name: "Scorpion Egg", kind: "summon", color: "#d9924a", outline: "#8c4718", shape: "egg", radius: 10, damage: 7, health: 26, reload: 3.7, petMob: 5, dropFactor: 0.55, desc: "Hatches a scorpion." },
   // ── Shell drops (ocean) ──────────────────────────────────────────────────
-  { id: 38, name: "Shell", kind: "petal", color: "#f2d96e", outline: "#c8a030", shape: "circle", radius: 10, damage: 6, health: 20, reload: 1.0, shieldPerSec: 2, dropFactor: 0.7, desc: "Grants a protective shield while orbiting." },
+  { id: 38, name: "Shell", kind: "petal", color: "#f2d96e", outline: "#c8a030", shape: "circle", radius: 16, damage: 6, health: 20, reload: 3.5, shield: 12, dropFactor: 0.7, desc: "Absorbs into its flower, plates it with shield, then reloads." },
   { id: 39, name: "Magnet", kind: "petal", color: "#e05555", outline: "#8a2020", shape: "circle", radius: 8, damage: 4, health: 10, reload: 1.0, magnetRange: 100, dropFactor: 0.65, desc: "Attracts nearby drops toward you." },
   { id: 40, name: "Shell Egg", kind: "summon", color: "#f8e8a0", outline: "#c8a030", shape: "egg", radius: 10, damage: 4, health: 22, reload: 3.6, petMob: 12, dropFactor: 0.55, desc: "Hatches a shell." },
+  // ── Cactus drops (desert) ────────────────────────────────────────────────
+  { id: 41, name: "Cactus", kind: "petal", color: "#4caf50", outline: "#357a38", shape: "circle", radius: 10, damage: 8, health: 22, reload: 1.2, healthBonus: 100, dropFactor: 0.7, desc: "Toughens your flower, raising maximum health while equipped." },
+  { id: 42, name: "Cactus Egg", kind: "summon", color: "#a5d6a7", outline: "#357a38", shape: "egg", radius: 10, damage: 5, health: 26, reload: 4.0, petMob: 4, dropFactor: 0.55, desc: "Plants a friendly cactus. It never moves." },
 ];
 
 /** Item ids that Oracle/Trade may hand back — never dropped by mobs, never craftable by combining. */
@@ -331,7 +357,7 @@ export const MOBS: MobDef[] = [
   // The old generic "Ant" was replaced with Soldier Ant; Worker Ant is a
   // brand new mob added to the Garden biome (id 10 below).
   { id: 3, name: "Soldier Ant", color: "#5b452c", outline: "#3a2b19", shape: "ant", radius: 17, health: 46, damage: 18, speed: 60, xp: 9, drops: [{ item: 7, chance: 0.7 }, { item: 11, chance: 0.7 }, { item: 12, chance: 0.07 }] },
-  { id: 4, name: "Cactus", color: "#4caf50", outline: "#357a38", shape: "cactus", radius: 25, health: 110, damage: 26, speed: 0, xp: 18, drops: [{ item: 9, chance: 0.12 }, { item: 3, chance: 0.7 }, { item: 4, chance: 0.7 }] },
+  { id: 4, name: "Cactus", color: "#4caf50", outline: "#357a38", shape: "cactus", radius: 25, health: 110, damage: 26, speed: 0, xp: 18, drops: [{ item: 41, chance: 0.7 }, { item: 42, chance: 0.07 }] },
   { id: 5, name: "Scorpion", color: "#c76b2a", outline: "#8c4718", shape: "crab", radius: 21, health: 90, damage: 36, speed: 70, xp: 24, drops: [{ item: 36, chance: 0.7 }, { item: 37, chance: 0.28 }, { item: 35, chance: 0.7 }] },
   { id: 6, name: "Beetle", color: "#d1a054", outline: "#9c7532", shape: "bug", radius: 23, health: 100, damage: 24, speed: 48, xp: 20, drops: [{ item: 33, chance: 0.7 }, { item: 35, chance: 0.7 }, { item: 36, chance: 0.7 }] },
   { id: 7, name: "Jellyfish", color: "#b06be0", outline: "#7d40a8", shape: "jelly", radius: 22, health: 78, damage: 28, speed: 38, xp: 20, drops: [{ item: 24, chance: 0.7 }, { item: 25, chance: 0.7 }, { item: 26, chance: 0.07 }] },
@@ -1262,6 +1288,7 @@ export const SUMMON_CFG: Record<number, SummonCfg> = {
   34: { maxCount: 1, spawnProtection: 1.5 },            // Beetle Egg
   37: { maxCount: 2 },                                  // Scorpion Egg
   40: { maxCount: 2 },                                  // Shell Egg
+  42: { maxCount: 1, spawnProtection: 1.5 },            // Cactus Egg — one rooted cactus
 };
 
 /** Default seconds of post-spawn invulnerability for a freshly hatched pet. */

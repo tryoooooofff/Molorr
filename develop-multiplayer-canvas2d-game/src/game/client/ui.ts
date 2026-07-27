@@ -669,6 +669,42 @@ export function drawItemIcon(
       ctx.restore();
       break;
     }
+    case 41: { // Cactus — a round, ribbed green pad studded with spines
+      const R = size * 0.95;
+      ctx.beginPath();
+      ctx.arc(0, 0, R, 0, Math.PI * 2);
+      ctx.fillStyle = "#4caf50";
+      ctx.fill();
+      ctx.lineWidth = Math.max(2, size * 0.18);
+      ctx.strokeStyle = "#357a38";
+      ctx.stroke();
+      // Vertical ribs.
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(0, 0, R, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.strokeStyle = "#3d9142";
+      ctx.lineWidth = Math.max(1, size * 0.1);
+      for (const rx of [-0.45, 0, 0.45]) {
+        ctx.beginPath();
+        ctx.moveTo(R * rx, -R);
+        ctx.lineTo(R * rx, R);
+        ctx.stroke();
+      }
+      ctx.restore();
+      // Radiating spines.
+      ctx.strokeStyle = "#e8f0d8";
+      ctx.lineWidth = Math.max(1, size * 0.09);
+      ctx.lineCap = "round";
+      for (let i = 0; i < 8; i++) {
+        const a = (i / 8) * Math.PI * 2 + Math.PI / 8;
+        ctx.beginPath();
+        ctx.moveTo(Math.cos(a) * R * 0.72, Math.sin(a) * R * 0.72);
+        ctx.lineTo(Math.cos(a) * R * 1.22, Math.sin(a) * R * 1.22);
+        ctx.stroke();
+      }
+      break;
+    }
     case 39: { // Magnet — a red horseshoe magnet
       const k = size / 50;
       ctx.save();
