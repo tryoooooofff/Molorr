@@ -624,6 +624,87 @@ export function drawItemIcon(
       ctx.restore();
       break;
     }
+    case 38: { // Shell — a small fan-shaped seashell icon
+      const k = size / 55;
+      ctx.save();
+      ctx.scale(k, k);
+      ctx.translate(0, 12);
+      const orig2 = { x: 0, y: 20 };
+      const R2 = 48;
+      const fanAngles2 = [-44, -22, 0, 22, 44];
+      const rays2 = fanAngles2.map(d => {
+        const a = (d - 90) * Math.PI / 180;
+        return { x: orig2.x + Math.cos(a) * R2, y: orig2.y + Math.sin(a) * R2 };
+      });
+      ctx.beginPath();
+      ctx.moveTo(rays2[0].x, rays2[0].y);
+      for (let i = 0; i < 4; i++) {
+        const a = rays2[i], b = rays2[i + 1];
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        const dx = mx - orig2.x, dy = my - orig2.y;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        ctx.quadraticCurveTo(orig2.x + dx / len * (len + 12), orig2.y + dy / len * (len + 12), b.x, b.y);
+      }
+      ctx.bezierCurveTo(rays2[4].x - 2, rays2[4].y + 5, orig2.x + 10, orig2.y + 5, orig2.x, orig2.y);
+      ctx.bezierCurveTo(orig2.x - 8, orig2.y + 4, rays2[0].x + 2, rays2[0].y + 4, rays2[0].x, rays2[0].y);
+      ctx.closePath();
+      ctx.fillStyle = "#f2d96e";
+      ctx.fill();
+      ctx.strokeStyle = "#c8a030";
+      ctx.lineWidth = 5;
+      ctx.stroke();
+      // stripes
+      ctx.save();
+      ctx.clip();
+      ctx.strokeStyle = "#c8a030";
+      ctx.lineWidth = 2;
+      [-22.5, -7.5, 7.5, 22.5].forEach(d => {
+        const a = (d - 90) * Math.PI / 180;
+        ctx.beginPath();
+        ctx.moveTo(orig2.x + Math.cos(a) * R2 * 0.2, orig2.y + Math.sin(a) * R2 * 0.2);
+        ctx.lineTo(orig2.x + Math.cos(a) * R2 * 0.8, orig2.y + Math.sin(a) * R2 * 0.8);
+        ctx.stroke();
+      });
+      ctx.restore();
+      ctx.restore();
+      break;
+    }
+    case 39: { // Magnet — a red horseshoe magnet
+      const k = size / 50;
+      ctx.save();
+      ctx.scale(k, k);
+      ctx.lineWidth = 14;
+      ctx.lineCap = "round";
+      // Horseshoe arc
+      ctx.beginPath();
+      ctx.arc(0, -5, 28, Math.PI * 0.15, Math.PI * 0.85, false);
+      ctx.strokeStyle = "#e05555";
+      ctx.stroke();
+      // Two legs
+      ctx.beginPath();
+      ctx.moveTo(-24, 8);
+      ctx.lineTo(-24, 30);
+      ctx.strokeStyle = "#e05555";
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(24, 8);
+      ctx.lineTo(24, 30);
+      ctx.strokeStyle = "#e05555";
+      ctx.stroke();
+      // Silver tips
+      ctx.beginPath();
+      ctx.moveTo(-24, 24);
+      ctx.lineTo(-24, 34);
+      ctx.strokeStyle = "#c0c0c0";
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(24, 24);
+      ctx.lineTo(24, 34);
+      ctx.strokeStyle = "#c0c0c0";
+      ctx.stroke();
+      ctx.restore();
+      break;
+    }
     case 32: { // Glass — a jagged, translucent crystal shard
       const jitterA = [0.05, -0.08, 0.04, -0.06, 0.07, -0.03];
       const jitterR = [1.0, 0.82, 1.05, 0.88, 1.0, 0.86];
@@ -1765,7 +1846,7 @@ export function drawMob(
     const scaledSize = (radius * 2) / 1.4;
     const cactusColor = friendly ? [255, 215, 0] : [100, 200, 100];
     const outlineColor = friendly ? [200, 160, 0] : [50, 150, 50];
-    const spikeCount = 18 + level * 2;
+    const spikeCount = 8 + level;
     const baseRadius = scaledSize * 0.6;
     const spikeHeight = scaledSize * 0.2;
     const currentBaseRadius = baseRadius + Math.sin(t * 3) * 1.5;
@@ -1816,6 +1897,99 @@ export function drawMob(
     ctx.lineWidth = baseRadius * 0.1;
     ctx.lineJoin = "round";
     ctx.stroke();
+    ctx.restore();
+  };
+
+  const drawShell = () => {
+    const scaledSize = radius * 2 * 1.3;
+    if (scaledSize <= 0) return;
+    const isFriendly = friendly;
+    const S = isFriendly ? '#fff0a0' : '#f2d96e';
+    const STRK = isFriendly ? '#c8a000' : '#c8a030';
+    const scale = scaledSize / 80;
+    ctx.save();
+    ctx.translate(x, y);
+    const breathe = 1 + Math.sin(t * 0.05) * 0.05;
+    ctx.scale(breathe, breathe);
+    ctx.rotate(angle + Math.PI / 2);
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    const orig = { x: 0, y: 30 * scale };
+    const R = 62 * scale;
+    const fanAngles = [-44, -22, 0, 22, 44];
+    const rays = fanAngles.map(d => {
+      const a = (d - 90) * Math.PI / 180;
+      return { x: orig.x + Math.cos(a) * R, y: orig.y + Math.sin(a) * R };
+    });
+    const arcL = { x: orig.x - 20 * scale, y: orig.y + 15 * scale };
+    const arcR = { x: orig.x + 20 * scale, y: orig.y + 15 * scale };
+    const arcCP = { x: orig.x, y: orig.y + 4 * scale };
+    const botCP = { x: orig.x, y: orig.y + 11 * scale };
+    const fanPath = () => {
+      ctx.beginPath();
+      ctx.moveTo(rays[0].x, rays[0].y);
+      for (let i = 0; i < 4; i++) {
+        const a = rays[i], b = rays[i + 1];
+        const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+        const dx = mx - orig.x, dy = my - orig.y;
+        const len = Math.sqrt(dx * dx + dy * dy);
+        ctx.quadraticCurveTo(orig.x + dx / len * (len + 16 * scale), orig.y + dy / len * (len + 16 * scale), b.x, b.y);
+      }
+      ctx.bezierCurveTo(rays[4].x - 2 * scale, rays[4].y + 6 * scale, orig.x + 12 * scale, orig.y + 6 * scale, orig.x, orig.y);
+      ctx.bezierCurveTo(orig.x - 10 * scale, orig.y + 5 * scale, rays[0].x + 2 * scale, rays[0].y + 5 * scale, rays[0].x, rays[0].y);
+      ctx.closePath();
+    };
+    const arcAreaPath = () => {
+      ctx.beginPath();
+      ctx.moveTo(arcL.x, arcL.y);
+      ctx.quadraticCurveTo(arcCP.x, arcCP.y, arcR.x, arcR.y);
+      ctx.quadraticCurveTo(botCP.x, botCP.y, arcL.x, arcL.y);
+      ctx.closePath();
+    };
+    // Bottom area
+    arcAreaPath();
+    ctx.fillStyle = STRK;
+    ctx.fill();
+    // Fan fill
+    fanPath();
+    ctx.fillStyle = S;
+    ctx.fill();
+    // Outline
+    ctx.beginPath();
+    ctx.moveTo(rays[0].x, rays[0].y);
+    for (let i = 0; i < 4; i++) {
+      const a = rays[i], b = rays[i + 1];
+      const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+      const dx = mx - orig.x, dy = my - orig.y;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      ctx.quadraticCurveTo(orig.x + dx / len * (len + 16 * scale), orig.y + dy / len * (len + 16 * scale), b.x, b.y);
+    }
+    ctx.bezierCurveTo(rays[4].x - 2 * scale, rays[4].y + 6 * scale, orig.x + 12 * scale, orig.y + 6 * scale, orig.x, orig.y);
+    ctx.lineTo(arcR.x, arcR.y);
+    ctx.quadraticCurveTo(arcCP.x, arcCP.y, arcL.x, arcL.y);
+    ctx.lineTo(orig.x, orig.y);
+    ctx.bezierCurveTo(orig.x - 12 * scale, orig.y + 6 * scale, rays[0].x + 2 * scale, rays[0].y + 6 * scale, rays[0].x, rays[0].y);
+    ctx.closePath();
+    ctx.strokeStyle = STRK;
+    ctx.lineWidth = 8 * scale;
+    ctx.stroke();
+    // Stripes
+    ctx.save();
+    fanPath();
+    ctx.clip();
+    ctx.strokeStyle = STRK;
+    ctx.lineWidth = 2.5 * scale;
+    const stripeAngles = [-22.5, -7.5, 7.5, 22.5];
+    for (const d of stripeAngles) {
+      const a = (d - 90) * Math.PI / 180;
+      const dx = Math.cos(a);
+      const dy = Math.sin(a);
+      ctx.beginPath();
+      ctx.moveTo(orig.x + dx * R * 0.22, orig.y + dy * R * 0.22);
+      ctx.lineTo(orig.x + dx * R * 0.82, orig.y + dy * R * 0.82);
+      ctx.stroke();
+    }
+    ctx.restore();
     ctx.restore();
   };
 
@@ -1974,6 +2148,7 @@ export function drawMob(
     // these reuse existing shapes as a sensible stand-in.
     case 10: drawWorkerAnt(); break; // Worker Ant — same ant shape as Soldier Ant
     case 11: drawSandstorm(); break;    // Sandstorm — procedural heptagons
+    case 12: drawShell(); break;        // Shell — fan-shaped seashell
     default: drawRock(); break;
   }
 

@@ -358,7 +358,7 @@ export class MobGallery {
     ctx.beginPath();
     roundRect(ctx, x + 2, y + 2, slot - 4, slot - 4, Math.max(3, slot * 0.1));
     ctx.clip();
-    drawMob(ctx, mobId, x + slot / 2, y + slot / 2, Math.max(7, slot * 0.31), 0, time, false, rarity, 0);
+    drawMob(ctx, mobId, x + slot / 2, y + slot / 2, Math.max(7, slot * 0.31), 0, 0, false, rarity, 0);
     ctx.restore();
 
     const label = this.formatCount(count);

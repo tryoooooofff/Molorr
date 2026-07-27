@@ -211,6 +211,14 @@ export interface ItemDef {
   reload: number; // seconds
   /** One-shot HP restored when this consumable healing petal reaches its owner. */
   heal?: number;
+  /** Passive HP restored per second while this petal is alive and orbiting. Scales with rarity. */
+  healPerSec?: number;
+  /** Player HP percentage threshold below which healPerSec activates (1 = always, 0.75 = below 75%). */
+  healPerSecThreshold?: number;
+  /** Base magnet range in px — attracts nearby drops toward the player. Scales with rarity. */
+  magnetRange?: number;
+  /** Shield points granted per second while orbiting (1 shield absorbs 2 damage). */
+  shieldPerSec?: number;
   speed?: number; // % move speed bonus
   petMob?: number; // mob type spawned when this is a summon
   /**
@@ -236,7 +244,7 @@ export const ROSE_ABSORB_TIME = 0.4;
 
 export const ITEMS: ItemDef[] = [
   { id: 0, name: "Basic", kind: "petal", color: "#ffffff", outline: "#cfcfcf", shape: "circle", radius: 8, damage: 10, health: 12, reload: 1.0, dropFactor: 1.0, desc: "A nice and simple petal." },
-  { id: 1, name: "Leaf", kind: "petal", color: "#39b54a", outline: "#2b8a38", shape: "leaf", radius: 9, damage: 8, health: 14, reload: 1.0, dropFactor: 0.7, desc: "A light, sturdy leaf." },
+  { id: 1, name: "Leaf", kind: "petal", color: "#39b54a", outline: "#2b8a38", shape: "leaf", radius: 9, damage: 8, health: 14, reload: 1.0, healPerSec: 3, dropFactor: 0.7, desc: "A light, sturdy leaf." },
   { id: 2, name: "Stinger", kind: "petal", color: "#333333", outline: "#111111", shape: "triangle", radius: 6, damage: 38, health: 4, reload: 1.6, dropFactor: 0.6, desc: "Hurts a lot, breaks fast." },
   { id: 3, name: "Rock", kind: "petal", color: "#8d8d8d", outline: "#6a6a6a", shape: "square", radius: 10, damage: 8, health: 55, reload: 2.2, dropFactor: 0.7, desc: "Heavy and very sturdy." },
   { id: 4, name: "Sand", kind: "petal", color: "#e0c068", outline: "#b89b45", shape: "circle", radius: 7, damage: 14, health: 16, reload: 1.2, dropFactor: 0.65, desc: "Gritty desert clump." },
@@ -263,7 +271,7 @@ export const ITEMS: ItemDef[] = [
   { id: 19, name: "Honey", kind: "petal", color: "#e89a18", outline: "#9a5e08", shape: "circle", radius: 8, damage: 5, health: 14, reload: 1.0, dropFactor: 0.7, desc: "Sticky and sweet." },
   { id: 20, name: "Bee Egg", kind: "summon", color: "#fff0a8", outline: "#b59a1e", shape: "egg", radius: 10, damage: 5, health: 22, reload: 3.4, petMob: 1, dropFactor: 0.55, desc: "Hatches a buzzing bee." },
   // ── Starfish drops ──────────────────────────────────────────────────────
-  { id: 21, name: "Starfish", kind: "petal", color: "#f2799e", outline: "#bc4c72", shape: "star", radius: 10, damage: 11, health: 15, reload: 1.2, dropFactor: 0.65, desc: "A tough star from the seafloor." },
+  { id: 21, name: "Starfish", kind: "petal", color: "#f2799e", outline: "#bc4c72", shape: "star", radius: 10, damage: 11, health: 15, reload: 1.2, healPerSec: 5, healPerSecThreshold: 0.75, dropFactor: 0.65, desc: "A tough star from the seafloor." },
   { id: 22, name: "Salt", kind: "petal", color: "#ffffff", outline: "#c4c4c4", shape: "circle", radius: 7, damage: 10, health: 9, reload: 1.0, dropFactor: 0.6, desc: "Crystalline sea salt." },
   { id: 23, name: "Starfish Egg", kind: "summon", color: "#f8b6c8", outline: "#bc4c72", shape: "egg", radius: 10, damage: 4, health: 24, reload: 3.6, petMob: 9, dropFactor: 0.55, desc: "Hatches a starfish." },
   // ── Jellyfish drops ─────────────────────────────────────────────────────
@@ -288,6 +296,10 @@ export const ITEMS: ItemDef[] = [
   { id: 35, name: "Pincer", kind: "petal", color: "#8a4a18", outline: "#3e1e08", shape: "triangle", radius: 8, damage: 20, health: 11, reload: 1.4, dropFactor: 0.6, desc: "A wicked little pincer." },
   { id: 36, name: "Iris", kind: "petal", color: "#5b3aa0", outline: "#2c1a5e", shape: "circle", radius: 8, damage: 10, health: 12, reload: 1.1, dropFactor: 0.6, desc: "A deep-purple iris." },
   { id: 37, name: "Scorpion Egg", kind: "summon", color: "#d9924a", outline: "#8c4718", shape: "egg", radius: 10, damage: 7, health: 26, reload: 3.7, petMob: 5, dropFactor: 0.55, desc: "Hatches a scorpion." },
+  // ── Shell drops (ocean) ──────────────────────────────────────────────────
+  { id: 38, name: "Shell", kind: "petal", color: "#f2d96e", outline: "#c8a030", shape: "circle", radius: 10, damage: 6, health: 20, reload: 1.0, shieldPerSec: 2, dropFactor: 0.7, desc: "Grants a protective shield while orbiting." },
+  { id: 39, name: "Magnet", kind: "petal", color: "#e05555", outline: "#8a2020", shape: "circle", radius: 8, damage: 4, health: 10, reload: 1.0, magnetRange: 100, dropFactor: 0.65, desc: "Attracts nearby drops toward you." },
+  { id: 40, name: "Shell Egg", kind: "summon", color: "#f8e8a0", outline: "#c8a030", shape: "egg", radius: 10, damage: 4, health: 22, reload: 3.6, petMob: 12, dropFactor: 0.55, desc: "Hatches a shell." },
 ];
 
 /** Item ids that Oracle/Trade may hand back — never dropped by mobs, never craftable by combining. */
@@ -329,6 +341,8 @@ export const MOBS: MobDef[] = [
   // Sandstorm: a new desert hazard mob. It reuses the cactus "shape" placeholder
   // until the user finishes its detailed art.
   { id: 11, name: "Sandstorm", color: "#d4b878", outline: "#8a6a3c", shape: "cactus", radius: 28, health: 150, damage: 22, speed: 24, xp: 22, drops: [{ item: 9, chance: 0.18 }, { item: 4, chance: 0.7 }, { item: 32, chance: 0.7 }] },
+  // Shell: a slow ocean mob that drops Shell, Magnet, Pearl, and Shell Egg.
+  { id: 12, name: "Shell", color: "#f2d96e", outline: "#c8a030", shape: "rock", radius: 22, health: 100, damage: 14, speed: 18, xp: 16, drops: [{ item: 38, chance: 0.7 }, { item: 39, chance: 0.7 }, { item: 6, chance: 0.7 }, { item: 40, chance: 0.07 }] },
 ];
 
 export interface Wall {
@@ -597,7 +611,7 @@ export const MAPS: MapDef[] = [
     accent: "#9fe6ff",
     width: 8000,
     height: 8000,
-    mobs: [7, 8, 9],
+    mobs: [7, 8, 9, 12],
     mobCap: 40,
     rarityBias: 0.22,
     walls: [
@@ -1247,6 +1261,7 @@ export const SUMMON_CFG: Record<number, SummonCfg> = {
   29: { maxCount: 1 },                                  // Crab Egg
   34: { maxCount: 1, spawnProtection: 1.5 },            // Beetle Egg
   37: { maxCount: 2 },                                  // Scorpion Egg
+  40: { maxCount: 2 },                                  // Shell Egg
 };
 
 /** Default seconds of post-spawn invulnerability for a freshly hatched pet. */
