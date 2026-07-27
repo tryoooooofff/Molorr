@@ -181,7 +181,9 @@ export class MobGallery {
       return true;
     }
 
-    if (!this.layout || !contains(this.layout.panel, x, y)) {
+    if (!this.layout) return true;
+
+    if (!contains(this.layout.panel, x, y)) {
       this.close();
       return true;
     }
@@ -190,10 +192,12 @@ export class MobGallery {
     return true;
   }
 
-  draw(ctx: CanvasRenderingContext2D, time: number) {
+  draw(ctx: CanvasRenderingContext2D, time: number, viewW?: number, viewH?: number) {
     if (!this.visible) return;
 
-    const layout = this.getLayout(ctx.canvas.width, ctx.canvas.height);
+    const w = viewW ?? Math.round(ctx.canvas.width / (window.devicePixelRatio || 1));
+    const h = viewH ?? Math.round(ctx.canvas.height / (window.devicePixelRatio || 1));
+    const layout = this.getLayout(w, h);
     this.layout = layout;
     const mobs = this.filteredMobs();
     this.updateScrollRange(layout, mobs.length);
@@ -234,7 +238,7 @@ export class MobGallery {
     ctx.restore();
 
     this.drawScrollbar(ctx, layout, mobs.length);
-    if (this.hovered && !this.draggingScroll && !this.biomeDropOpen) this.drawTooltip(ctx, this.hovered);
+    if (this.hovered && !this.draggingScroll && !this.biomeDropOpen) this.drawTooltip(ctx, this.hovered, w, h);
     // The expanded list must sit above the grid and tooltip.
     this.drawBiomeDropdown(ctx, layout);
 
@@ -440,18 +444,18 @@ export class MobGallery {
     void layout;
   }
 
-  private drawTooltip(ctx: CanvasRenderingContext2D, cell: GalleryCell) {
+  private drawTooltip(ctx: CanvasRenderingContext2D, cell: GalleryCell, viewW: number, viewH: number) {
     const mob = MOBS[cell.mobId];
     const rarity = RARITIES[cell.rarity];
     if (!mob || !rarity) return;
 
     const drops = mob.drops.map((drop) => ITEMS[drop.item]).filter((item): item is NonNullable<typeof item> => !!item);
-    const width = Math.min(272, ctx.canvas.width - 16);
+    const width = Math.min(272, viewW - 16);
     const height = 134 + drops.length * 30;
     let x = this.mouseX - width - 16;
     let y = this.mouseY + 16;
-    if (x < 8) x = Math.min(ctx.canvas.width - width - 8, this.mouseX + 16);
-    if (y + height > ctx.canvas.height - 8) y = ctx.canvas.height - height - 8;
+    if (x < 8) x = Math.min(viewW - width - 8, this.mouseX + 16);
+    if (y + height > viewH - 8) y = viewH - height - 8;
     y = Math.max(8, y);
 
     ctx.save();
