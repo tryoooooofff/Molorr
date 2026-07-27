@@ -1573,12 +1573,11 @@ export function drawMob(
     // the target direction. Rotating once here keeps the entire ant, including
     // its redesigned antennae, facing the target.
     ctx.rotate(angle);
-    drawCircle(-bodyRadius * 0.8, 0, bodyRadius, bodyColor);
-    drawCircle(-bodyRadius * 0.8, 0, bodyRadius * 0.7, innerBodyColor);
-    drawCircle(headX, 0, headRadius, bodyColor);
-    drawCircle(headX, 0, headRadius * 0.7, innerBodyColor);
+    // Antennae belong behind the head/body. Drawing them first hides their
+    // attachment points under the head rather than laying the feelers across
+    // the ant's face (applies to both Soldier and Worker Ant render paths).
     // Local +X already points at the target (see the rotate() above), so the
-    // antennae are drawn with angleToPlayer = 0 and start on the head's rim.
+    // antennae use angleToPlayer = 0 and start on the head's rim.
     const antennaScale = headRadius / 16;
     drawAntAntenna(
       headX,
@@ -1595,6 +1594,10 @@ export function drawMob(
       headRadius * 0.9 / antennaScale,
       -4,
     );
+    drawCircle(-bodyRadius * 0.8, 0, bodyRadius, bodyColor);
+    drawCircle(-bodyRadius * 0.8, 0, bodyRadius * 0.7, innerBodyColor);
+    drawCircle(headX, 0, headRadius, bodyColor);
+    drawCircle(headX, 0, headRadius * 0.7, innerBodyColor);
     ctx.restore();
   };
 

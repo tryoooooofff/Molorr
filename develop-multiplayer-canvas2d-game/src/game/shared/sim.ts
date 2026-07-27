@@ -1728,7 +1728,9 @@ export class GameServer {
       this.applyLevel(killer);
       killer.statsDirty = true;
       this.pushEvent(killerClient!, EVT.XP, mob.x, mob.y, xp);
-      this.pushEvent(killerClient!, EVT.KILL, mob.x, mob.y, mob.type);
+      // The client uses the event rarity to unlock the matching Mob Gallery
+      // entry, while `value` remains the stable mob type id.
+      this.pushEvent(killerClient!, EVT.KILL, mob.x, mob.y, mob.type, EMPTY_ITEM, mob.rarity);
     }
 
     // Keep the ground from filling up with stale cards: once the map is at the

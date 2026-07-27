@@ -63,6 +63,7 @@ import {
 } from "./ui";
 import { QuickSlot, QuickSlotHost } from "./quickSlot";
 import { BonusSystem } from "./bonus";
+import { MobGallery } from "./mobGallery";
 
 interface Ent {
   id: number;
@@ -1377,6 +1378,8 @@ export class GameClient {
   private account: { username: string; token: string } | null = null;
   private bonus = new BonusSystem();
   private bonusOpen = false;
+  /** Main-menu bestiary; kill counts are tracked locally by mob + rarity. */
+  private mobGallery = new MobGallery();
   private chat = new ChatSystem();
   private squadCode = "";
 
@@ -2041,6 +2044,9 @@ export class GameClient {
       case EVT.KILL:
         this.killFeed.unshift({ msg: `Defeated ${MOBS[value]?.name ?? "mob"}`, life: 3 });
         this.killFeed = this.killFeed.slice(0, 5);
+        // KILL events carry the defeated mob's rarity in the event rarity byte.
+        // Keep this local collection count independent from server save data.
+        this.mobGallery.recordKill(value, rarity);
         break;
       case EVT.CRAFT_OK:
         this.craftMsg = value > 1 ? `Crafted ${value}x ${RARITIES[rarity].name} ${ITEMS[item].name}!` : `Crafted ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
@@ -3018,6 +3024,10 @@ export class GameClient {
   private onContext = (e: Event) => e.preventDefault();
 
   private onKeyDown = (e: KeyboardEvent) => {
+    if (this.scene === "menu" && this.mobGallery.handleKey(e.key)) {
+      e.preventDefault();
+      return;
+    }
     if (this.scene === "menu" && this.focus) {
       e.preventDefault();
       this.typeInto(e.key);
@@ -3149,6 +3159,7 @@ export class GameClient {
     }
     if (this.bagDraggingThumb) this.dragBagThumb(p.y);
     if (this.craftDraggingThumb) this.dragCraftThumb(p.y);
+    if (this.scene === "menu" && this.mobGallery.visible) this.mobGallery.handleMouseMove(p.x, p.y);
     if (this.settings.panelOpen) this.settings.handleMouseMove(p.x, p.y);
     this.quickSlot.handleMouseMove(p.x, p.y);
   };
@@ -3243,11 +3254,17 @@ export class GameClient {
     this.mouseDown = false;
     this.bagDraggingThumb = false;
     this.craftDraggingThumb = false;
+    this.mobGallery.handleMouseUp();
     if (this.settings.panelOpen) this.settings.handleMouseUp();
     if (this.drag) this.dropDrag(this.mx, this.my);
   };
 
   private onWheel = (e: WheelEvent) => {
+    if (this.scene === "menu" && this.mobGallery.handleWheel(e.deltaY)) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     if (this.settings.panelOpen && this.settings.panelRect) {
       const [px, py, pw, ph] = this.settings.panelRect;
       if (this.mx >= px && this.mx <= px + pw && this.my >= py && this.my <= py + ph) {
@@ -3452,34 +3469,39 @@ export class GameClient {
     const isMobileLayout = this.isMobile || W < 640;
 
     if (isMobileLayout) {
-      // Phone: bottom horizontal bar with 4 buttons
-      const BTN_W = Math.min(78, (W - 32) / 4);
+      // Phone: a compact five-button bar above the menu instructions.
+      const BTN_W = Math.min(78, (W - 36) / 5);
       const BTN_H = 36;
-      const GAP = 6;
-      const totalW = BTN_W * 4 + GAP * 3;
+      const GAP = 5;
+      const totalW = BTN_W * 5 + GAP * 4;
       const startX = (W - totalW) / 2;
-      const y = H - BTN_H - 45; // above instructions
+      const y = H - BTN_H - 45;
       buttons['left_inventory'] = { x: startX, y, w: BTN_W, h: BTN_H };
-      buttons['left_craft'] = { x: startX + BTN_W + GAP, y, w: BTN_W, h: BTN_H };
-      buttons['left_bonus'] = { x: startX + (BTN_W + GAP) * 2, y, w: BTN_W, h: BTN_H };
-      buttons['left_settings'] = { x: startX + (BTN_W + GAP) * 3, y, w: BTN_W, h: BTN_H };
+      buttons['left_craft'] = { x: startX + (BTN_W + GAP), y, w: BTN_W, h: BTN_H };
+      buttons['left_gallery'] = { x: startX + (BTN_W + GAP) * 2, y, w: BTN_W, h: BTN_H };
+      buttons['left_bonus'] = { x: startX + (BTN_W + GAP) * 3, y, w: BTN_W, h: BTN_H };
+      buttons['left_settings'] = { x: startX + (BTN_W + GAP) * 4, y, w: BTN_W, h: BTN_H };
     } else {
       // Desktop: left sidebar
       const LEFT_X = 14;
       const LEFT_W = 90;
       const LEFT_H = 45;
       const LEFT_GAP = 10;
-      const leftMidY = H / 2 - (LEFT_H * 4 + LEFT_GAP * 3) / 2;
+      const leftMidY = H / 2 - (LEFT_H * 5 + LEFT_GAP * 4) / 2;
       buttons['left_inventory'] = { x: LEFT_X, y: leftMidY, w: LEFT_W, h: LEFT_H };
-      buttons['left_craft'] = { x: LEFT_X, y: leftMidY + LEFT_H + LEFT_GAP, w: LEFT_W, h: LEFT_H };
-      buttons['left_bonus'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 2, w: LEFT_W, h: LEFT_H };
-      buttons['left_settings'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 3, w: LEFT_W, h: LEFT_H };
+      buttons['left_craft'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP), w: LEFT_W, h: LEFT_H };
+      buttons['left_gallery'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 2, w: LEFT_W, h: LEFT_H };
+      buttons['left_bonus'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 3, w: LEFT_W, h: LEFT_H };
+      buttons['left_settings'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 4, w: LEFT_W, h: LEFT_H };
     }
 
     return buttons;
   }
 
   private menuClick(mx: number, my: number) {
+    // The gallery is a modal floating panel while open, so it gets first
+    // crack at clicks (including its close button and biome dropdown).
+    if (this.mobGallery.handleClick(mx, my)) return;
     if (this.settings.panelOpen) {
       if (this.settings.handleClick(mx, my)) return;
     }
@@ -3523,6 +3545,16 @@ export class GameClient {
     // Left sidebar buttons (same functions)
     if (actions.left_inventory && hit(actions.left_inventory, mx, my)) this.toggleBag();
     if (actions.left_craft && hit(actions.left_craft, mx, my)) this.toggleCraft();
+    if (actions.left_gallery && hit(actions.left_gallery, mx, my)) {
+      // Keep the gallery as the top-most menu panel rather than competing with
+      // bag, crafting, daily bonus, or settings controls underneath it.
+      this.focus = null;
+      this.bagOpen = false;
+      this.craftOpen = false;
+      this.bonusOpen = false;
+      this.settings.close();
+      this.mobGallery.toggle();
+    }
     if (actions.left_bonus && hit(actions.left_bonus, mx, my)) this.bonusOpen = true;
     if (actions.left_settings && hit(actions.left_settings, mx, my)) this.settings.togglePanel();
     
@@ -3550,6 +3582,7 @@ export class GameClient {
       // canvas listeners would keep swallowing clicks and wheel events over
       // an invisible panel for the whole match.
       this.settings.close();
+      this.mobGallery.close();
       this.updateMobileLayout();
       this.connect();
     };
@@ -4227,17 +4260,19 @@ export class GameClient {
     const leftBtnColors: Record<string, [number, number, number]> = {
       left_inventory: [52, 152, 219],
       left_craft: [155, 89, 182],
+      left_gallery: [70, 145, 94],
       left_bonus: [217, 154, 38],
       left_settings: [127, 140, 141],
     };
     const leftBtnHoverColors: Record<string, [number, number, number]> = {
       left_inventory: [41, 128, 185],
       left_craft: [142, 68, 173],
+      left_gallery: [53, 120, 76],
       left_bonus: [195, 130, 30],
       left_settings: [100, 110, 110],
     };
     
-    for (const key of ['left_inventory', 'left_craft', 'left_bonus', 'left_settings']) {
+    for (const key of ['left_inventory', 'left_craft', 'left_gallery', 'left_bonus', 'left_settings']) {
       const rect = actions[key];
       if (!rect) continue;
       const isHov = hit(rect, this.mx, this.my);
@@ -4252,7 +4287,8 @@ export class GameClient {
       ctx.lineJoin = 'round';
       const labels: Record<string, string> = { 
         left_inventory: isMobileLayout ? 'Bag' : '[I]nventory', 
-        left_craft: isMobileLayout ? 'Craft' : '[C]raft', 
+        left_craft: isMobileLayout ? 'Craft' : '[C]raft',
+        left_gallery: isMobileLayout ? 'Mobs' : 'Mobs',
         left_bonus: 'Bonus',
         left_settings: 'Settings'
       };
@@ -4334,6 +4370,10 @@ export class GameClient {
       }
       ctx.restore();
     }
+
+    // Draw last: this floating panel intentionally overlays every main-menu
+    // control while it is open.
+    this.mobGallery.draw(ctx, this.time);
   }
 
   private bonusModalRect(): Rect {
