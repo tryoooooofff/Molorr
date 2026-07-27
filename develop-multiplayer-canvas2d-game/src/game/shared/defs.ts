@@ -161,6 +161,37 @@ export function friendlyMobSizeMult(rarity: number): number {
  */
 export const MAX_WILD_DROP_RARITY = 8;
 
+// -------------------------------------------------------------- net health
+/**
+ * Seconds without a SNAPSHOT before the client treats the stream as stalled
+ * (dropped/late packets). At 20 Hz a healthy stream delivers one every 50ms,
+ * so this is ~7 missed ticks — long enough to ignore ordinary jitter.
+ *
+ * While stalled the client simply keeps drawing the last known scene instead
+ * of expiring entities, so a brief loss looks like a freeze rather than the
+ * world dissolving around the player.
+ */
+export const SNAPSHOT_STALL_SECONDS = 0.35;
+/** Seconds of stall before a small "waiting for server" notice is drawn. */
+export const SNAPSHOT_STALL_NOTICE_SECONDS = 1.2;
+
+// ------------------------------------------------------------------- AFK
+/**
+ * Seconds of no meaningful activity before the server pops the [AFK CHECK]
+ * button on the player's screen. "Meaningful" excludes neutral input packets,
+ * so a backgrounded tab (which sends a zeroed INPUT on blur) still goes idle.
+ */
+export const AFK_IDLE_SECONDS = 180;
+/**
+ * Seconds the player has to click [AFK CHECK] once it appears. When this runs
+ * out the server drops the connection with AFK_CLOSE_CODE.
+ */
+export const AFK_CHECK_SECONDS = 45;
+/** WebSocket close code used for an AFK kick, so the client can explain itself. */
+export const AFK_CLOSE_CODE = 4001;
+/** Close reason string paired with AFK_CLOSE_CODE. */
+export const AFK_CLOSE_REASON = "afk";
+
 /**
  * Oracle converts cards to exactly the next rarity in one guaranteed
  * (non-random) conversion (for example, Common → Unusual).

@@ -829,6 +829,31 @@ export function drawItemIcon(
       ctx.restore();
       break;
     }
+    case 35: { // Pincer — curved claw drawn from an authored quadratic path
+      // The authored path spans x 38..82 and y 40.5..85 (44 x 44.5 units)
+      // centred on (60, 62.76). Scale it to ~1.9x `size` so it matches the
+      // visual weight of the other petal icons, then re-centre on the origin.
+      const k = (size / 44) * 1.9;
+      ctx.save();
+      ctx.scale(k, k);
+      ctx.translate(-60, -62.76);
+      ctx.fillStyle = "#454545";
+      ctx.beginPath();
+
+      // 使用二次贝塞尔曲线绘制弯曲爪子
+      ctx.moveTo(38, 50);
+      ctx.quadraticCurveTo(60, 50, 82, 85);
+      ctx.quadraticCurveTo(80, 20, 38, 50);
+
+      ctx.fill();
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.strokeStyle = "#333";
+      ctx.lineWidth = 5;
+      ctx.stroke();
+      ctx.restore();
+      break;
+    }
     case 7: { // Wing
       ctx.beginPath();
       ctx.moveTo(-size * 0.75, -size * 1.0);

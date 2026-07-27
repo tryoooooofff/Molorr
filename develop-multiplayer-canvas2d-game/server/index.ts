@@ -16,7 +16,7 @@
 import http from "node:http";
 import { WebSocketServer, WebSocket } from "ws";
 import { GameServer } from "../src/game/shared/sim";
-import { TICK_MS } from "../src/game/shared/defs";
+import { AFK_CLOSE_CODE, AFK_CLOSE_REASON, TICK_MS } from "../src/game/shared/defs";
 
 const PORT = Number(process.env.PORT || 8080);
 const MAX_PLAYERS = Number(process.env.GAME_MAX_PLAYERS || 8);
@@ -35,6 +35,8 @@ const httpServer = http.createServer((req, res) => {
 });
 
 const wss = new WebSocketServer({ server: httpServer });
+/** Live sockets by client id, so the AFK sweep can close the right one. */
+const sockets = new Map<number, WebSocket>();
 
 wss.on("connection", (socket: WebSocket) => {
   if (game.playerCount() >= MAX_PLAYERS) {
@@ -43,6 +45,7 @@ wss.on("connection", (socket: WebSocket) => {
   }
   const id = nextClientId++;
   socket.binaryType = "arraybuffer";
+  sockets.set(id, socket);
   game.addClient(id, (data: Uint8Array) => {
     if (socket.readyState === socket.OPEN) socket.send(data);
   });
@@ -57,8 +60,14 @@ wss.on("connection", (socket: WebSocket) => {
       console.error("bad packet", err);
     }
   });
-  socket.on("close", () => game.removeClient(id));
-  socket.on("error", () => game.removeClient(id));
+  socket.on("close", () => {
+    sockets.delete(id);
+    game.removeClient(id);
+  });
+  socket.on("error", () => {
+    sockets.delete(id);
+    game.removeClient(id);
+  });
 });
 
 let last = Date.now();
@@ -68,6 +77,18 @@ setInterval(() => {
   last = now;
   try {
     game.tick(dt);
+    // Players who ignored the on-screen [AFK CHECK] button are dropped here.
+    // The close event runs removeClient(), so no extra cleanup is needed.
+    for (const id of game.drainKicks()) {
+      const socket = sockets.get(id);
+      if (!socket) continue;
+      console.log(`[petalia] disconnecting client ${id}: afk check expired`);
+      try {
+        socket.close(AFK_CLOSE_CODE, AFK_CLOSE_REASON);
+      } catch {
+        socket.terminate();
+      }
+    }
   } catch (err) {
     console.error("tick error", err);
   }

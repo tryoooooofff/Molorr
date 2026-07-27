@@ -11,7 +11,9 @@
 
 #include <App.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -19,8 +21,15 @@
 #include <vector>
 
 // ----------------------------------------------------------------- protocol
-enum C2S : uint8_t { JOIN = 1, INPUT = 2, SWAP = 3, CRAFT = 4, CHANGE_MAP = 5, RESPAWN = 6, PING = 7 };
-enum S2C : uint8_t { WELCOME = 1, SNAPSHOT = 2, INVENTORY = 3, STATS = 4, EVENT = 5, PONG = 6 };
+enum C2S : uint8_t { JOIN = 1, INPUT = 2, SWAP = 3, CRAFT = 4, CHANGE_MAP = 5, RESPAWN = 6, PING = 7,
+                     AFK_ACK = 13 };
+enum S2C : uint8_t { WELCOME = 1, SNAPSHOT = 2, INVENTORY = 3, STATS = 4, EVENT = 5, PONG = 6,
+                     AFK_CHECK = 9 };
+
+// AFK policy — keep these in sync with src/game/shared/defs.ts.
+constexpr float AFK_IDLE_SECONDS = 180.f;
+constexpr float AFK_CHECK_SECONDS = 45.f;
+constexpr int AFK_CLOSE_CODE = 4001;
 enum EntKind : uint8_t { E_PLAYER = 0, E_MOB = 1, E_PETAL = 2, E_DROP = 3 };
 
 struct Writer {
@@ -60,6 +69,16 @@ struct Player {
   bool alive = true;
   float inDx = 0, inDy = 0;
   uint8_t flags = 0;
+  // AFK tracking. Activity is a *change* in input, never merely non-zero
+  // input: movement follows the mouse, so a player who walks away keeps
+  // resending an identical packet at 20 Hz.
+  float idleSeconds = 0.f;
+  bool afkPending = false;
+  float afkSecondsLeft = 0.f;
+  int afkLastSent = -1;
+  bool kick = false;
+  float lastInDx = 0, lastInDy = 0;
+  uint8_t lastFlags = 0;
   Cell slots[8];
   Cell bag[32];
 };
@@ -82,6 +101,65 @@ class Simulation {
       p.y += p.vy * dt;
     }
     ++tickCount;
+  }
+
+  /**
+   * Marks a player active. Once the prompt is up only an explicit AFK_ACK
+   * (canDismiss) may take it down, so a stuck key cannot answer the check.
+   */
+  void markActive(Player& p, bool canDismiss = false) {
+    if (p.afkPending) {
+      if (!canDismiss) return;
+      p.afkPending = false;
+      p.afkSecondsLeft = 0.f;
+      p.idleSeconds = 0.f;
+      p.afkLastSent = -1;
+      return;
+    }
+    p.idleSeconds = 0.f;
+  }
+
+  /** Builds the AFK_CHECK packet describing a player's current prompt state. */
+  static Writer afkPacket(const Player& p) {
+    Writer w;
+    w.u8v(AFK_CHECK);
+    w.u8v(p.afkPending ? 1 : 0);
+    const float left = p.afkSecondsLeft < 0.f ? 0.f : p.afkSecondsLeft;
+    w.u16v(static_cast<uint16_t>(std::ceil(left)));
+    return w;
+  }
+
+  /**
+   * Advances idle timers, opens the AFK check, and flags expired players for
+   * disconnect. Fills `out` with the ids whose prompt state changed so the
+   * caller can push a packet, and sets Player::kick on the ones to drop.
+   */
+  void updateAfk(float dt, std::vector<uint16_t>& changed) {
+    for (auto& [id, p] : players) {
+      if (p.kick) continue;
+      if (p.afkPending) {
+        p.afkSecondsLeft -= dt;
+        if (p.afkSecondsLeft <= 0.f) {
+          p.afkSecondsLeft = 0.f;
+          p.kick = true;
+          changed.push_back(id);
+          continue;
+        }
+        const int secs = static_cast<int>(std::ceil(p.afkSecondsLeft));
+        if (secs != p.afkLastSent) {
+          p.afkLastSent = secs;
+          changed.push_back(id);
+        }
+        continue;
+      }
+      p.idleSeconds += dt;
+      if (p.idleSeconds >= AFK_IDLE_SECONDS) {
+        p.afkPending = true;
+        p.afkSecondsLeft = AFK_CHECK_SECONDS;
+        p.afkLastSent = static_cast<int>(AFK_CHECK_SECONDS);
+        changed.push_back(id);
+      }
+    }
   }
 
   Writer snapshotFor(const Player& me) const {
@@ -116,6 +194,9 @@ class Simulation {
 int main() {
   Simulation sim;
   uint16_t nextId = 1;
+  using WS = uWS::WebSocket<false, true, PerSocket>;
+  // Live sockets by client id, so the AFK sweep can reach the right one.
+  std::unordered_map<uint16_t, WS*> sockets;
   const int port = std::getenv("PORT") ? std::atoi(std::getenv("PORT")) : 8080;
 
   auto app = uWS::App().ws<PerSocket>("/*", {
@@ -124,6 +205,7 @@ int main() {
       .open = [&](auto* ws) {
         ws->getUserData()->id = nextId++;
         sim.add(ws->getUserData()->id);
+        sockets[ws->getUserData()->id] = ws;
       },
       .message = [&](auto* ws, std::string_view msg, uWS::OpCode) {
         Reader r{reinterpret_cast<const uint8_t*>(msg.data()), msg.size()};
@@ -131,6 +213,7 @@ int main() {
         if (!p) return;
         switch (r.u8v()) {
           case JOIN: {
+            sim.markActive(*p);
             p->name = r.str();
             p->mapId = r.u8v();
             p->xp = r.u32v();
@@ -143,12 +226,31 @@ int main() {
             p->inDx = static_cast<int8_t>(r.u8v()) / 100.f;
             p->inDy = static_cast<int8_t>(r.u8v()) / 100.f;
             p->flags = r.u8v();
+            if (p->inDx != p->lastInDx || p->inDy != p->lastInDy || p->flags != p->lastFlags) {
+              p->lastInDx = p->inDx;
+              p->lastInDy = p->inDy;
+              p->lastFlags = p->flags;
+              sim.markActive(*p);
+            }
             break;
           }
-          default: break;
+          case AFK_ACK: {
+            // The on-screen [AFK CHECK] button was clicked.
+            sim.markActive(*p, true);
+            ws->send(Simulation::afkPacket(*p).view(), uWS::OpCode::BINARY);
+            break;
+          }
+          default:
+            // Any other deliberate packet proves presence, but never dismisses
+            // an open prompt — only AFK_ACK can do that.
+            sim.markActive(*p);
+            break;
         }
       },
-      .close = [&](auto* ws, int, std::string_view) { sim.remove(ws->getUserData()->id); },
+      .close = [&](auto* ws, int, std::string_view) {
+        sockets.erase(ws->getUserData()->id);
+        sim.remove(ws->getUserData()->id);
+      },
   }).listen(port, [port](auto* token) {
       if (token) printf("[petalia-cpp] listening on :%d\n", port);
   });
@@ -156,7 +258,21 @@ int main() {
   // 20 Hz authoritative loop (uWS timers run on the event loop thread)
   struct us_timer_t* timer = us_create_timer((us_loop_t*)uWS::Loop::get(), 0, 0);
   static Simulation* simPtr = &sim;
-  us_timer_set(timer, [](struct us_timer_t*) { simPtr->tick(0.05f); }, 50, 50);
+  static std::unordered_map<uint16_t, WS*>* socketsPtr = &sockets;
+  us_timer_set(timer, [](struct us_timer_t*) {
+    simPtr->tick(0.05f);
+    // Push AFK prompt/countdown updates and drop anyone who ignored the check.
+    std::vector<uint16_t> changed;
+    simPtr->updateAfk(0.05f, changed);
+    for (uint16_t id : changed) {
+      auto it = socketsPtr->find(id);
+      if (it == socketsPtr->end()) continue;
+      Player* p = simPtr->get(id);
+      if (!p) continue;
+      it->second->send(Simulation::afkPacket(*p).view(), uWS::OpCode::BINARY);
+      if (p->kick) it->second->end(AFK_CLOSE_CODE, "afk");
+    }
+  }, 50, 50);
 
   app.run();
   return 0;
