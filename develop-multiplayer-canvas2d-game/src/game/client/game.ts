@@ -3499,6 +3499,23 @@ export class GameClient {
   }
 
   private menuClick(mx: number, my: number) {
+    // Action buttons (top bar and left sidebar)
+    const actions = this.menuActionRects();
+
+    if (actions.left_gallery && hit(actions.left_gallery, mx, my)) {
+      if (this.mobGallery.visible) {
+        this.mobGallery.close();
+      } else {
+        this.focus = null;
+        this.bagOpen = false;
+        this.craftOpen = false;
+        this.bonusOpen = false;
+        this.settings.close();
+        this.mobGallery.open();
+      }
+      return;
+    }
+
     // The gallery is a modal floating panel while open, so it gets first
     // crack at clicks (including its close button and biome dropdown).
     if (this.mobGallery.handleClick(mx, my)) return;
@@ -3538,23 +3555,10 @@ export class GameClient {
         return;
       }
     }
-
-    // Action buttons (top bar and left sidebar)
-    const actions = this.menuActionRects();
     
     // Left sidebar buttons (same functions)
     if (actions.left_inventory && hit(actions.left_inventory, mx, my)) this.toggleBag();
     if (actions.left_craft && hit(actions.left_craft, mx, my)) this.toggleCraft();
-    if (actions.left_gallery && hit(actions.left_gallery, mx, my)) {
-      // Keep the gallery as the top-most menu panel rather than competing with
-      // bag, crafting, daily bonus, or settings controls underneath it.
-      this.focus = null;
-      this.bagOpen = false;
-      this.craftOpen = false;
-      this.bonusOpen = false;
-      this.settings.close();
-      this.mobGallery.toggle();
-    }
     if (actions.left_bonus && hit(actions.left_bonus, mx, my)) this.bonusOpen = true;
     if (actions.left_settings && hit(actions.left_settings, mx, my)) this.settings.togglePanel();
     
@@ -4306,25 +4310,6 @@ export class GameClient {
     ctx.strokeText('v0.4.3', W - 10, isMobileLayout ? H - 8 : H - 10);
     ctx.fillStyle = 'rgba(255,255,255,0.7)';
     ctx.fillText('v0.4.3', W - 10, isMobileLayout ? H - 8 : H - 10);
-    
-    // ─── Instructions ───
-    ctx.textAlign = 'center';
-    ctx.font = `${isMobileLayout ? 11 : 14}px ${FONT_FAMILY}`;
-    ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-    ctx.lineWidth = 3;
-    ctx.lineJoin = 'round';
-    const instrText = 'Select a biome and press PLAY to enter the world';
-    const instrY = isMobileLayout ? H - 12 : H - 30;
-    ctx.strokeText(instrText, W / 2, instrY);
-    ctx.fillStyle = 'rgba(255,255,255,0.8)';
-    ctx.fillText(instrText, W / 2, instrY);
-    
-    // ─── Auth status ───
-    ctx.font = `${isMobileLayout ? 11 : 13}px ${FONT_FAMILY}`;
-    const authY = isMobileLayout ? H - 26 : H - 50;
-    ctx.strokeText(this.authStatus, W / 2, authY);
-    ctx.fillStyle = 'rgba(255,255,255,0.65)';
-    ctx.fillText(this.authStatus, W / 2, authY);
 
     // Craft / Inventory panels can be opened right from the main menu, reusing
     // the same in-game panel drawers.
@@ -4373,7 +4358,7 @@ export class GameClient {
 
     // Draw last: this floating panel intentionally overlays every main-menu
     // control while it is open.
-    this.mobGallery.draw(ctx, this.time);
+    this.mobGallery.draw(ctx, this.time, W, H);
   }
 
   private bonusModalRect(): Rect {
