@@ -24,7 +24,7 @@
 enum C2S : uint8_t { JOIN = 1, INPUT = 2, SWAP = 3, CRAFT = 4, CHANGE_MAP = 5, RESPAWN = 6, PING = 7,
                      AFK_ACK = 13 };
 enum S2C : uint8_t { WELCOME = 1, SNAPSHOT = 2, INVENTORY = 3, STATS = 4, EVENT = 5, PONG = 6,
-                     AFK_CHECK = 9 };
+                     AFK_CHECK = 9, DEBUG = 10 };
 
 // AFK policy — keep these in sync with src/game/shared/defs.ts.
 constexpr float AFK_IDLE_SECONDS = 180.f;

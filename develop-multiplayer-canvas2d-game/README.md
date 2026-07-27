@@ -58,6 +58,21 @@ despawns are unaffected while the stream is healthy. Petals are still purged the
 instant a snapshot omits them, since that check only runs on a packet that actually
 arrived.
 
+## Debug mode
+
+Settings → **Debug Info** turns on a small panel pinned to the bottom-right corner with:
+
+* **FPS** — real (unclamped) frame rate, recomputed once a second.
+* **Ping** — round-trip time to the server, measured by sending `C2S.PING` once a
+  second while the panel is open and timing the matching `S2C.PONG`.
+* **Throughput** — bytes/sec sent and received over the game socket (↓ in, ↑ out).
+* **Objects** — live entity count (players + mobs + petals + drops), server-wide.
+* **Collision checks** — wall/circle and mob/player collision tests the server
+  performed on its most recently completed tick, reported via `S2C.DEBUG`.
+
+The panel only pings the server while it is visible, so leaving it off costs nothing
+extra on the wire.
+
 ## AFK check
 
 Idle players are asked to prove they are still there before the server drops them, so a
@@ -156,6 +171,7 @@ All packets are raw binary, big-endian, first byte = packet id.
 | 5 | EVENT | `u8 kind`, `i16 x`, `i16 y`, `u32 value`, `u8 item`, `u8 rarity` |
 | 6 | PONG | `u32 stamp` |
 | 9 | AFK_CHECK | `u8 active` (1 = show the button), `u16 secondsLeft` |
+| 10 | DEBUG | `u32 collisionChecks`, `u16 entityCount` — sent ~once/sec for the client's debug overlay |
 
 entity = `u8 kind` (0 player, 1 mob, 2 petal, 3 drop), `u16 id`, `u8 type`,
 `u8 team` (0 hostile, 1 friendly, 2 self — for drops this field carries the rarity),

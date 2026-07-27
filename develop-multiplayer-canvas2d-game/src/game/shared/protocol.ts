@@ -48,6 +48,15 @@ export const S2C = {
    * once per second while it counts down, and once with active=0 when cleared.
    */
   AFK_CHECK: 9,
+  /**
+   * Debug-mode telemetry for the client's optional debug overlay. Payload:
+   * `u32 collisionChecks` (wall/circle collision tests performed during the
+   * tick this packet was built from) and `u16 entityCount` (players + mobs +
+   * petals + drops currently simulated, server-wide, not just in view).
+   * Sent at a reduced cadence (see sim.ts) since it's a diagnostic, not
+   * gameplay-critical, packet.
+   */
+  DEBUG: 10,
 } as const;
 
 export const ENT = {
