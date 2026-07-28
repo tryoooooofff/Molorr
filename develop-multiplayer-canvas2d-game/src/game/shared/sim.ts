@@ -60,7 +60,6 @@ import {
   rollZoneRarity,
   findSpawnTiles,
 } from "./defs";
-
 import { C2S, ENT, EVT, Reader, S2C, SWAP_ROW_ALL, TEAM, Writer } from "./protocol";
 
 // =====================================================================
@@ -83,11 +82,12 @@ interface Squad {
 
 /** Maximum level gap between squad members */
 const SQUAD_LEVEL_GAP_MAX = 20;
+
 /** Maximum members per squad */
 const SQUAD_MAX_MEMBERS = 4;
+
 /** Squad code length */
 const SQUAD_CODE_LENGTH = 6;
-
 
 export interface Cell {
   item: number;
@@ -111,27 +111,6 @@ interface PetalState {
   specialTimer: number;
   /** Remaining travel time while a Rose is being absorbed by its owner. */
   absorbTimer: number;
-}
-
-/**
- * One deferred petal→mob strike. `updatePetals` collects these during its
- * read-only broad/narrow-phase pass, then settles every strike in a single
- * write pass afterwards. This decoupling keeps mob state untouched while the
- * grid is being walked (better cache locality, no mid-iteration mutation)
- * and produces identical results to the old immediate-application path.
- */
-interface PetalHitEvent {
-  mob: Mob;
-  petal: PetalState;
-  slotIndex: number;
-  dmg: number;
-  incoming: number;
-  /** Pre-normalised knockback direction (already divided by target distance). */
-  kbX: number;
-  kbY: number;
-  ownerId: number;
-  reloadTime: number;
-  isSummon: boolean;
 }
 
 export interface PlayerSave {
@@ -173,7 +152,6 @@ export class Player {
   bonusEndsAt = 0;
   /** Squad code this player belongs to (empty string = no squad). */
   squadCode = "";
-
   slots: (Cell | null)[] = new Array(SLOT_COUNT).fill(null);
   /**
    * Secondary hotbar row. It holds real items but never grows petals — it is
@@ -188,7 +166,6 @@ export class Player {
   shield = 0;
   dirty = true;
   statsDirty = true;
-
   constructor(id: number) {
     this.id = id;
   }
@@ -224,15 +201,16 @@ export class Mob {
   spawnProtection = 0;
   /** Accumulated damage dealt by each player (petal + friendly mob damage). */
   damageByPlayer: Map<number, number> = new Map();
-  /**
-   * Per-tick monotonic stamp used by the UniformGrid to skip a mob that has
-   * already been visited by the current query (a large mob can be inserted
-   * into several neighbouring cells, so the same mob would otherwise be
-   * returned more than once).
-   */
-  queryStamp: number = 0;
 
-  constructor(id: number, type: number, mapId: number, x: number, y: number, rarity: number, friendly = false) {
+  constructor(
+    id: number,
+    type: number,
+    mapId: number,
+    x: number,
+    y: number,
+    rarity: number,
+    friendly = false
+  ) {
     const def = MOBS[type];
     // Player-owned summons scale like petals (rarityMult); wild mobs scale on the steeper enemy curve.
     const m = friendly ? rarityMult(rarity) : enemyRarityMult(rarity);
@@ -272,7 +250,7 @@ export class Drop {
     public ownerId = 0,
     public ttl = 45,
     /** Cards merged into this one card. Nearby identical drops stack instead of littering. */
-    public count = 1,
+    public count = 1
   ) {}
 }
 
@@ -318,56 +296,104 @@ export interface CollisionCounter {
   n: number;
 }
 
+// ---------------------------------------------------------------------
+// Spatial Hashing for Walls (Static)
+// ---------------------------------------------------------------------
+
+const WALL_GRID_CELL_SIZE = 400; // Size of each cell for wall partitioning
+
+interface WallGrid {
+  cells: Map<string, Wall[]>;
+  cellSize: number;
+}
+
+function buildWallGrid(walls: Wall[], cellSize: number): WallGrid {
+  const cells = new Map<string, Wall[]>();
+  for (const wall of walls) {
+    const startX = Math.floor(wall.x / cellSize);
+    const startY = Math.floor(wall.y / cellSize);
+    const endX = Math.floor((wall.x + wall.w) / cellSize);
+    const endY = Math.floor((wall.y + wall.h) / cellSize);
+
+    for (let gx = startX; gx <= endX; gx++) {
+      for (let gy = startY; gy <= endY; gy++) {
+        const key = `${gx},${gy}`;
+        if (!cells.has(key)) cells.set(key, []);
+        cells.get(key)!.push(wall);
+      }
+    }
+  }
+  return { cells, cellSize };
+}
+
+function getWallsNear(wallGrid: WallGrid, x: number, y: number, radius: number): Wall[] {
+  const results = new Set<Wall>();
+  const minGX = Math.floor((x - radius) / wallGrid.cellSize);
+  const maxGX = Math.floor((x + radius) / wallGrid.cellSize);
+  const minGY = Math.floor((y - radius) / wallGrid.cellSize);
+  const maxGY = Math.floor((y + radius) / wallGrid.cellSize);
+
+  for (let gx = minGX; gx <= maxGX; gx++) {
+    for (let gy = minGY; gy <= maxGY; gy++) {
+      const key = `${gx},${gy}`;
+      const cell = wallGrid.cells.get(key);
+      if (cell) {
+        for (const w of cell) results.add(w);
+      }
+    }
+  }
+  return Array.from(results);
+}
+
+// ---------------------------------------------------------------------
+
 function collideWalls(
-  wallGrid: UniformGrid<Wall & GridEntity>,
+  wallGrid: WallGrid, // Changed signature to use WallGrid
   x: number,
   y: number,
   r: number,
-  counter?: CollisionCounter,
+  counter?: CollisionCounter
 ): [number, number] {
-  // Mutable state carried through the grid callback. Using a container
-  // object (rather than bare `let` locals) avoids TypeScript control-flow
-  // narrowing treating a callback-only assignment as unreachable.
-  const s = { x, y, moved: false };
-  // Repeat a few times because being pushed out of one rectangle can put the
-  // circle into a neighbouring rectangle at corners. Each pass queries the
-  // wall grid at the circle's current position, so only the handful of walls
-  // whose AABB overlaps the circle are tested — the rest of the map's walls
-  // are skipped entirely.
-  for (let pass = 0; pass < 3; pass++) {
-    s.moved = false;
-    wallGrid.query(s.x, s.y, r, (w) => {
-      if (counter) counter.n++;
-      const cx = clamp(s.x, w.x, w.x + w.w);
-      const cy = clamp(s.y, w.y, w.y + w.h);
-      const dx = s.x - cx;
-      const dy = s.y - cy;
-      const d2 = dx * dx + dy * dy;
-      if (d2 >= r * r) return;
+  // Optimization: Only check walls in the local grid area
+  const relevantWalls = getWallsNear(wallGrid, x, y, r);
 
-      s.moved = true;
+  // Repeat a few times because being pushed out of one rectangle can put the
+  // circle into a neighbouring rectangle at corners.
+  for (let pass = 0; pass < 3; pass++) {
+    let moved = false;
+    for (const w of relevantWalls) {
+      if (counter) counter.n++;
+      const cx = clamp(x, w.x, w.x + w.w);
+      const cy = clamp(y, w.y, w.y + w.h);
+      const dx = x - cx;
+      const dy = y - cy;
+      const d2 = dx * dx + dy * dy;
+      if (d2 >= r * r) continue;
+      moved = true;
       if (d2 === 0) {
         // The centre is inside the rectangle. Choose the nearest face rather
         // than an arbitrary side so correction is small and deterministic.
         const faces = [
-          { distance: s.x - w.x, axis: "x" as const, value: w.x - r },
-          { distance: w.x + w.w - s.x, axis: "x" as const, value: w.x + w.w + r },
-          { distance: s.y - w.y, axis: "y" as const, value: w.y - r },
-          { distance: w.y + w.h - s.y, axis: "y" as const, value: w.y + w.h + r },
+          { distance: x - w.x, axis: "x" as const, value: w.x - r },
+          { distance: w.x + w.w - x, axis: "x" as const, value: w.x + w.w + r },
+          { distance: y - w.y, axis: "y" as const, value: w.y - r },
+          { distance: w.y + w.h - y, axis: "y" as const, value: w.y + w.h + r },
         ];
-        const face = faces.reduce((best, candidate) => candidate.distance < best.distance ? candidate : best);
-        if (face.axis === "x") s.x = face.value;
-        else s.y = face.value;
+        const face = faces.reduce((best, candidate) =>
+          candidate.distance < best.distance ? candidate : best
+        );
+        if (face.axis === "x") x = face.value;
+        else y = face.value;
       } else {
         const d = Math.sqrt(d2);
         const push = r - d;
-        s.x += (dx / d) * push;
-        s.y += (dy / d) * push;
+        x += (dx / d) * push;
+        y += (dy / d) * push;
       }
-    });
-    if (!s.moved) break;
+    }
+    if (!moved) break;
   }
-  return [s.x, s.y];
+  return [x, y];
 }
 
 /**
@@ -376,15 +402,15 @@ function collideWalls(
  * after returning to a background browser tab).
  */
 function moveCircleWithWalls(
-  wallGrid: UniformGrid<Wall & GridEntity>,
+  wallGrid: WallGrid, // Changed signature
   x: number,
   y: number,
   dx: number,
   dy: number,
   r: number,
-  counter?: CollisionCounter,
+  counter?: CollisionCounter
 ): [number, number] {
-  const distance = Math.sqrt(dx * dx + dy * dy);
+  const distance = Math.hypot(dx, dy);
   const maxStep = Math.max(4, r * 0.45);
   const steps = Math.max(1, Math.ceil(distance / maxStep));
   const stepX = dx / steps;
@@ -401,140 +427,20 @@ interface GameServerOptions {
   mobCapScale?: number;
 }
 
-// =====================================================================
-// Uniform Grid — broad-phase spatial acceleration structure
-// =====================================================================
-//
-// Rebuilt once per map per tick (mobs & players) or once at startup (walls).
-// Every entity is inserted into **all** cells its axis-aligned bounding box
-// touches, so a query at any point only needs to scan the cells overlapping
-// the query circle — no false negatives regardless of entity size.
-//
-// Deduplication: a large entity can land in several cells, so the same entity
-// may be returned by a single query multiple times. Each query carries a
-// unique `stamp`; the first time an entity is seen its `queryStamp` is set,
-// and any duplicate hit is skipped in O(1). The constraint `T extends
-// { queryStamp: number }` lets the grid touch the field directly without
-// any virtual call or Set allocation.
-//
-// Cell size rationale: 256 px comfortably covers the largest common query
-// radii (petal radius ~20, mob-vs-mob AABB overlap, player radius ~18) while
-// keeping the grid coarse enough that a 4000×3000 map produces only ~200
-// cells. The targeting query (≈460-520 px) touches a 3×3 block of cells,
-// still far cheaper than scanning the entire mob list.
-
-const GRID_CELL_SIZE = 256;
-
-/** Minimum interface an entity must expose to live in a UniformGrid. */
-interface GridEntity {
-  queryStamp: number;
-}
-
-class UniformGrid<T extends GridEntity> {
-  private cellSize: number;
-  private cols: number;
-  private rows: number;
-  private cells: T[][];
-  /** Monotonic per-grid counter; bumped on every query for dedup. */
-  private stampCounter: number = 0;
-
-  constructor(width: number, height: number, cellSize: number = GRID_CELL_SIZE) {
-    this.cellSize = cellSize;
-    this.cols = Math.max(1, Math.ceil(width / cellSize) + 1);
-    this.rows = Math.max(1, Math.ceil(height / cellSize) + 1);
-    this.cells = new Array(this.cols * this.rows);
-    for (let i = 0; i < this.cells.length; i++) this.cells[i] = [];
-  }
-
-  /** Reset every cell to empty. Cheaper than re-allocating the grid. */
-  clear(): void {
-    const cells = this.cells;
-    for (let i = 0; i < cells.length; i++) cells[i].length = 0;
-  }
-
-  /**
-   * Insert an entity into every cell its axis-aligned bounding box overlaps.
-   * The caller supplies the AABB explicitly so the same grid can hold circles
-   * (mob/player: `[x-r, x+r]`) and rectangles (wall: `[x-w/2, x+w/2]`).
-   */
-  insert(entity: T, minX: number, minY: number, maxX: number, maxY: number): void {
-    const cs = this.cellSize;
-    const cxMin = Math.max(0, Math.floor(minX / cs));
-    const cxMax = Math.min(this.cols - 1, Math.floor(maxX / cs));
-    const cyMin = Math.max(0, Math.floor(minY / cs));
-    const cyMax = Math.min(this.rows - 1, Math.floor(maxY / cs));
-    for (let cy = cyMin; cy <= cyMax; cy++) {
-      const row = cy * this.cols;
-      for (let cx = cxMin; cx <= cxMax; cx++) {
-        this.cells[row + cx].push(entity);
-      }
-    }
-  }
-
-  /**
-   * Visit every entity whose cell overlaps the query circle (x, y, r).
-   * Each entity is visited at most once per call thanks to the stamp dedup.
-   * The callback receives only candidates — the caller still needs a
-   * narrow-phase distance check because the query circle and an entity's
-   * bounding box can overlap without the shapes actually touching.
-   */
-  query(x: number, y: number, r: number, cb: (entity: T) => void): void {
-    const cs = this.cellSize;
-    const minX = Math.max(0, Math.floor((x - r) / cs));
-    const maxX = Math.min(this.cols - 1, Math.floor((x + r) / cs));
-    const minY = Math.max(0, Math.floor((y - r) / cs));
-    const maxY = Math.min(this.rows - 1, Math.floor((y + r) / cs));
-    const stamp = ++this.stampCounter;
-    for (let cy = minY; cy <= maxY; cy++) {
-      const row = cy * this.cols;
-      for (let cx = minX; cx <= maxX; cx++) {
-        const cell = this.cells[row + cx];
-        for (let i = 0, n = cell.length; i < n; i++) {
-          const entity = cell[i];
-          if (entity.queryStamp === stamp) continue;
-          entity.queryStamp = stamp;
-          cb(entity);
-        }
-      }
-    }
-  }
-
-  /**
-   * Fast "is there anything within r of (x, y)?" probe. Stops at the first
-   * hit and returns true immediately — cheaper than `query` when we only
-   * need a yes/no answer (e.g. view-frustum culling).
-   */
-  hasAny(x: number, y: number, r: number): boolean {
-    const cs = this.cellSize;
-    const minX = Math.max(0, Math.floor((x - r) / cs));
-    const maxX = Math.min(this.cols - 1, Math.floor((x + r) / cs));
-    const minY = Math.max(0, Math.floor((y - r) / cs));
-    const maxY = Math.min(this.rows - 1, Math.floor((y + r) / cs));
-    const stamp = ++this.stampCounter;
-    for (let cy = minY; cy <= maxY; cy++) {
-      const row = cy * this.cols;
-      for (let cx = minX; cx <= maxX; cx++) {
-        const cell = this.cells[row + cx];
-        for (let i = 0, n = cell.length; i < n; i++) {
-          const entity = cell[i];
-          if (entity.queryStamp === stamp) continue;
-          entity.queryStamp = stamp;
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-}
-
 export class GameServer {
   private nextId = 1;
   private clients = new Map<number, ClientState>();
   private worlds: World[] = MAPS.map(() => ({ mobs: [], drops: [] }));
+  
+  // Pre-computed wall grids for each map
+  private wallGrids: WallGrid[] = [];
+
   private tickCount = 0;
   private mobCapScale: number;
+
   /** All active squads, keyed by their 6-character code. */
   private squads = new Map<string, Squad>();
+
   /**
    * Wall/circle collision tests performed during the most recently completed
    * tick. Exposed for the client's debug overlay (`collisionChecks()`); reset
@@ -542,54 +448,18 @@ export class GameServer {
    * work rather than accumulating forever.
    */
   private collisionCounter: CollisionCounter = { n: 0 };
-  /**
-   * Per-map uniform grid for mobs, rebuilt at the top of every `tick()`.
-   * Lets petal / mob-vs-mob / targeting queries run in O(nearby) instead of
-   * O(all mobs). Lazily created on first tick.
-   */
-  private mobGrids: (UniformGrid<Mob> | null)[] = MAPS.map(() => null);
-  /**
-   * Per-map uniform grid for players, rebuilt every tick alongside the mob
-   * grid. Used for view-frustum culling: a mob far from every player is
-   * skipped entirely for collision purposes (it still moves and targets,
-   * but its collisions don't matter to anyone who can see them).
-   */
-  private playerGrids: (UniformGrid<Player & GridEntity> | null)[] = MAPS.map(() => null);
-  /**
-   * Per-map uniform grid for walls, built **once** at construction time
-   * (walls are static). `collideWalls` queries this grid instead of
-   * iterating the whole wall list, so a player or mob only tests the
-   * handful of walls whose AABB overlaps its current position.
-   */
-  private wallGrids: (UniformGrid<Wall & GridEntity> | null)[] = MAPS.map(() => null);
-  /**
-   * Half-size of the view frustum used for collision culling. A mob within
-   * this distance of any player gets full collision processing; farther mobs
-   * skip mob-vs-mob and mob-vs-player collision for the tick. The value is
-   * the view half-diagonal (~804 px) plus generous padding for mob radius,
-   * movement speed, and the targeting range so nothing pops in/out at the
-   * screen edge.
-   */
-  private static readonly COLLISION_CULL_RADIUS = 1050;
 
   constructor(options: GameServerOptions = {}) {
     this.mobCapScale =
-      Number.isFinite(options.mobCapScale) && (options.mobCapScale ?? 1) > 0 ? options.mobCapScale ?? 1 : 1;
-    // Build the static wall grids once — walls never move, so the grid is
-    // valid for the entire server lifetime.
+      Number.isFinite(options.mobCapScale) && (options.mobCapScale ?? 1) > 0
+        ? options.mobCapScale ?? 1
+        : 1;
+
+    // Build spatial hash for walls for each map
     for (const map of MAPS) {
-      const grid = new UniformGrid<Wall & GridEntity>(map.width, map.height);
-      for (const wall of map.walls) {
-        // Annotate the wall object with the grid's dedup stamp field. This
-        // is a one-time, harmless mutation of a plain data object.
-        // Wall.x/y is the top-left corner (collideWalls clamps to
-        // [w.x, w.x+w.w]), so the AABB is [x, x+w] × [y, y+h].
-        const gw = wall as Wall & GridEntity;
-        gw.queryStamp = 0;
-        grid.insert(gw, wall.x, wall.y, wall.x + wall.w, wall.y + wall.h);
-      }
-      this.wallGrids[map.id] = grid;
+      this.wallGrids.push(buildWallGrid(map.walls, WALL_GRID_CELL_SIZE));
     }
+    
     for (const map of MAPS) {
       for (let i = 0; i < this.mobCapForMap(map.id); i++) this.spawnMob(map.id);
     }
@@ -662,7 +532,9 @@ export class GameServer {
   /** Pushes the current AFK check state (active flag + countdown) to a client. */
   private sendAfkState(c: ClientState) {
     const w = new Writer(4);
-    w.u8(S2C.AFK_CHECK).u8(c.afkPending ? 1 : 0).u16(Math.max(0, Math.ceil(c.afkSecondsLeft)));
+    w.u8(S2C.AFK_CHECK)
+      .u8(c.afkPending ? 1 : 0)
+      .u16(Math.max(0, Math.ceil(c.afkSecondsLeft)));
     c.send(w.bytes());
     c.afkLastSent = c.afkPending ? Math.ceil(c.afkSecondsLeft) : -1;
   }
@@ -698,7 +570,7 @@ export class GameServer {
           `Are you still there? Click [AFK CHECK] within ${AFK_CHECK_SECONDS}s or you will be disconnected.`,
           "System",
           true,
-          false,
+          false
         );
       }
     }
@@ -765,6 +637,7 @@ export class GameServer {
     if (type !== C2S.INPUT && type !== C2S.PING && type !== C2S.BONUS_STATUS) {
       this.markActive(c, type === C2S.AFK_ACK);
     }
+
     switch (type) {
       case C2S.JOIN: {
         const name = r.str().slice(0, 14) || "flower";
@@ -776,11 +649,13 @@ export class GameServer {
         p.xp = xp;
         for (let i = 0; i < SLOT_COUNT; i++) p.slots[i] = readCell(r);
         for (let i = 0; i < SECONDARY_SLOT_COUNT; i++) p.secondary[i] = readCell(r);
+
         // Bag length is dynamic (unlimited bag), so it travels as u16.
         const bagCount = Math.min(r.u16(), BAG_MAX);
         if (p.bag.length < bagCount) p.bag.length = bagCount;
         for (let i = 0; i < bagCount; i++) p.bag[i] = readCell(r);
         for (let i = 0; i < p.bag.length; i++) if (p.bag[i] === undefined) p.bag[i] = null;
+
         // Cooldowns are stored client-side (same trust model as xp above) as
         // "seconds remaining" so they survive reconnects without clock-sync issues.
         const oracleSecLeft = r.u32();
@@ -788,7 +663,9 @@ export class GameServer {
         const now = Date.now();
         p.nextOracleAt = oracleSecLeft > 0 ? now + oracleSecLeft * 1000 : 0;
         p.nextTradeAt = tradeSecLeft > 0 ? now + tradeSecLeft * 1000 : 0;
+
         this.setBonusStatus(p, r.remaining >= 3 ? r.u8() : 1, r.remaining >= 2 ? r.u16() : 0);
+
         if (!p.slots.some(Boolean) && !p.secondary.some(Boolean) && !p.bag.some(Boolean)) {
           p.slots[0] = { item: 0, rarity: 0, count: 1 };
           p.slots[1] = { item: 0, rarity: 0, count: 1 };
@@ -806,6 +683,7 @@ export class GameServer {
         this.sendWelcome(c, p);
         break;
       }
+
       case C2S.INPUT: {
         const p = c.player;
         if (!p) return;
@@ -824,17 +702,20 @@ export class GameServer {
         }
         break;
       }
+
       case C2S.AFK_ACK: {
         // The button was clicked. markActive() already ran above and cleared
         // the pending check, so there is nothing else to do.
         break;
       }
+
       case C2S.BONUS_STATUS: {
         const p = c.player;
         if (!p || r.remaining < 3) return;
         this.setBonusStatus(p, r.u8(), r.u16());
         break;
       }
+
       case C2S.SWAP: {
         const p = c.player;
         if (!p) return;
@@ -848,6 +729,7 @@ export class GameServer {
         else this.swapCells(p, from, to);
         break;
       }
+
       case C2S.SWAP_ROW: {
         const p = c.player;
         if (!p) return;
@@ -856,6 +738,7 @@ export class GameServer {
         else this.swapRowSlot(p, which);
         break;
       }
+
       case C2S.CRAFT: {
         const p = c.player;
         if (!p) return;
@@ -865,12 +748,14 @@ export class GameServer {
         this.craft(c, p, item, rarity, count || CRAFT_CARD_COUNT);
         break;
       }
+
       case C2S.ORACLE: {
         const p = c.player;
         if (!p) return;
         this.oracle(c, p, r.u8(), r.u8());
         break;
       }
+
       case C2S.TRADE: {
         const p = c.player;
         if (!p) return;
@@ -894,6 +779,7 @@ export class GameServer {
         this.sendWelcome(c, p);
         break;
       }
+
       case C2S.RESPAWN: {
         const p = c.player;
         if (!p || p.alive) return;
@@ -906,6 +792,7 @@ export class GameServer {
         p.statsDirty = true;
         break;
       }
+
       case C2S.PING: {
         const stamp = r.u32();
         const w = new Writer(8);
@@ -913,6 +800,7 @@ export class GameServer {
         c.send(w.bytes());
         break;
       }
+
       case C2S.CHAT: {
         const p = c.player;
         if (!p) return;
@@ -933,7 +821,13 @@ export class GameServer {
     return code;
   }
 
-  private sendChatToClient(c: ClientState, text: string, sender: string, isSystem: boolean, isCraftReport: boolean) {
+  private sendChatToClient(
+    c: ClientState,
+    text: string,
+    sender: string,
+    isSystem: boolean,
+    isCraftReport: boolean
+  ) {
     const w = new Writer(256);
     w.u8(S2C.CHAT);
     w.str(text.slice(0, 200));
@@ -999,13 +893,11 @@ export class GameServer {
   private handleChat(c: ClientState, p: Player, msg: string) {
     const trimmed = msg.trim();
     if (!trimmed) return;
-
     // Commands start with /
     if (trimmed.startsWith("/")) {
       this.handleCommand(c, p, trimmed);
       return;
     }
-
     // Regular chat messages travel as body text only. The client renders the
     // sender field itself, so prepending it here produced "name: name: hello".
     this.broadcastChatToMap(p.mapId, trimmed, p.name);
@@ -1014,7 +906,6 @@ export class GameServer {
   private handleCommand(c: ClientState, p: Player, cmd: string) {
     const parts = cmd.split(/\s+/);
     const command = parts[0].toLowerCase();
-
     switch (command) {
       case "/claim": {
         // Server-side daily claim notification
@@ -1023,7 +914,6 @@ export class GameServer {
         this.sendChatToClient(c, "Daily bonus can be claimed from the main menu.", "System", true, false);
         break;
       }
-
       case "/create_public_squad": {
         if (p.squadCode) {
           this.sendChatToClient(c, "You are already in a squad. Use /leave_squad first.", "System", true, false);
@@ -1048,7 +938,6 @@ export class GameServer {
         this.sendSquadUpdate(c, code);
         break;
       }
-
       case "/create_private_squad": {
         if (p.squadCode) {
           this.sendChatToClient(c, "You are already in a squad. Use /leave_squad first.", "System", true, false);
@@ -1073,7 +962,6 @@ export class GameServer {
         this.sendSquadUpdate(c, code);
         break;
       }
-
       case "/join_squad": {
         const squadCode = (parts[1] || "").toUpperCase();
         if (!squadCode) {
@@ -1107,7 +995,6 @@ export class GameServer {
         this.broadcastChatToSquad(squadCode, `System: ${p.name} joined the squad.`, "System");
         break;
       }
-
       case "/leave_squad": {
         if (!p.squadCode) {
           this.sendChatToClient(c, "You are not in a squad.", "System", true, false);
@@ -1124,7 +1011,6 @@ export class GameServer {
         }
         break;
       }
-
       case "/find_public_squad": {
         if (p.squadCode) {
           this.sendChatToClient(c, "You are already in a squad. Use /leave_squad first.", "System", true, false);
@@ -1156,7 +1042,6 @@ export class GameServer {
         this.broadcastChatToSquad(chosen.code, `System: ${p.name} joined the squad.`, "System");
         break;
       }
-
       default: {
         this.sendChatToClient(c, `Unknown command: ${command}`, "System", true, false);
         break;
@@ -1174,7 +1059,11 @@ export class GameServer {
   private sendWelcome(c: ClientState, p: Player) {
     const map = MAPS[p.mapId];
     const w = new Writer(64 + map.walls.length * 8);
-    w.u8(S2C.WELCOME).u16(p.id).u8(p.mapId).u16(map.width).u16(map.height);
+    w.u8(S2C.WELCOME)
+      .u16(p.id)
+      .u8(p.mapId)
+      .u16(map.width)
+      .u16(map.height);
     w.u16(map.walls.length);
     for (const wall of map.walls) w.u16(wall.x).u16(wall.y).u16(wall.w).u16(wall.h);
     c.send(w.bytes());
@@ -1182,9 +1071,23 @@ export class GameServer {
     p.statsDirty = true;
   }
 
-  private pushEvent(c: ClientState, kind: number, x: number, y: number, value: number, item = EMPTY_ITEM, rarity = 0) {
+  private pushEvent(
+    c: ClientState,
+    kind: number,
+    x: number,
+    y: number,
+    value: number,
+    item = EMPTY_ITEM,
+    rarity = 0
+  ) {
     const w = new Writer(16);
-    w.u8(S2C.EVENT).u8(kind).i16(Math.round(x)).i16(Math.round(y)).u32(Math.max(0, Math.round(value))).u8(item).u8(rarity);
+    w.u8(S2C.EVENT)
+      .u8(kind)
+      .i16(Math.round(x))
+      .i16(Math.round(y))
+      .u32(Math.max(0, Math.round(value)))
+      .u8(item)
+      .u8(rarity);
     c.events.push(w.bytes());
   }
 
@@ -1290,7 +1193,6 @@ export class GameServer {
     if (!source || source.count <= 0) return;
     const one: Cell = { item: source.item, rarity: source.rarity, count: 1 };
     const target = this.cellAt(p, to);
-
     if (isHotbarCell(to)) {
       // Equipping/racking one item replaces whatever occupied that hotbar cell.
       // Return the displaced card to the unlimited bag before placing the
@@ -1302,11 +1204,11 @@ export class GameServer {
     } else {
       // A one-item drag can fill an empty bag cell or add to a matching stack;
       // it never overwrites an unrelated stack.
-      if (target && (target.item !== one.item || target.rarity !== one.rarity || target.count >= 999)) return;
+      if (target && (target.item !== one.item || target.rarity !== one.rarity || target.count >= 999))
+        return;
       if (target) target.count += 1;
       else this.setCell(p, to, one);
     }
-
     source.count -= 1;
     if (source.count === 0) this.setCell(p, from, null);
     p.dirty = true;
@@ -1326,7 +1228,6 @@ export class GameServer {
   addItem(p: Player, item: number, rarity: number, count = 1): boolean {
     if (count <= 0) return true;
     let left = count;
-
     // 1) top up existing stacks of the same item+rarity
     for (const cell of p.bag) {
       if (left <= 0) break;
@@ -1337,7 +1238,6 @@ export class GameServer {
         left -= put;
       }
     }
-
     // 2) spill the remainder into free cells, growing the bag as needed
     while (left > 0) {
       let idx = p.bag.indexOf(null);
@@ -1353,7 +1253,6 @@ export class GameServer {
       p.bag[idx] = { item, rarity, count: put };
       left -= put;
     }
-
     p.dirty = true;
     return true;
   }
@@ -1390,16 +1289,13 @@ export class GameServer {
     if (rarity >= MAX_CRAFT_RARITY || successRate === undefined) return;
     const needed = Math.max(1, totalCards);
     if (this.countOf(p, item, rarity) < needed) return;
-
     const used = this.takeFromBag(p, item, rarity, needed);
     if (used !== needed) return;
-
     const attempts = Math.max(1, Math.floor(needed / CRAFT_CARDS_PER_ATTEMPT));
     let successes = 0;
     for (let i = 0; i < attempts; i++) {
       if (Math.random() < successRate) successes++;
     }
-
     if (successes > 0) {
       this.addItem(p, item, rarity + 1, successes);
       this.pushEvent(c, EVT.CRAFT_OK, p.x, p.y, successes, item, rarity + 1);
@@ -1420,7 +1316,6 @@ export class GameServer {
     if (Date.now() < p.nextOracleAt) return;
     const have = this.countOf(p, item, rarity);
     if (have < required) return;
-
     this.takeFromBag(p, item, rarity, required);
     const targetRarity = rarity + ORACLE_SKIP;
     this.addItem(p, item, targetRarity, 1);
@@ -1437,7 +1332,6 @@ export class GameServer {
     const have = this.countOf(p, item, rarity);
     const want = requestedCount > 0 ? Math.min(requestedCount, have) : have;
     if (want <= 0) return;
-
     const used = this.takeFromBag(p, item, rarity, want);
     if (used <= 0) return;
     this.addItem(p, TRINKET_ITEM, rarity, used);
@@ -1450,6 +1344,8 @@ export class GameServer {
   // --------------------------------------------------------------- spawning
   private spawnPlayer(p: Player) {
     const map = MAPS[p.mapId];
+    const wallGrid = this.wallGrids[p.mapId];
+
     // Try to spawn near a grid spawn point first
     const spawnTiles = findSpawnTiles(p.mapId);
     if (spawnTiles.length > 0) {
@@ -1460,7 +1356,7 @@ export class GameServer {
       for (let tries = 0; tries < 20; tries++) {
         const x = tile.col * tileW + Math.random() * tileW;
         const y = tile.row * tileH + Math.random() * tileH;
-        const [cx, cy] = collideWalls(this.wallGrids[p.mapId]!, x, y, 40);
+        const [cx, cy] = collideWalls(wallGrid, x, y, 40);
         if (Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01) {
           p.x = x;
           p.y = y;
@@ -1475,7 +1371,7 @@ export class GameServer {
     for (let tries = 0; tries < 60; tries++) {
       const x = 200 + Math.random() * (map.width - 400);
       const y = 200 + Math.random() * (map.height - 400);
-      const [cx, cy] = collideWalls(this.wallGrids[p.mapId]!, x, y, 40);
+      const [cx, cy] = collideWalls(wallGrid, x, y, 40);
       if (Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01) {
         p.x = x;
         p.y = y;
@@ -1491,12 +1387,13 @@ export class GameServer {
 
   private spawnMob(mapId: number) {
     const map = MAPS[mapId];
+    const wallGrid = this.wallGrids[mapId];
+    
     const type = map.mobs[(Math.random() * map.mobs.length) | 0];
     let rarity = 0;
     let x = 0;
     let y = 0;
     let placed = false;
-
     for (let tries = 0; tries < 80; tries++) {
       x = 200 + Math.random() * (map.width - 400);
       y = 200 + Math.random() * (map.height - 400);
@@ -1504,19 +1401,16 @@ export class GameServer {
       // Only spawn in zone tiles (A-G); skip walls ('1'). Spawn-point tiles
       // are mapped to zone A by getBlockAt.
       if (zone < "A" || zone > "G") continue;
-
       // Roll the rarity before testing space: the collision check must use the
       // real radius, including the 10× Eternal scale, not the base radius.
       const candidateRarity = rollZoneRarity(zone);
       const candidateRadius = MOBS[type].radius * mobSizeMult(candidateRarity);
-      const [cx, cy] = collideWalls(this.wallGrids[mapId]!, x, y, candidateRadius + 6);
+      const [cx, cy] = collideWalls(wallGrid, x, y, candidateRadius + 6);
       if (Math.abs(cx - x) >= 0.01 || Math.abs(cy - y) >= 0.01) continue;
-
       rarity = candidateRarity;
       placed = true;
       break;
     }
-
     // A huge high-rarity mob may not fit a narrow section of the map. Leave
     // this spawn slot empty and retry next tick instead of creating it inside
     // a wall with an incorrect collision box.
@@ -1594,10 +1488,13 @@ export class GameServer {
       // its old pets instantly; a freshly equipped egg can hatch new ones later.
       const pets = p.pets[i] || [];
       const sameSummon =
-        !!cell
-        && !!def
-        && def.kind === "summon"
-        && pets.every((pet) => pet.type === def.petMob && pet.sourceItem === cell.item && pet.sourceRarity === cell.rarity);
+        !!cell &&
+        !!def &&
+        def.kind === "summon" &&
+        pets.every(
+          (pet) =>
+            pet.type === def.petMob && pet.sourceItem === cell.item && pet.sourceRarity === cell.rarity
+        );
       if (pets.length > 0 && !sameSummon) this.despawnPets(p, i);
     }
     p.petals = petals;
@@ -1612,76 +1509,27 @@ export class GameServer {
     for (const c of this.clients.values()) if (c.player) players.push(c.player);
 
     for (const p of players) this.updatePlayer(p, dt, players);
-    // Build the mob grid once before updateWorld so its targeting and
-    // mob-vs-mob collision loops can query nearby mobs instead of scanning
-    // the whole list. The grid is rebuilt again after updateWorld so petals
-    // see post-movement positions.
-    this.buildMobGrids(players);
     for (let m = 0; m < MAPS.length; m++) this.updateWorld(m, dt, players);
     // Mob/player separation happens in updateWorld and can displace a player.
     // Never allow that secondary push to leave the authoritative circle in a wall.
     for (const p of players) {
       if (!p.alive) continue;
       const map = MAPS[p.mapId];
-      [p.x, p.y] = collideWalls(this.wallGrids[p.mapId]!, p.x, p.y, PLAYER_RADIUS, this.collisionCounter);
+      const wallGrid = this.wallGrids[p.mapId];
+      [p.x, p.y] = collideWalls(wallGrid, p.x, p.y, PLAYER_RADIUS, this.collisionCounter);
       p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
       p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
     }
-    // Rebuild the per-map uniform grid now that every mob's position has been
-    // settled by updateWorld. Petals (and any other spatial query) read from
-    // this snapshot for the rest of the tick, so they see a consistent world
-    // and never trip over a mob that is still mid-move.
-    this.buildMobGrids(players);
     for (const p of players) this.updatePetals(p, dt);
     for (const p of players) this.pickupDrops(p);
-
     for (const c of this.clients.values()) this.sendState(c);
-  }
-
-  /**
-   * Clear and repopulate every map's mob **and** player `UniformGrid` with the
-   * current entity lists. Called twice per tick — once before `updateWorld`
-   * (pre-movement snapshot for targeting/collision) and once after (post-
-   * movement snapshot for petals). The grid objects are reused across ticks
-   * (only their cell arrays are cleared) to avoid per-tick allocation churn.
-   */
-  private buildMobGrids(players: Player[]): void {
-    for (let m = 0; m < MAPS.length; m++) {
-      const map = MAPS[m];
-      const world = this.worlds[m];
-      // --- mob grid ---
-      let mGrid = this.mobGrids[m];
-      if (!mGrid) {
-        mGrid = new UniformGrid<Mob>(map.width, map.height);
-        this.mobGrids[m] = mGrid;
-      }
-      mGrid.clear();
-      const mobs = world.mobs;
-      for (let i = 0, n = mobs.length; i < n; i++) {
-        const mob = mobs[i];
-        mGrid.insert(mob, mob.x - mob.radius, mob.y - mob.radius, mob.x + mob.radius, mob.y + mob.radius);
-      }
-      // --- player grid ---
-      let pGrid = this.playerGrids[m];
-      if (!pGrid) {
-        pGrid = new UniformGrid<Player & GridEntity>(map.width, map.height);
-        this.playerGrids[m] = pGrid;
-      }
-      pGrid.clear();
-      for (const p of players) {
-        if (p.mapId !== m || !p.alive) continue;
-        // Annotate the player object with the grid's dedup stamp field
-        // (harmless one-time mutation of a plain data object).
-        const gp = p as Player & GridEntity;
-        if (gp.queryStamp === undefined) gp.queryStamp = 0;
-        pGrid.insert(gp, p.x - PLAYER_RADIUS, p.y - PLAYER_RADIUS, p.x + PLAYER_RADIUS, p.y + PLAYER_RADIUS);
-      }
-    }
   }
 
   private updatePlayer(p: Player, dt: number, players: Player[]) {
     if (!p.alive) return;
     const map = MAPS[p.mapId];
+    const wallGrid = this.wallGrids[p.mapId];
+
     let speedBonus = 0;
     for (let i = 0; i < SLOT_COUNT; i++) {
       const cell = p.slots[i];
@@ -1694,47 +1542,34 @@ export class GameServer {
       if (def.speed) speedBonus += def.speed * (1 + cell.rarity * 0.12);
     }
     const speed = (190 + p.level * 0.8) * (1 + speedBonus / 100);
-    const mag = Math.sqrt(p.inDx * p.inDx + p.inDy * p.inDy);
+    const mag = Math.hypot(p.inDx, p.inDy);
     const nx = mag > 1 ? p.inDx / mag : p.inDx;
     const ny = mag > 1 ? p.inDy / mag : p.inDy;
     p.vx += (nx * speed - p.vx) * Math.min(1, dt * 9);
     p.vy += (ny * speed - p.vy) * Math.min(1, dt * 9);
-    [p.x, p.y] = moveCircleWithWalls(
-      this.wallGrids[p.mapId]!,
-      p.x,
-      p.y,
-      p.vx * dt,
-      p.vy * dt,
-      PLAYER_RADIUS,
-      this.collisionCounter,
-    );
+    [p.x, p.y] = moveCircleWithWalls(wallGrid, p.x, p.y, p.vx * dt, p.vy * dt, PLAYER_RADIUS, this.collisionCounter);
     p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
     p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
-
     // player vs player soft collision
     for (const o of players) {
       if (o === p || o.mapId !== p.mapId || !o.alive) continue;
       this.collisionCounter.n++;
       const dx = p.x - o.x;
       const dy = p.y - o.y;
-      const dSq = dx * dx + dy * dy;
-      const min = PLAYER_RADIUS * 2;
-      if (dSq < min * min && dSq > 1e-6) {
-        const d = Math.sqrt(dSq);
-        const push = (min - d) * 0.5;
+      const d = Math.hypot(dx, dy);
+      if (d < PLAYER_RADIUS * 2 && d > 0.001) {
+        const push = (PLAYER_RADIUS * 2 - d) * 0.5;
         p.x += (dx / d) * push;
         p.y += (dy / d) * push;
       }
     }
-
     // Soft player collision above can push a flower into a nearby wall. Repair
     // that displacement before this authoritative position is broadcast.
-    [p.x, p.y] = collideWalls(this.wallGrids[p.mapId]!, p.x, p.y, PLAYER_RADIUS, this.collisionCounter);
+    [p.x, p.y] = collideWalls(wallGrid, p.x, p.y, PLAYER_RADIUS, this.collisionCounter);
     p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
     p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
 
     p.hurtCd = Math.max(0, p.hurtCd - dt);
-
     const attack = (p.flags & 1) !== 0;
     const defend = (p.flags & 2) !== 0;
     const targetOrbit = attack ? 118 : defend ? 34 : 62;
@@ -1746,12 +1581,6 @@ export class GameServer {
   private updatePetals(p: Player, dt: number) {
     if (!p.alive) return;
     const world = this.worlds[p.mapId];
-    // Spatial index for this map, rebuilt every tick in `tick()`. Falls back
-    // to a full scan only if the grid has not been initialised yet.
-    const grid = this.mobGrids[p.mapId];
-    // Batch buffer: every petal that lands a hit this tick pushes an event
-    // here during the read pass; the write pass settles them all at once.
-    const hitEvents: PetalHitEvent[] = [];
     let liveCount = 0;
     for (let i = 0; i < SLOT_COUNT; i++) {
       const cell = p.slots[i];
@@ -1800,12 +1629,9 @@ export class GameServer {
       const orbitRadius = absorbs ? Math.min(p.orbit, 62) : p.orbit;
       const tx = p.x + Math.cos(slotAngle) * orbitRadius;
       const ty = p.y + Math.sin(slotAngle) * orbitRadius;
-
       if (absorbs) {
         // Rose fills HP; Shell fills the shield pool (capped at maxHp).
-        const missing = def.heal
-          ? Math.max(0, p.maxHp - p.hp)
-          : Math.max(0, p.maxHp - p.shield);
+        const missing = def.heal ? Math.max(0, p.maxHp - p.hp) : Math.max(0, p.maxHp - p.shield);
         st.specialTimer = Math.max(0, st.specialTimer - dt);
         if (st.absorbTimer > 0) {
           const travelStep = Math.min(1, dt / Math.max(dt, st.absorbTimer));
@@ -1829,7 +1655,6 @@ export class GameServer {
           }
           continue;
         }
-
         st.x += (tx - st.x) * Math.min(1, dt * 14);
         st.y += (ty - st.y) * Math.min(1, dt * 14);
         if (st.specialTimer <= 0 && missing > 0) {
@@ -1840,23 +1665,18 @@ export class GameServer {
         st.x += (tx - st.x) * Math.min(1, dt * 14);
         st.y += (ty - st.y) * Math.min(1, dt * 14);
       }
-
       // Passive heal-over-time (Leaf, Starfish): applies every tick while the
       // petal is alive and orbiting. Scales with rarity like the Rose one-shot.
       if (def.healPerSec && p.hp < p.maxHp) {
         const threshold = def.healPerSecThreshold ?? 1;
         if (p.hp / p.maxHp < threshold) {
-          const restored = Math.min(
-            p.maxHp - p.hp,
-            def.healPerSec * rarityMult(cell.rarity) * dt,
-          );
+          const restored = Math.min(p.maxHp - p.hp, def.healPerSec * rarityMult(cell.rarity) * dt);
           if (restored > 0) {
             p.hp += restored;
             p.statsDirty = true;
           }
         }
       }
-
       // Passive shield generation (Shell petal): builds shield while orbiting.
       // 1 shield point absorbs 2 damage. Max shield = player maxHp.
       if (def.shieldPerSec) {
@@ -1866,84 +1686,41 @@ export class GameServer {
           p.statsDirty = true;
         }
       }
-
       const dmg = def.damage * rarityMult(cell.rarity);
       const pr = def.radius * (1 + cell.rarity * 0.06);
-      // Mutable search state. Using a container object (rather than bare
-      // `let` locals) defeats TypeScript's control-flow narrowing: a `let`
-      // assigned only inside the `checkMob` callback is treated as always
-      // `null`, which would make the `if (hit.mob ...)` branch unreachable.
-      // Property reads always use the declared type, so narrowing works.
-      const hit = { mob: null as Mob | null, distSq: Infinity, incoming: 0 };
-      // ---- Broad + narrow phase (read-only) ---------------------------------
-      // The grid returns only mobs whose bounding box overlaps the petal's
-      // query circle, so we skip the vast majority of the map. Each candidate
-      // still needs a precise circle-vs-circle check because the bounding
-      // boxes can overlap without the circles actually touching.
-      //
-      // Distance is tracked as a squared value (dx*dx + dy*dy) for the
-      // comparison; Math.sqrt is deferred to the single closest mob so we
-      // never pay for a square root on a mob we are not going to hit.
-      const checkMob = (mob: Mob) => {
-        if (mob.friendly) return;
+      let targetMob: Mob | null = null;
+      let targetDist = Infinity;
+      let totalIncoming = 0;
+      // OPTIMIZATION: Use spatial hash here too if needed, but for now iterate
+      // Optimize: only check hostile mobs
+      for (const mob of world.mobs) {
+        if (mob.friendly) continue;
         this.collisionCounter.n++;
-        const dx = mob.x - st.x;
-        const dy = mob.y - st.y;
-        const dSq = dx * dx + dy * dy;
-        const range = mob.radius + pr;
-        if (dSq >= range * range) return;
-        hit.incoming += mob.damage * 0.5;
-        if (dSq < hit.distSq) {
-          hit.distSq = dSq;
-          hit.mob = mob;
+        const d = Math.hypot(mob.x - st.x, mob.y - st.y);
+        if (d >= mob.radius + pr) continue;
+        totalIncoming += mob.damage * 0.5;
+        if (d < targetDist) {
+          targetDist = d;
+          targetMob = mob;
         }
-      };
-      if (grid) {
-        grid.query(st.x, st.y, pr, checkMob);
-      } else {
-        for (const mob of world.mobs) checkMob(mob);
       }
-      // ---- Collect hit event (no state mutation yet) -----------------------
-      if (hit.mob && st.hitCd <= 0) {
-        const targetDist = Math.sqrt(hit.distSq);
-        const inv = 1 / (targetDist || 1);
-        hitEvents.push({
-          mob: hit.mob,
-          petal: st,
-          slotIndex: i,
-          dmg,
-          incoming: hit.incoming,
-          kbX: (hit.mob.x - st.x) * inv,
-          kbY: (hit.mob.y - st.y) * inv,
-          ownerId: p.id,
-          reloadTime: def.reload,
-          isSummon,
-        });
-      }
-    }
-    // ---- Write pass: settle every collected strike in one batch ------------
-    // Mutating mob HP / velocity during the grid walk above would dirty the
-    // same cache lines the next petal is about to read. By deferring all
-    // writes to here we keep the read pass cache-clean, and because damage
-    // is HP-independent the batched result is identical to the old
-    // immediate-application path.
-    for (let e = 0; e < hitEvents.length; e++) {
-      const ev = hitEvents[e];
-      ev.mob.hp -= ev.dmg;
-      ev.mob.lastHitBy = ev.ownerId;
-      ev.mob.targetId = ev.ownerId;
-      ev.mob.addDamage(ev.ownerId, ev.dmg);
-      ev.petal.hp -= ev.incoming;
-      ev.petal.hitCd = 0.25;
-      const kb = 90 / (ev.mob.radius / 20);
-      ev.mob.vx += ev.kbX * kb;
-      ev.mob.vy += ev.kbY * kb;
-      if (ev.petal.hp <= 0) {
-        ev.petal.alive = false;
-        ev.petal.timer = ev.reloadTime;
-        ev.petal.specialTimer = 0;
-        ev.petal.absorbTimer = 0;
-        if (ev.isSummon) this.despawnPets(p, ev.slotIndex);
+      if (targetMob && st.hitCd <= 0) {
+        targetMob.hp -= dmg;
+        targetMob.lastHitBy = p.id;
+        targetMob.targetId = p.id;
+        targetMob.addDamage(p.id, dmg);
+        st.hp -= totalIncoming;
+        st.hitCd = 0.25;
+        const kb = 90 / (targetMob.radius / 20);
+        targetMob.vx += ((targetMob.x - st.x) / (targetDist || 1)) * kb;
+        targetMob.vy += ((targetMob.y - st.y) / (targetDist || 1)) * kb;
+        if (st.hp <= 0) {
+          st.alive = false;
+          st.timer = def.reload;
+          st.specialTimer = 0;
+          st.absorbTimer = 0;
+          if (isSummon) this.despawnPets(p, i);
+        }
       }
     }
   }
@@ -1973,24 +1750,20 @@ export class GameServer {
   private hatchPet(p: Player, slot: number, cell: Cell) {
     const def = ITEMS[cell.item];
     if (def.petMob === undefined) return;
-
     const pets = p.pets[slot] || [];
     const room = getSummonCount(cell.item) - pets.length;
     const toSpawn = Math.min(getSummonBatch(cell.item), Math.max(0, room));
     if (toSpawn <= 0) return;
-
     // One rarity roll per cycle, so a batch hatches as a matched set.
     const rarity = this.getSummonRarityWithDna(p, cell);
     const protection = getSpawnProtection(cell.item);
     const map = MAPS[p.mapId];
-
     for (let i = 0; i < toSpawn; i++) {
       // Scatter around the player instead of always the same corner offset.
       const angle = Math.random() * Math.PI * 2;
       const dist = 40 + Math.random() * 30;
       const x = clamp(p.x + Math.cos(angle) * dist, 40, map.width - 40);
       const y = clamp(p.y + Math.sin(angle) * dist, 40, map.height - 40);
-
       const m = new Mob(this.nextId++, def.petMob, p.mapId, x, y, rarity, true);
       m.ownerId = p.id;
       m.ownerSlot = slot;
@@ -2026,10 +1799,8 @@ export class GameServer {
   private getSummonRarityWithDna(p: Player, cell: Cell): number {
     const def = ITEMS[cell.item];
     if (!def || def.kind !== "summon") return 0;
-
     const summonRarity = Math.max(0, Math.min(MAX_RARITY, cell.rarity));
     const mappedRarity = def.noDowngrade ? summonRarity : mapRarityToSummonRarity(summonRarity);
-
     // Look for an equipped, unbroken DNA petal at least as rare as the egg.
     let hasValidDna = false;
     const cloverRarities: number[] = [];
@@ -2043,9 +1814,7 @@ export class GameServer {
       if (otherDef.kind === "dna" && other.rarity >= summonRarity) hasValidDna = true;
       if (other.item === CLOVER_ITEM) cloverRarities.push(other.rarity);
     }
-
     if (!hasValidDna) return mappedRarity;
-
     const totalChance = Math.min(1, DNA_UPGRADE_BASE_CHANCE + cloverDnaBonus(cloverRarities));
     if (Math.random() < totalChance && mappedRarity < MAX_RARITY) return mappedRarity + 1;
     return mappedRarity;
@@ -2054,77 +1823,81 @@ export class GameServer {
   private updateWorld(mapId: number, dt: number, players: Player[]) {
     const map = MAPS[mapId];
     const world = this.worlds[mapId];
+    const wallGrid = this.wallGrids[mapId];
     const here = players.filter((p) => p.mapId === mapId && p.alive);
-    // Pre-movement snapshot grid; lets targeting and mob-vs-mob collision
-    // query only nearby mobs instead of scanning the whole list. The grid is
-    // rebuilt after updateWorld so petals see post-movement positions.
-    const grid = this.mobGrids[mapId];
-    // Player grid for view-frustum culling: a mob far from every player is
-    // skipped entirely for collision (it still moves and targets, but its
-    // collisions don't matter to anyone who can see them).
-    const pGrid = this.playerGrids[mapId];
+
+    // --------------------------------------------------------
+    // Spatial Hashing for Mobs (One-time build per tick)
+    // --------------------------------------------------------
+    const MOB_CELL_SIZE = 250; // Grid size for mob collisions
+    const mobGrid = new Map<string, Mob[]>();
+    const getMobGridKey = (x: number, y: number) =>
+      `${Math.floor(x / MOB_CELL_SIZE)},${Math.floor(y / MOB_CELL_SIZE)}`;
+
+    // Populate grid
+    for (const mob of world.mobs) {
+      const key = getMobGridKey(mob.x, mob.y);
+      if (!mobGrid.has(key)) mobGrid.set(key, []);
+      mobGrid.get(key)!.push(mob);
+    }
+    // Helper to get nearby mobs
+    const getNearbyMobs = (x: number, y: number): Mob[] => {
+      const cx = Math.floor(x / MOB_CELL_SIZE);
+      const cy = Math.floor(y / MOB_CELL_SIZE);
+      const result: Mob[] = [];
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          const key = `${cx + dx},${cy + dy}`;
+          const cell = mobGrid.get(key);
+          if (cell) result.push(...cell);
+        }
+      }
+      return result;
+    };
+    // --------------------------------------------------------
 
     for (let i = world.mobs.length - 1; i >= 0; i--) {
       const mob = world.mobs[i];
       mob.hitCd = Math.max(0, mob.hitCd - dt);
       mob.spawnProtection = Math.max(0, mob.spawnProtection - dt);
-
-      // targeting — grid-accelerated, squared-distance comparisons
+      // targeting
       let target: { x: number; y: number; id: number } | null = null;
-      let bestSq = Infinity;
+      let best = Infinity;
       if (mob.friendly) {
-        // Friendly pets hunt the nearest hostile within 520 px.
-        const rangeSq = 520 * 520;
-        const cb = (other: Mob) => {
-          if (other.friendly || other.hp <= 0) return;
-          const dx = other.x - mob.x;
-          const dy = other.y - mob.y;
-          const dSq = dx * dx + dy * dy;
-          if (dSq < rangeSq && dSq < bestSq) {
-            bestSq = dSq;
+        for (const other of world.mobs) {
+          if (other.friendly) continue;
+          const d = Math.hypot(other.x - mob.x, other.y - mob.y);
+          if (d < 520 && d < best) {
+            best = d;
             target = other;
           }
-        };
-        if (grid) grid.query(mob.x, mob.y, 520, cb);
-        else for (const other of world.mobs) cb(other);
+        }
         const owner = here.find((p) => p.id === mob.ownerId);
         if (owner) {
-          const dx = owner.x - mob.x;
-          const dy = owner.y - mob.y;
-          if (!target || dx * dx + dy * dy > 260 * 260)
-            target = { x: owner.x, y: owner.y, id: owner.id };
+          const od = Math.hypot(owner.x - mob.x, owner.y - mob.y);
+          if (!target || od > 260) target = { x: owner.x, y: owner.y, id: owner.id };
         }
       } else {
-        // Hostile mobs prefer players within 460 px, then friendly mobs within 380 px.
-        const playerRangeSq = 460 * 460;
         for (const p of here) {
-          const dx = p.x - mob.x;
-          const dy = p.y - mob.y;
-          const dSq = dx * dx + dy * dy;
-          if (dSq < playerRangeSq && dSq < bestSq) {
-            bestSq = dSq;
+          const d = Math.hypot(p.x - mob.x, p.y - mob.y);
+          if (d < 460 && d < best) {
+            best = d;
             target = { x: p.x, y: p.y, id: p.id };
           }
         }
-        const petRangeSq = 380 * 380;
-        const cb = (other: Mob) => {
-          if (!other.friendly || other.hp <= 0) return;
-          const dx = other.x - mob.x;
-          const dy = other.y - mob.y;
-          const dSq = dx * dx + dy * dy;
-          if (dSq < petRangeSq && dSq < bestSq) {
-            bestSq = dSq;
+        for (const other of world.mobs) {
+          if (!other.friendly) continue;
+          const d = Math.hypot(other.x - mob.x, other.y - mob.y);
+          if (d < 380 && d < best) {
+            best = d;
             target = other;
           }
-        };
-        if (grid) grid.query(mob.x, mob.y, 380, cb);
-        else for (const other of world.mobs) cb(other);
+        }
       }
-
       if (target && mob.speed > 0) {
         const dx = target.x - mob.x;
         const dy = target.y - mob.y;
-        const d = Math.sqrt(dx * dx + dy * dy) || 1;
+        const d = Math.hypot(dx, dy) || 1;
         mob.vx += ((dx / d) * mob.speed - mob.vx) * Math.min(1, dt * 4);
         mob.vy += ((dy / d) * mob.speed - mob.vy) * Math.min(1, dt * 4);
         mob.angle = Math.atan2(dy, dx);
@@ -2140,42 +1913,24 @@ export class GameServer {
         mob.vx *= 0.9;
         mob.vy *= 0.9;
       }
-
       mob.x += mob.vx * dt;
       mob.y += mob.vy * dt;
       mob.x = clamp(mob.x, mob.radius, map.width - mob.radius);
       mob.y = clamp(mob.y, mob.radius, map.height - mob.radius);
-      const [cx, cy] = collideWalls(this.wallGrids[mapId]!, mob.x, mob.y, mob.radius, this.collisionCounter);
+      const [cx, cy] = collideWalls(wallGrid, mob.x, mob.y, mob.radius, this.collisionCounter);
       mob.x = cx;
       mob.y = cy;
-
-      // ---- View-frustum culling -------------------------------------------
-      // A mob far from every player is skipped entirely for collision this
-      // tick. It still moves and targets (so it walks towards the action),
-      // but its mob-vs-mob and mob-vs-player collisions are irrelevant — no
-      // one can see them, and when the mob eventually approaches a player the
-      // cull test passes and full collision resumes. The cull radius is the
-      // view half-diagonal (~804 px) plus generous padding for mob radius,
-      // movement speed, and the targeting range, so nothing pops in/out at
-      // the screen edge.
-      const nearPlayer = !pGrid || pGrid.hasAny(mob.x, mob.y, GameServer.COLLISION_CULL_RADIUS);
-      if (nearPlayer) {
-      // mob vs mob collision box — grid-accelerated, squared-distance
-      // The query radius is the mob's own radius: with multi-cell insertion
-      // every mob whose AABB overlaps this mob's AABB is returned, which is a
-      // superset of the actual circle-vs-circle collisions. The narrow-phase
-      // check below filters the rest. `other.hp <= 0` skips mobs that have
-      // already been killed earlier in this same reverse-iteration loop but
-      // are still referenced by the (pre-movement) grid snapshot.
-      const collideMob = (other: Mob) => {
-        if (other === mob || other.hp <= 0) return;
+      // mob vs mob collision box
+      // OPTIMIZED: Use spatial hash
+      const nearbyMobs = getNearbyMobs(mob.x, mob.y);
+      for (const other of nearbyMobs) {
+        if (other === mob) continue;
         this.collisionCounter.n++;
         const dx = mob.x - other.x;
         const dy = mob.y - other.y;
-        const dSq = dx * dx + dy * dy;
+        const d = Math.hypot(dx, dy);
         const min = mob.radius + other.radius;
-        if (dSq < min * min && dSq > 1e-6) {
-          const d = Math.sqrt(dSq);
+        if (d < min && d > 0.001) {
           const push = (min - d) * 0.4;
           mob.x += (dx / d) * push;
           mob.y += (dy / d) * push;
@@ -2197,23 +1952,16 @@ export class GameServer {
             other.hitCd = 0.5;
           }
         }
-      };
-      if (grid) grid.query(mob.x, mob.y, mob.radius, collideMob);
-      else for (const other of world.mobs) collideMob(other);
-
+      }
       // hostile mob vs players
       if (!mob.friendly) {
         for (const p of here) {
           this.collisionCounter.n++;
-          const dx = p.x - mob.x;
-          const dy = p.y - mob.y;
-          const dSq = dx * dx + dy * dy;
-          const min = mob.radius + PLAYER_RADIUS;
-          if (dSq < min * min) {
-            const d = Math.sqrt(dSq);
-            const push = (min - d) * 0.5;
-            const ux = dx / (d || 1);
-            const uy = dy / (d || 1);
+          const d = Math.hypot(p.x - mob.x, p.y - mob.y);
+          if (d < mob.radius + PLAYER_RADIUS) {
+            const push = (mob.radius + PLAYER_RADIUS - d) * 0.5;
+            const ux = (p.x - mob.x) / (d || 1);
+            const uy = (p.y - mob.y) / (d || 1);
             p.x += ux * push;
             p.y += uy * push;
             mob.x -= ux * push * 0.4;
@@ -2236,8 +1984,6 @@ export class GameServer {
           }
         }
       }
-      } // end view-frustum cull
-
       if (mob.hp <= 0) {
         world.mobs.splice(i, 1);
         if (mob.friendly) {
@@ -2253,14 +1999,12 @@ export class GameServer {
         continue;
       }
     }
-
     // drops
     for (let i = world.drops.length - 1; i >= 0; i--) {
       const d = world.drops[i];
       d.ttl -= dt;
       if (d.ttl <= 0) world.drops.splice(i, 1);
     }
-
     // respawn mobs
     const hostiles = world.mobs.filter((m) => !m.friendly).length;
     if (hostiles < this.mobCapForMap(mapId) && Math.random() < 0.5) this.spawnMob(mapId);
@@ -2322,12 +2066,10 @@ export class GameServer {
   private onMobKilled(mob: Mob, mapId: number) {
     // Friendly pets never drop loot — they just despawn.
     if (mob.friendly) return;
-
     const def = MOBS[mob.type];
     const world = this.worlds[mapId];
     const killerClient = mob.lastHitBy ? this.clientOf(mob.lastHitBy) : null;
     const killer = killerClient?.player ?? null;
-
     if (killer) {
       const xp = Math.round(def.xp * (1 + mob.rarity * 0.9));
       killer.xp += xp;
@@ -2338,25 +2080,20 @@ export class GameServer {
       // entry, while `value` remains the stable mob type id.
       this.pushEvent(killerClient!, EVT.KILL, mob.x, mob.y, mob.type, EMPTY_ITEM, mob.rarity);
     }
-
     // Keep the ground from filling up with stale cards: once the map is at the
     // cap the oldest few are swept away so fresh loot always has a home.
     if (world.drops.length >= MAX_DROPPED_CARDS) {
       world.drops.splice(0, DROP_TRIM_COUNT);
     }
-
     const dropCount = this.dropMultiplierFor(killer);
     const coreRarity = this.magicCoreRarity(killer);
-
     // Drops follow the mob's actual rarity row exactly:
     // RARITY_DROP_RATES["mob rarity"]["drop rarity"] = probability.
     // No map-bias reroll and no item/drop-entry factor are applied here.
     const mobRarityIndex = Math.max(0, Math.min(MAX_RARITY, mob.rarity));
     const mobRarityName = RARITIES[mobRarityIndex].name;
-
     const rarityIndexOf = (name: string) =>
       Math.max(0, Math.min(MAX_RARITY, RARITIES.findIndex((r) => r.name === name)));
-
     // Every entry of the mob's drop table drops on every kill. `drop.chance` is
     // kept in the data for compatibility, but rarity is rolled solely by the
     // mob rarity table in getDropRarityByItem.
@@ -2367,29 +2104,23 @@ export class GameServer {
         // untouched by any Magic Core the player may be holding.
         let item = drop.item;
         let rarity = rarityIndexOf(getDropRarityByItem(drop.item, mobRarityName));
-
         // Magic variant: only reachable while a Magic Core is equipped, and only
         // when the variant's own roll beats Common. The Core then clamps the
         // result down to its own rarity — it can never push a drop higher.
         const magicItem = MAGIC_ITEM_MAP[drop.item];
         if (magicItem !== undefined && coreRarity >= 0) {
-          const magicRarity = rarityIndexOf(
-            getDropRarityByItem(magicItem, mobRarityName),
-          );
+          const magicRarity = rarityIndexOf(getDropRarityByItem(magicItem, mobRarityName));
           if (magicRarity > 0) {
             item = magicItem;
             rarity = Math.min(magicRarity, coreRarity);
           }
         }
-
         rolled.push({ item, rarity, dropNum: i });
       }
     }
-
     const eligibleLooters = this.computeEligibleLooters(mob);
     // If no one met the 5% threshold (or squad pooled threshold), no loot spawns — enforces the damage requirement
     if (eligibleLooters.size === 0) return;
-
     // Scatter each card at a random angle, pushing later copies of the same
     // item further out so a stacked multi-drop fans away from the corpse
     // instead of piling onto one spot.
@@ -2414,16 +2145,19 @@ export class GameServer {
    * Drops one card, merging it into a nearby identical card when possible so a
    * busy field reads as a few stacked cards instead of a carpet of singles.
    */
-  private spawnDrop(mapId: number, item: number, rarity: number, x: number, y: number, ownerId: number, allowed: Set<number> | null = null) {
+  private spawnDrop(
+    mapId: number,
+    item: number,
+    rarity: number,
+    x: number,
+    y: number,
+    ownerId: number,
+    allowed: Set<number> | null = null
+  ) {
     const world = this.worlds[mapId];
     for (const d of world.drops) {
       if (d.item !== item || d.rarity !== rarity || d.count >= DROP_STACK_MAX) continue;
-      if (Math.abs(d.x - x) > DROP_STACK_RADIUS || Math.abs(d.y - y) > DROP_STACK_RADIUS) continue;
-      {
-        const ddx = d.x - x;
-        const ddy = d.y - y;
-        if (ddx * ddx + ddy * ddy > DROP_STACK_RADIUS * DROP_STACK_RADIUS) continue;
-      }
+      if (Math.hypot(d.x - x, d.y - y) > DROP_STACK_RADIUS) continue;
       // Only merge if loot permissions are identical (prevents leaking loot to non-eligible)
       if (!this.setsEqual(d.allowedPlayerIds, allowed)) continue;
       d.count++;
@@ -2438,7 +2172,7 @@ export class GameServer {
     // For this implementation, when eligible is empty we store empty set, making it unlootable.
     // When eligible is from computeEligibleLooters, it may be empty; we store that empty set.
     if (allowed && allowed.size === 0) {
-      nd.allowedPlayerIds = new Set();
+        nd.allowedPlayerIds = new Set();
     }
     world.drops.push(nd);
   }
@@ -2484,31 +2218,32 @@ export class GameServer {
       if (d.allowedPlayerIds !== null && d.allowedPlayerIds !== undefined) {
         if (!d.allowedPlayerIds.has(p.id)) continue;
       }
-      const ddx = d.x - p.x;
-      const ddy = d.y - p.y;
-      const distSq = ddx * ddx + ddy * ddy;
-      // Pickup range (46 px) — most drops are far away, so the cheap
-      // squared check short-circuits before any sqrt is paid.
-      if (distSq < 46 * 46) {
+      const dist = Math.hypot(d.x - p.x, d.y - p.y);
+      // Magnet attraction: pull drops toward the player within magnet range.
+      if (magnetRange > 0 && dist < magnetRange && dist > 46) {
+        // Pull speed doubled (60 -> 120). Clamped to the remaining gap so the
+        // faster step can never overshoot the player and jitter the card.
+        const pull = Math.min(Math.min(1, 8 / dist) * 120, dist - 46);
+        d.x += ((p.x - d.x) / dist) * pull;
+        d.y += ((p.y - d.y) / dist) * pull;
+      }
+      if (dist < 46) {
         // A stacked card hands over every merged copy at once.
         if (this.addItem(p, d.item, d.rarity, d.count)) {
           world.drops.splice(i, 1);
           const c = this.clientOf(p.id);
           // Spread the loot floaters out a little so a mob that dropped 2-3
           // items reads as 2-3 pickups instead of one overlapping label.
-          if (c) this.pushEvent(c, EVT.LOOT, d.x, d.y - (lootedThisTick++ % 3) * 18, 0, d.item, d.rarity);
-        }
-        continue;
-      }
-      // Magnet attraction: pull drops toward the player within magnet range.
-      if (magnetRange > 0 && distSq < magnetRange * magnetRange) {
-        const dist = Math.sqrt(distSq);
-        if (dist > 46) {
-          // Pull speed doubled (60 -> 120). Clamped to the remaining gap so the
-          // faster step can never overshoot the player and jitter the card.
-          const pull = Math.min(Math.min(1, 8 / dist) * 120, dist - 46);
-          d.x += ((p.x - d.x) / dist) * pull;
-          d.y += ((p.y - d.y) / dist) * pull;
+          if (c)
+            this.pushEvent(
+              c,
+              EVT.LOOT,
+              d.x,
+              d.y - (lootedThisTick++ % 3) * 18,
+              0,
+              d.item,
+              d.rarity
+            );
         }
       }
     }
@@ -2525,7 +2260,6 @@ export class GameServer {
     const viewX = 1300;
     const viewY = 950;
     const inView = (x: number, y: number) => Math.abs(x - p.x) < viewX && Math.abs(y - p.y) < viewY;
-
     const body = new Writer(4096);
     // players
     for (const other of this.clients.values()) {
@@ -2612,7 +2346,6 @@ export class GameServer {
       const progress = 1 - Math.max(0, Math.min(1, st.timer / total));
       body.u8(Math.round(progress * 255));
     }
-
     // Per-slot health/damage (0..255, 255 = full health)
     for (let i = 0; i < SLOT_COUNT; i++) {
       const cell = p.slots[i];
@@ -2624,7 +2357,6 @@ export class GameServer {
       const maxHp = st.maxHp > 0 ? st.maxHp : 1;
       body.u8(Math.max(0, Math.min(255, Math.round((st.hp / maxHp) * 255))));
     }
-
     w.u16(count);
     const head = w.bytes();
     const tail = body.bytes();
@@ -2632,7 +2364,6 @@ export class GameServer {
     packet.set(head, 0);
     packet.set(tail, head.length);
     c.send(packet);
-
     if (p.dirty) {
       p.dirty = false;
       const iw = new Writer(256);
@@ -2673,7 +2404,9 @@ export class GameServer {
     // not something that needs the full 20 Hz snapshot cadence.
     if (this.tickCount % 20 === 0) {
       const dw = new Writer(8);
-      dw.u8(S2C.DEBUG).u32(this.collisionCounter.n).u16(Math.min(65535, this.entityCount()));
+      dw.u8(S2C.DEBUG)
+        .u32(this.collisionCounter.n)
+        .u16(Math.min(65535, this.entityCount()));
       c.send(dw.bytes());
     }
     for (const e of c.events) c.send(e);
