@@ -433,7 +433,7 @@ export const MAPS: MapDef[] = [
     width: 8000,
     height: 8000,
     mobs: [0, 1, 2, 3, 10],
-    mobCap: 50,
+    mobCap: 75,
     rarityBias: 0,
     walls: [
       { x: 0, y: 0, w: 8000, h: 400 },
@@ -553,7 +553,7 @@ export const MAPS: MapDef[] = [
     width: 8000,
     height: 8000,
     mobs: [4, 5, 6, 2, 11],
-    mobCap: 48,
+    mobCap: 80,
     rarityBias: 0.12,
     walls: [
       { x: 0, y: 0, w: 8000, h: 400 },
@@ -669,7 +669,7 @@ export const MAPS: MapDef[] = [
     width: 8000,
     height: 8000,
     mobs: [7, 8, 9, 12],
-    mobCap: 40,
+    mobCap: 75,
     rarityBias: 0.22,
     walls: [
       { x: 0, y: 0, w: 8000, h: 400 },
