@@ -319,48 +319,55 @@ export interface CollisionCounter {
 }
 
 function collideWalls(
-  walls: Wall[],
+  wallGrid: UniformGrid<Wall & GridEntity>,
   x: number,
   y: number,
   r: number,
   counter?: CollisionCounter,
 ): [number, number] {
+  // Mutable state carried through the grid callback. Using a container
+  // object (rather than bare `let` locals) avoids TypeScript control-flow
+  // narrowing treating a callback-only assignment as unreachable.
+  const s = { x, y, moved: false };
   // Repeat a few times because being pushed out of one rectangle can put the
-  // circle into a neighbouring rectangle at corners.
+  // circle into a neighbouring rectangle at corners. Each pass queries the
+  // wall grid at the circle's current position, so only the handful of walls
+  // whose AABB overlaps the circle are tested — the rest of the map's walls
+  // are skipped entirely.
   for (let pass = 0; pass < 3; pass++) {
-    let moved = false;
-    for (const w of walls) {
+    s.moved = false;
+    wallGrid.query(s.x, s.y, r, (w) => {
       if (counter) counter.n++;
-      const cx = clamp(x, w.x, w.x + w.w);
-      const cy = clamp(y, w.y, w.y + w.h);
-      const dx = x - cx;
-      const dy = y - cy;
+      const cx = clamp(s.x, w.x, w.x + w.w);
+      const cy = clamp(s.y, w.y, w.y + w.h);
+      const dx = s.x - cx;
+      const dy = s.y - cy;
       const d2 = dx * dx + dy * dy;
-      if (d2 >= r * r) continue;
+      if (d2 >= r * r) return;
 
-      moved = true;
+      s.moved = true;
       if (d2 === 0) {
         // The centre is inside the rectangle. Choose the nearest face rather
         // than an arbitrary side so correction is small and deterministic.
         const faces = [
-          { distance: x - w.x, axis: "x" as const, value: w.x - r },
-          { distance: w.x + w.w - x, axis: "x" as const, value: w.x + w.w + r },
-          { distance: y - w.y, axis: "y" as const, value: w.y - r },
-          { distance: w.y + w.h - y, axis: "y" as const, value: w.y + w.h + r },
+          { distance: s.x - w.x, axis: "x" as const, value: w.x - r },
+          { distance: w.x + w.w - s.x, axis: "x" as const, value: w.x + w.w + r },
+          { distance: s.y - w.y, axis: "y" as const, value: w.y - r },
+          { distance: w.y + w.h - s.y, axis: "y" as const, value: w.y + w.h + r },
         ];
         const face = faces.reduce((best, candidate) => candidate.distance < best.distance ? candidate : best);
-        if (face.axis === "x") x = face.value;
-        else y = face.value;
+        if (face.axis === "x") s.x = face.value;
+        else s.y = face.value;
       } else {
         const d = Math.sqrt(d2);
         const push = r - d;
-        x += (dx / d) * push;
-        y += (dy / d) * push;
+        s.x += (dx / d) * push;
+        s.y += (dy / d) * push;
       }
-    }
-    if (!moved) break;
+    });
+    if (!s.moved) break;
   }
-  return [x, y];
+  return [s.x, s.y];
 }
 
 /**
@@ -369,7 +376,7 @@ function collideWalls(
  * after returning to a background browser tab).
  */
 function moveCircleWithWalls(
-  walls: Wall[],
+  wallGrid: UniformGrid<Wall & GridEntity>,
   x: number,
   y: number,
   dx: number,
@@ -385,7 +392,7 @@ function moveCircleWithWalls(
   for (let i = 0; i < steps; i++) {
     x += stepX;
     y += stepY;
-    [x, y] = collideWalls(walls, x, y, r, counter);
+    [x, y] = collideWalls(wallGrid, x, y, r, counter);
   }
   return [x, y];
 }
@@ -398,14 +405,17 @@ interface GameServerOptions {
 // Uniform Grid — broad-phase spatial acceleration structure
 // =====================================================================
 //
-// Rebuilt once per map per tick. Every mob is inserted into **all** cells its
-// bounding box touches, so a query at any point only needs to scan the cells
-// overlapping the query circle — no false negatives regardless of mob size.
+// Rebuilt once per map per tick (mobs & players) or once at startup (walls).
+// Every entity is inserted into **all** cells its axis-aligned bounding box
+// touches, so a query at any point only needs to scan the cells overlapping
+// the query circle — no false negatives regardless of entity size.
 //
-// Deduplication: a large mob can land in several cells, so the same mob may
-// be returned by a single query multiple times. Each query carries a unique
-// `stamp`; the first time a mob is seen its `queryStamp` is set, and any
-// duplicate hit is skipped in O(1).
+// Deduplication: a large entity can land in several cells, so the same entity
+// may be returned by a single query multiple times. Each query carries a
+// unique `stamp`; the first time an entity is seen its `queryStamp` is set,
+// and any duplicate hit is skipped in O(1). The constraint `T extends
+// { queryStamp: number }` lets the grid touch the field directly without
+// any virtual call or Set allocation.
 //
 // Cell size rationale: 256 px comfortably covers the largest common query
 // radii (petal radius ~20, mob-vs-mob AABB overlap, player radius ~18) while
@@ -415,11 +425,16 @@ interface GameServerOptions {
 
 const GRID_CELL_SIZE = 256;
 
-class UniformGrid {
+/** Minimum interface an entity must expose to live in a UniformGrid. */
+interface GridEntity {
+  queryStamp: number;
+}
+
+class UniformGrid<T extends GridEntity> {
   private cellSize: number;
   private cols: number;
   private rows: number;
-  private cells: Mob[][];
+  private cells: T[][];
   /** Monotonic per-grid counter; bumped on every query for dedup. */
   private stampCounter: number = 0;
 
@@ -438,33 +453,32 @@ class UniformGrid {
   }
 
   /**
-   * Insert a mob into every cell its axis-aligned bounding box overlaps.
-   * A small mob (radius < cellSize) lands in 1-4 cells; a huge mob
-   * (e.g. a 280 px Eternal) lands in up to ~16. This guarantees that any
-   * query circle that could touch the mob will find it.
+   * Insert an entity into every cell its axis-aligned bounding box overlaps.
+   * The caller supplies the AABB explicitly so the same grid can hold circles
+   * (mob/player: `[x-r, x+r]`) and rectangles (wall: `[x-w/2, x+w/2]`).
    */
-  insert(mob: Mob): void {
+  insert(entity: T, minX: number, minY: number, maxX: number, maxY: number): void {
     const cs = this.cellSize;
-    const minX = Math.max(0, Math.floor((mob.x - mob.radius) / cs));
-    const maxX = Math.min(this.cols - 1, Math.floor((mob.x + mob.radius) / cs));
-    const minY = Math.max(0, Math.floor((mob.y - mob.radius) / cs));
-    const maxY = Math.min(this.rows - 1, Math.floor((mob.y + mob.radius) / cs));
-    for (let cy = minY; cy <= maxY; cy++) {
+    const cxMin = Math.max(0, Math.floor(minX / cs));
+    const cxMax = Math.min(this.cols - 1, Math.floor(maxX / cs));
+    const cyMin = Math.max(0, Math.floor(minY / cs));
+    const cyMax = Math.min(this.rows - 1, Math.floor(maxY / cs));
+    for (let cy = cyMin; cy <= cyMax; cy++) {
       const row = cy * this.cols;
-      for (let cx = minX; cx <= maxX; cx++) {
-        this.cells[row + cx].push(mob);
+      for (let cx = cxMin; cx <= cxMax; cx++) {
+        this.cells[row + cx].push(entity);
       }
     }
   }
 
   /**
-   * Visit every mob whose cell overlaps the query circle (x, y, r).
-   * Each mob is visited at most once per call thanks to the stamp dedup.
+   * Visit every entity whose cell overlaps the query circle (x, y, r).
+   * Each entity is visited at most once per call thanks to the stamp dedup.
    * The callback receives only candidates — the caller still needs a
-   * narrow-phase distance check because the query circle and a mob's
-   * bounding box can overlap without the circles actually touching.
+   * narrow-phase distance check because the query circle and an entity's
+   * bounding box can overlap without the shapes actually touching.
    */
-  query(x: number, y: number, r: number, cb: (mob: Mob) => void): void {
+  query(x: number, y: number, r: number, cb: (entity: T) => void): void {
     const cs = this.cellSize;
     const minX = Math.max(0, Math.floor((x - r) / cs));
     const maxX = Math.min(this.cols - 1, Math.floor((x + r) / cs));
@@ -476,13 +490,40 @@ class UniformGrid {
       for (let cx = minX; cx <= maxX; cx++) {
         const cell = this.cells[row + cx];
         for (let i = 0, n = cell.length; i < n; i++) {
-          const mob = cell[i];
-          if (mob.queryStamp === stamp) continue;
-          mob.queryStamp = stamp;
-          cb(mob);
+          const entity = cell[i];
+          if (entity.queryStamp === stamp) continue;
+          entity.queryStamp = stamp;
+          cb(entity);
         }
       }
     }
+  }
+
+  /**
+   * Fast "is there anything within r of (x, y)?" probe. Stops at the first
+   * hit and returns true immediately — cheaper than `query` when we only
+   * need a yes/no answer (e.g. view-frustum culling).
+   */
+  hasAny(x: number, y: number, r: number): boolean {
+    const cs = this.cellSize;
+    const minX = Math.max(0, Math.floor((x - r) / cs));
+    const maxX = Math.min(this.cols - 1, Math.floor((x + r) / cs));
+    const minY = Math.max(0, Math.floor((y - r) / cs));
+    const maxY = Math.min(this.rows - 1, Math.floor((y + r) / cs));
+    const stamp = ++this.stampCounter;
+    for (let cy = minY; cy <= maxY; cy++) {
+      const row = cy * this.cols;
+      for (let cx = minX; cx <= maxX; cx++) {
+        const cell = this.cells[row + cx];
+        for (let i = 0, n = cell.length; i < n; i++) {
+          const entity = cell[i];
+          if (entity.queryStamp === stamp) continue;
+          entity.queryStamp = stamp;
+          return true;
+        }
+      }
+    }
+    return false;
   }
 }
 
@@ -502,15 +543,53 @@ export class GameServer {
    */
   private collisionCounter: CollisionCounter = { n: 0 };
   /**
-   * Per-map uniform grid, rebuilt at the top of every `tick()`. Holds every
-   * mob on that map so petal / mob-vs-mob / targeting queries can be answered
-   * in O(nearby) instead of O(all mobs). Lazily created on first tick.
+   * Per-map uniform grid for mobs, rebuilt at the top of every `tick()`.
+   * Lets petal / mob-vs-mob / targeting queries run in O(nearby) instead of
+   * O(all mobs). Lazily created on first tick.
    */
-  private mobGrids: (UniformGrid | null)[] = MAPS.map(() => null);
+  private mobGrids: (UniformGrid<Mob> | null)[] = MAPS.map(() => null);
+  /**
+   * Per-map uniform grid for players, rebuilt every tick alongside the mob
+   * grid. Used for view-frustum culling: a mob far from every player is
+   * skipped entirely for collision purposes (it still moves and targets,
+   * but its collisions don't matter to anyone who can see them).
+   */
+  private playerGrids: (UniformGrid<Player & GridEntity> | null)[] = MAPS.map(() => null);
+  /**
+   * Per-map uniform grid for walls, built **once** at construction time
+   * (walls are static). `collideWalls` queries this grid instead of
+   * iterating the whole wall list, so a player or mob only tests the
+   * handful of walls whose AABB overlaps its current position.
+   */
+  private wallGrids: (UniformGrid<Wall & GridEntity> | null)[] = MAPS.map(() => null);
+  /**
+   * Half-size of the view frustum used for collision culling. A mob within
+   * this distance of any player gets full collision processing; farther mobs
+   * skip mob-vs-mob and mob-vs-player collision for the tick. The value is
+   * the view half-diagonal (~804 px) plus generous padding for mob radius,
+   * movement speed, and the targeting range so nothing pops in/out at the
+   * screen edge.
+   */
+  private static readonly COLLISION_CULL_RADIUS = 1050;
 
   constructor(options: GameServerOptions = {}) {
     this.mobCapScale =
       Number.isFinite(options.mobCapScale) && (options.mobCapScale ?? 1) > 0 ? options.mobCapScale ?? 1 : 1;
+    // Build the static wall grids once — walls never move, so the grid is
+    // valid for the entire server lifetime.
+    for (const map of MAPS) {
+      const grid = new UniformGrid<Wall & GridEntity>(map.width, map.height);
+      for (const wall of map.walls) {
+        // Annotate the wall object with the grid's dedup stamp field. This
+        // is a one-time, harmless mutation of a plain data object.
+        // Wall.x/y is the top-left corner (collideWalls clamps to
+        // [w.x, w.x+w.w]), so the AABB is [x, x+w] × [y, y+h].
+        const gw = wall as Wall & GridEntity;
+        gw.queryStamp = 0;
+        grid.insert(gw, wall.x, wall.y, wall.x + wall.w, wall.y + wall.h);
+      }
+      this.wallGrids[map.id] = grid;
+    }
     for (const map of MAPS) {
       for (let i = 0; i < this.mobCapForMap(map.id); i++) this.spawnMob(map.id);
     }
@@ -1381,7 +1460,7 @@ export class GameServer {
       for (let tries = 0; tries < 20; tries++) {
         const x = tile.col * tileW + Math.random() * tileW;
         const y = tile.row * tileH + Math.random() * tileH;
-        const [cx, cy] = collideWalls(map.walls, x, y, 40);
+        const [cx, cy] = collideWalls(this.wallGrids[p.mapId]!, x, y, 40);
         if (Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01) {
           p.x = x;
           p.y = y;
@@ -1396,7 +1475,7 @@ export class GameServer {
     for (let tries = 0; tries < 60; tries++) {
       const x = 200 + Math.random() * (map.width - 400);
       const y = 200 + Math.random() * (map.height - 400);
-      const [cx, cy] = collideWalls(map.walls, x, y, 40);
+      const [cx, cy] = collideWalls(this.wallGrids[p.mapId]!, x, y, 40);
       if (Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01) {
         p.x = x;
         p.y = y;
@@ -1430,7 +1509,7 @@ export class GameServer {
       // real radius, including the 10× Eternal scale, not the base radius.
       const candidateRarity = rollZoneRarity(zone);
       const candidateRadius = MOBS[type].radius * mobSizeMult(candidateRarity);
-      const [cx, cy] = collideWalls(map.walls, x, y, candidateRadius + 6);
+      const [cx, cy] = collideWalls(this.wallGrids[mapId]!, x, y, candidateRadius + 6);
       if (Math.abs(cx - x) >= 0.01 || Math.abs(cy - y) >= 0.01) continue;
 
       rarity = candidateRarity;
@@ -1537,14 +1616,14 @@ export class GameServer {
     // mob-vs-mob collision loops can query nearby mobs instead of scanning
     // the whole list. The grid is rebuilt again after updateWorld so petals
     // see post-movement positions.
-    this.buildMobGrids();
+    this.buildMobGrids(players);
     for (let m = 0; m < MAPS.length; m++) this.updateWorld(m, dt, players);
     // Mob/player separation happens in updateWorld and can displace a player.
     // Never allow that secondary push to leave the authoritative circle in a wall.
     for (const p of players) {
       if (!p.alive) continue;
       const map = MAPS[p.mapId];
-      [p.x, p.y] = collideWalls(map.walls, p.x, p.y, PLAYER_RADIUS, this.collisionCounter);
+      [p.x, p.y] = collideWalls(this.wallGrids[p.mapId]!, p.x, p.y, PLAYER_RADIUS, this.collisionCounter);
       p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
       p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
     }
@@ -1552,7 +1631,7 @@ export class GameServer {
     // settled by updateWorld. Petals (and any other spatial query) read from
     // this snapshot for the rest of the tick, so they see a consistent world
     // and never trip over a mob that is still mid-move.
-    this.buildMobGrids();
+    this.buildMobGrids(players);
     for (const p of players) this.updatePetals(p, dt);
     for (const p of players) this.pickupDrops(p);
 
@@ -1560,23 +1639,43 @@ export class GameServer {
   }
 
   /**
-   * Clear and repopulate every map's `UniformGrid` with the current mob list.
-   * Called once per tick, after movement but before any petal/collision query.
-   * The grid object is reused across ticks (only its cell arrays are cleared)
-   * to avoid per-tick allocation churn.
+   * Clear and repopulate every map's mob **and** player `UniformGrid` with the
+   * current entity lists. Called twice per tick — once before `updateWorld`
+   * (pre-movement snapshot for targeting/collision) and once after (post-
+   * movement snapshot for petals). The grid objects are reused across ticks
+   * (only their cell arrays are cleared) to avoid per-tick allocation churn.
    */
-  private buildMobGrids(): void {
+  private buildMobGrids(players: Player[]): void {
     for (let m = 0; m < MAPS.length; m++) {
       const map = MAPS[m];
       const world = this.worlds[m];
-      let grid = this.mobGrids[m];
-      if (!grid) {
-        grid = new UniformGrid(map.width, map.height);
-        this.mobGrids[m] = grid;
+      // --- mob grid ---
+      let mGrid = this.mobGrids[m];
+      if (!mGrid) {
+        mGrid = new UniformGrid<Mob>(map.width, map.height);
+        this.mobGrids[m] = mGrid;
       }
-      grid.clear();
+      mGrid.clear();
       const mobs = world.mobs;
-      for (let i = 0, n = mobs.length; i < n; i++) grid.insert(mobs[i]);
+      for (let i = 0, n = mobs.length; i < n; i++) {
+        const mob = mobs[i];
+        mGrid.insert(mob, mob.x - mob.radius, mob.y - mob.radius, mob.x + mob.radius, mob.y + mob.radius);
+      }
+      // --- player grid ---
+      let pGrid = this.playerGrids[m];
+      if (!pGrid) {
+        pGrid = new UniformGrid<Player & GridEntity>(map.width, map.height);
+        this.playerGrids[m] = pGrid;
+      }
+      pGrid.clear();
+      for (const p of players) {
+        if (p.mapId !== m || !p.alive) continue;
+        // Annotate the player object with the grid's dedup stamp field
+        // (harmless one-time mutation of a plain data object).
+        const gp = p as Player & GridEntity;
+        if (gp.queryStamp === undefined) gp.queryStamp = 0;
+        pGrid.insert(gp, p.x - PLAYER_RADIUS, p.y - PLAYER_RADIUS, p.x + PLAYER_RADIUS, p.y + PLAYER_RADIUS);
+      }
     }
   }
 
@@ -1601,7 +1700,7 @@ export class GameServer {
     p.vx += (nx * speed - p.vx) * Math.min(1, dt * 9);
     p.vy += (ny * speed - p.vy) * Math.min(1, dt * 9);
     [p.x, p.y] = moveCircleWithWalls(
-      map.walls,
+      this.wallGrids[p.mapId]!,
       p.x,
       p.y,
       p.vx * dt,
@@ -1630,7 +1729,7 @@ export class GameServer {
 
     // Soft player collision above can push a flower into a nearby wall. Repair
     // that displacement before this authoritative position is broadcast.
-    [p.x, p.y] = collideWalls(map.walls, p.x, p.y, PLAYER_RADIUS, this.collisionCounter);
+    [p.x, p.y] = collideWalls(this.wallGrids[p.mapId]!, p.x, p.y, PLAYER_RADIUS, this.collisionCounter);
     p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
     p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
 
@@ -1960,6 +2059,10 @@ export class GameServer {
     // query only nearby mobs instead of scanning the whole list. The grid is
     // rebuilt after updateWorld so petals see post-movement positions.
     const grid = this.mobGrids[mapId];
+    // Player grid for view-frustum culling: a mob far from every player is
+    // skipped entirely for collision (it still moves and targets, but its
+    // collisions don't matter to anyone who can see them).
+    const pGrid = this.playerGrids[mapId];
 
     for (let i = world.mobs.length - 1; i >= 0; i--) {
       const mob = world.mobs[i];
@@ -2042,10 +2145,21 @@ export class GameServer {
       mob.y += mob.vy * dt;
       mob.x = clamp(mob.x, mob.radius, map.width - mob.radius);
       mob.y = clamp(mob.y, mob.radius, map.height - mob.radius);
-      const [cx, cy] = collideWalls(map.walls, mob.x, mob.y, mob.radius, this.collisionCounter);
+      const [cx, cy] = collideWalls(this.wallGrids[mapId]!, mob.x, mob.y, mob.radius, this.collisionCounter);
       mob.x = cx;
       mob.y = cy;
 
+      // ---- View-frustum culling -------------------------------------------
+      // A mob far from every player is skipped entirely for collision this
+      // tick. It still moves and targets (so it walks towards the action),
+      // but its mob-vs-mob and mob-vs-player collisions are irrelevant — no
+      // one can see them, and when the mob eventually approaches a player the
+      // cull test passes and full collision resumes. The cull radius is the
+      // view half-diagonal (~804 px) plus generous padding for mob radius,
+      // movement speed, and the targeting range, so nothing pops in/out at
+      // the screen edge.
+      const nearPlayer = !pGrid || pGrid.hasAny(mob.x, mob.y, GameServer.COLLISION_CULL_RADIUS);
+      if (nearPlayer) {
       // mob vs mob collision box — grid-accelerated, squared-distance
       // The query radius is the mob's own radius: with multi-cell insertion
       // every mob whose AABB overlaps this mob's AABB is returned, which is a
@@ -2122,6 +2236,7 @@ export class GameServer {
           }
         }
       }
+      } // end view-frustum cull
 
       if (mob.hp <= 0) {
         world.mobs.splice(i, 1);
