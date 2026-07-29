@@ -1495,11 +1495,6 @@ export class AccountSystem {
         if (diff > 0) { ud.stats.totalXp = (ud.stats.totalXp || 0) + diff; ud.stats.lastSyncedXp = game.player.xp; }
       }
 
-      if (game.shopSystem) {
-        const stars = game.shopSystem.getStarCount();
-        if (stars > (ud.stats.starsEarned || 0)) ud.stats.starsEarned = stars;
-      }
-
       if (game.player?.inventory?.craftingSystem) {
         const cs = game.player.inventory.craftingSystem;
         if ((cs.totalCrafted || 0) > (ud.stats.petalsCrafted || 0)) ud.stats.petalsCrafted = cs.totalCrafted;
@@ -1706,12 +1701,6 @@ export class AccountSystem {
     const sessionMs   = this._sessionStart ? (now - this._sessionStart) : 0;
     const totalPlayMs = (stats.totalPlayTime || 0) + sessionMs;
 
-    // membership badge
-    const membership = (window as any).gameInstance?.shopSystem?.getMembershipTier?.();
-    if (membership) {
-      this.drawStrokedText(ctx, `[${membership.label}]`, cx, py + 95, 13, "center", "#ffffff");
-    }
-
     // avatar
     const avR = 34, avX = cx, avY = py + 38;
     ctx.save();
@@ -1729,7 +1718,6 @@ export class AccountSystem {
       { label: "Time Joined",    value: this._formatDate(ud.createdAt) },
       { label: "Time Played",    value: this._formatDuration(totalPlayMs) },
       { label: "XP",            value: this._formatNum(stats.totalXp) },
-      { label: "Stars",         value: this._formatNum(stats.starsEarned) },
       { label: "Games Played",  value: this._formatNum(stats.gamesPlayed) },
       { label: "Mobs Killed",    value: this._formatNum(stats.totalKills) },
       { label: "Petals Picked", value: this._formatNum(stats.petalsPicked) },
@@ -1745,7 +1733,7 @@ export class AccountSystem {
     const totalCH = rows * cellH;
 
     const btnAreaH = 4 * 36 + 3 * 6 + 12;
-    const gridTop  = py + (membership ? 112 : 105);
+    const gridTop  = py + 105;
     const gridH    = ph - (gridTop - py) - btnAreaH;
 
     this._profileMaxOffset    = Math.max(0, totalCH - gridH);
@@ -2165,7 +2153,6 @@ export class AccountSystem {
         petalsPicked: 0,
         totalXp: 0,
         totalDamage: 0,
-        starsEarned: 0,
         lastSyncedKills: 0,
         lastSyncedXp: 0,
       },
@@ -2184,7 +2171,6 @@ export class AccountSystem {
           gi.player.levelSystem.currentXp = 0;
         }
       }
-      if (gi.shopSystem) gi.shopSystem.stars = 0;
       gi.initializeDefaultItems?.();
       gi.syncAllPetalsFromQuickSlot?.();
       gi.requestRedraw?.();
@@ -2215,7 +2201,6 @@ export class AccountSystem {
           gi.player.levelSystem.level = 1;
           gi.player.levelSystem.currentXp = 0;
         }
-        if (gi.shopSystem) gi.shopSystem.stars = 0;
         gi.initializeDefaultItems?.();
       }
 
@@ -2268,7 +2253,6 @@ export class AccountSystem {
         if (diff > 0) { ud.stats.totalXp = (ud.stats.totalXp||0) + diff; ud.stats.lastSyncedXp = gameData.xpGained; }
       }
       if (gameData.damageDealt) ud.stats.totalDamage = (ud.stats.totalDamage||0) + gameData.damageDealt;
-      if (gameData.starsEarned) ud.stats.starsEarned = (ud.stats.starsEarned||0) + gameData.starsEarned;
     }
     if (craftData.petalsBurned)  ud.stats.petalsBurned  = (ud.stats.petalsBurned ||0) + craftData.petalsBurned;
     if (craftData.petalsCrafted) ud.stats.petalsCrafted = (ud.stats.petalsCrafted||0) + craftData.petalsCrafted;
@@ -2303,7 +2287,7 @@ export class AccountSystem {
         player_rarity: player.playerRarity || "Common", health: player.health || 100,
         max_health: player.maxHealth || 100, petal_count: player.petalCount || 5,
         level: player.levelSystem?.level || 1, current_xp: player.levelSystem?.currentXp || 0,
-        total_xp: player.xp || 0, stars: gi?.shopSystem?.getStarCount() || 0,
+        total_xp: player.xp || 0,
         player_position: {
           x: player.physicsBody?.position?.x || ((window as any).WORLD_WIDTH||5000)/2,
           y: player.physicsBody?.position?.y || ((window as any).WORLD_HEIGHT||5000)/2,
@@ -2338,10 +2322,6 @@ export class AccountSystem {
       }
       player.petalCount = Math.max(5, pd.petal_count||5, targetCount);
       if (pd.player_rarity) player.playerRarity = pd.player_rarity;
-      if (pd.stars !== undefined && gi?.shopSystem) {
-        const diff = pd.stars - gi.shopSystem.getStarCount();
-        if (diff > 0) gi.shopSystem.addStars(diff);
-      }
       if (pd.player_position && player.physicsBody) {
         player.physicsBody.position.x = pd.player_position.x || ((window as any).WORLD_WIDTH||5000)/2;
         player.physicsBody.position.y = pd.player_position.y || ((window as any).WORLD_HEIGHT||5000)/2;
