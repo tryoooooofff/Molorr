@@ -1385,6 +1385,163 @@ class TooltipSystem {
 }
 
 /**
+ * VirtualKeyboard — a canvas-drawn on-screen keyboard for mobile.
+ * Appears when the user taps a search field or chat input on mobile.
+ * Dismissed by tapping outside the keyboard or pressing Done.
+ */
+class VirtualKeyboard {
+  active = false;
+  /** Which input to feed: 'bagSearch' | 'craftSearch' | 'chat' */
+  target: 'bagSearch' | 'craftSearch' | 'chat' = 'bagSearch';
+  numMode = false;
+
+  private readonly keysNormal = [
+    ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
+    ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'],
+    ['Z', 'X', 'C', 'V', 'B', 'N', 'M'],
+  ];
+  private readonly keysNum = [
+    ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
+    ['-', '/', ':', ';', '(', ')', '$', '&', '@', '"'],
+    ['.', ',', '?', '!', "'", '`', '~', '%', '^', '*'],
+  ];
+
+  private keyRects: { label: string; rect: Rect; action?: string }[] = [];
+
+  layout(w: number, h: number) {
+    this.keyRects = [];
+    const kbW = Math.min(420, w - 16);
+    const kbH = 200;
+    const kx = (w - kbW) / 2;
+    const ky = h - kbH - 10;
+    const gap = 4;
+    const keys = this.numMode ? this.keysNum : this.keysNormal;
+
+    const rowCount = keys.length;
+    for (let ri = 0; ri < rowCount; ri++) {
+      const row = keys[ri];
+      const totalGap = (row.length - 1) * gap;
+      const keyW = (kbW - totalGap) / row.length;
+      const keyH = 38;
+      const rowY = ky + ri * (keyH + gap);
+      const rowOffset = (kbW - (row.length * keyW + totalGap)) / 2;
+      for (let ci = 0; ci < row.length; ci++) {
+        const kx2 = kx + rowOffset + ci * (keyW + gap);
+        this.keyRects.push({ label: row[ci], rect: { x: kx2, y: rowY, w: keyW, h: keyH } });
+      }
+    }
+
+    // Bottom row: 123/ABC toggle, Space, Done
+    const bottomY = ky + rowCount * (38 + gap);
+    const toggleW = 56;
+    const spaceW = kbW - toggleW * 2 - gap * 2;
+    this.keyRects.push({
+      label: this.numMode ? 'ABC' : '123',
+      rect: { x: kx, y: bottomY, w: toggleW, h: 38 },
+      action: 'toggle',
+    });
+    this.keyRects.push({
+      label: ' ',
+      rect: { x: kx + toggleW + gap, y: bottomY, w: spaceW, h: 38 },
+      action: 'space',
+    });
+    this.keyRects.push({
+      label: 'Done',
+      rect: { x: kx + toggleW + gap + spaceW + gap, y: bottomY, w: toggleW, h: 38 },
+      action: 'done',
+    });
+
+    // Backspace: add to the right of the last letter row
+    if (!this.numMode) {
+      const lastRow = this.keyRects.filter(r => !r.action);
+      if (lastRow.length > 0) {
+        const last = lastRow[lastRow.length - 1];
+        this.keyRects.push({
+          label: '⌫',
+          rect: { x: last.rect.x + last.rect.w + gap, y: last.rect.y, w: 52, h: 38 },
+          action: 'backspace',
+        });
+      }
+    } else {
+      // For num mode, add backspace at the end of the last row
+      const last = this.keyRects[this.keyRects.length - 1];
+      if (last && !last.action) {
+        this.keyRects.push({
+          label: '⌫',
+          rect: { x: last.rect.x + last.rect.w + gap, y: last.rect.y, w: 52, h: 38 },
+          action: 'backspace',
+        });
+      }
+    }
+  }
+
+  draw(ctx: CanvasRenderingContext2D, w: number, h: number) {
+    if (!this.active) return;
+    this.layout(w, h);
+
+    // Semi-transparent backdrop
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.fillRect(0, 0, w, h);
+
+    // Keyboard background
+    const kbW = Math.min(420, w - 16);
+    const kbH = 200;
+    const kx = (w - kbW) / 2;
+    const ky = h - kbH - 10;
+    ctx.fillStyle = '#2a2a2e';
+    roundRect(ctx, kx - 4, ky - 4, kbW + 8, kbH + 52 + 8, 10);
+    ctx.fill();
+
+    for (const kr of this.keyRects) {
+      const r = kr.rect;
+      const isAction = !!kr.action;
+      ctx.fillStyle = isAction ? '#4a4a50' : '#3a3a3e';
+      roundRect(ctx, r.x, r.y, r.w, r.h, 6);
+      ctx.fill();
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = `bold ${kr.label === ' ' ? 10 : 16}px sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(kr.label, r.x + r.w / 2, r.y + r.h / 2);
+    }
+  }
+
+  handleClick(mx: number, my: number): { handled: boolean; key?: string } {
+    if (!this.active) return { handled: false };
+    for (const kr of this.keyRects) {
+      if (hit(kr.rect, mx, my)) {
+        if (kr.action === 'done') {
+          this.active = false;
+          return { handled: true };
+        }
+        if (kr.action === 'toggle') {
+          this.numMode = !this.numMode;
+          return { handled: true };
+        }
+        if (kr.action === 'backspace') {
+          return { handled: true, key: 'Backspace' };
+        }
+        if (kr.action === 'space') {
+          return { handled: true, key: ' ' };
+        }
+        return { handled: true, key: kr.label };
+      }
+    }
+    // Click outside keyboard area → dismiss
+    const kbW = Math.min(420, this.keyRects.length > 0 ? 420 : 0);
+    const kx = (this.keyRects.length > 0 ? this.keyRects[0].rect.x : 0);
+    const ky = (this.keyRects.length > 0 ? this.keyRects[0].rect.y : 0);
+    const kbRect: Rect = { x: kx - 8, y: ky - 8, w: kbW + 16, h: 260 };
+    if (!hit(kbRect, mx, my)) {
+      this.active = false;
+      return { handled: true };
+    }
+    return { handled: false };
+  }
+}
+
+/**
  * AccountSystem — a self-contained local-storage account panel.
  * Painted entirely on canvas2d (no DOM). Tracks per-user stats, login
  * counts, session play-time, and exposes Export/Import/Clear actions.
@@ -2460,6 +2617,7 @@ export class GameClient {
   /** Main-menu bestiary; kill counts are tracked locally by mob + rarity. */
   private mobGallery = new MobGallery();
   private chat = new ChatSystem();
+  private vk = new VirtualKeyboard();
   /** Canvas-painted account panel (local-storage based). */
   private accountSystem = new AccountSystem();
   private squadCode = "";
@@ -4241,14 +4399,16 @@ export class GameClient {
       return [
         { id: "bag", rect: { x: 12, y, w: compactW, h: compactH }, label: invLabel, color: "#3d8bd6" },
         { id: "craft", rect: { x: 12 + compactW + gap, y, w: compactW, h: compactH }, label: "Craft", color: "#c9762b" },
-        { id: "menu", rect: { x: 12 + (compactW + gap) * 2, y, w: compactW, h: compactH }, label: "Menu", color: "#8a4d4d" },
+        { id: "chat", rect: { x: 12 + (compactW + gap) * 2, y, w: compactW, h: compactH }, label: "Chat", color: "#4a7a9a" },
+        { id: "menu", rect: { x: 12 + (compactW + gap) * 3, y, w: compactW, h: compactH }, label: "Menu", color: "#8a4d4d" },
       ];
     }
     if (isMobileLayout) {
       return [
         { id: "bag", rect: { x: 16, y: this.hudButtonRowY(0), w: bw, h: bh }, label: invLabel, color: "#3d8bd6" },
         { id: "craft", rect: { x: 16, y: this.hudButtonRowY(1), w: bw, h: bh }, label: "Craft", color: "#c9762b" },
-        { id: "menu", rect: { x: 16, y: this.hudButtonRowY(2), w: bw, h: bh }, label: "Menu", color: "#8a4d4d" },
+        { id: "chat", rect: { x: 16, y: this.hudButtonRowY(2), w: bw, h: bh }, label: "Chat", color: "#4a7a9a" },
+        { id: "menu", rect: { x: 16, y: this.hudButtonRowY(3), w: bw, h: bh }, label: "Menu", color: "#8a4d4d" },
       ];
     } else {
       return [
@@ -4474,6 +4634,25 @@ export class GameClient {
     const p = this.pointerPos(e);
     this.mx = p.x;
     this.my = p.y;
+
+    // Virtual keyboard (mobile) — intercept clicks when active
+    if (this.isMobile && this.vk.active) {
+      const vkResult = this.vk.handleClick(p.x, p.y);
+      if (vkResult.handled) {
+        if (vkResult.key) {
+          // Route the key to the active input
+          if (this.vk.target === 'bagSearch') {
+            this.typeIntoBagSearch(vkResult.key);
+          } else if (this.vk.target === 'craftSearch') {
+            this.typeIntoCraftSearch(vkResult.key);
+          } else if (this.vk.target === 'chat') {
+            this.typeIntoChat(vkResult.key);
+          }
+        }
+        return;
+      }
+    }
+
     // Account panel: intercept the press (scrollbar drag or click).
     if (this.accountSystem.panelOpen) {
       if (this.accountSystem.handleMouseDown(p.x, p.y)) return;
@@ -4973,6 +5152,15 @@ export class GameClient {
       if (!hit(b.rect, mx, my)) continue;
       if (b.id === "bag") this.toggleBag();
       if (b.id === "craft") this.toggleCraft();
+      if (b.id === "chat") {
+        this.chat.inputActive = true;
+        this.chat.inputText = "";
+        if (this.isMobile) {
+          this.vk.active = true;
+          this.vk.target = 'chat';
+          this.vk.numMode = false;
+        }
+      }
       if (b.id === "menu") this.gotoMenu();
       return;
     }
@@ -5077,6 +5265,11 @@ export class GameClient {
     if (hit(layout.barRect, mx, my)) {
       this.craftSearchActive = true;
       this.craftBiomeOpen = false;
+      if (this.isMobile) {
+        this.vk.active = true;
+        this.vk.target = 'craftSearch';
+        this.vk.numMode = false;
+      }
       return true;
     }
 
@@ -5295,6 +5488,11 @@ export class GameClient {
     if (hit(barRect, mx, my)) {
       this.bagSearchActive = true;
       this.bagBiomeOpen = false;
+      if (this.isMobile) {
+        this.vk.active = true;
+        this.vk.target = 'bagSearch';
+        this.vk.numMode = false;
+      }
       return true;
     }
 
@@ -5436,6 +5634,9 @@ export class GameClient {
     if (this.scene === "menu") this.renderMenu(dt);
     else this.renderGame(dt);
     ctx.restore();
+
+    // Virtual keyboard (mobile) — drawn on top of everything
+    this.vk.draw(ctx, this.w, this.h);
 
     if (this.fade > 0.001) {
       ctx.save();
