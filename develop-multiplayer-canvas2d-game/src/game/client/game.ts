@@ -1104,21 +1104,9 @@ class ChatSystem {
           // 3. Numbers (use upcoming rarity color)
           if (!found && /^\d/.test(remaining)) {
             const match = remaining.match(/^(\d+)(x)?/);
-            if (!match) {
-              // fallback: treat as plain character
-              const char = remaining[0];
-              ctx.strokeStyle = '#000000';
-              ctx.lineWidth = 3;
-              ctx.strokeText(char, xOffset, y);
-              ctx.fillStyle = '#ffffff';
-              ctx.fillText(char, xOffset, y);
-              xOffset += ctx.measureText(char).width;
-              remaining = remaining.substring(1);
-              found = true;
-              continue;
-            }
-            const number = match[1];
-            const hasX = match[2] === 'x';
+            if (match) {
+              const number = match[1];
+              const hasX = match[2] === 'x';
               const numberStartOffset = xOffset;
               let tempRemaining = remaining.substring(number.length);
               if (hasX) tempRemaining = tempRemaining.substring(1);
@@ -1485,7 +1473,7 @@ export class AccountSystem {
 
   updateCurrentSessionStats() {
     if (!this.currentUser) return;
-    const ud = this.users.get(this.currentUser || '');
+    const ud = this.users.get(this.currentUser);
     if (!ud) return;
     const game: any = (window as any).gameInstance;
 
@@ -1518,7 +1506,7 @@ export class AccountSystem {
 
   saveSessionStats() {
     if (!this.currentUser) return;
-    const ud = this.users.get(this.currentUser || '');
+    const ud = this.users.get(this.currentUser);
     if (!ud) return;
     if (this._sessionStart) {
       ud.stats.totalPlayTime = (ud.stats.totalPlayTime || 0) + (Date.now() - this._sessionStart);
@@ -1582,10 +1570,10 @@ export class AccountSystem {
   // ====================================================================
   //  Draw entry
   // ====================================================================
-  draw(ctx: CanvasRenderingContext2D, viewWidth?: number, viewHeight?: number) {
+  draw(ctx: CanvasRenderingContext2D) {
     if (!this.panelOpen) return;
-    const W = viewWidth || (window as any).innerWidth || ctx.canvas.width;
-    const H = viewHeight || (window as any).innerHeight || ctx.canvas.height;
+    const W = (window as any).WIDTH || (window as any).innerWidth || ctx.canvas.width;
+    const H = (window as any).HEIGHT || (window as any).innerHeight || ctx.canvas.height;
     // Mobile: smaller panel so it doesn't dominate the screen.
     const isMobileView = W < 640;
     const maxW = isMobileView ? 360 : 480;
@@ -1707,7 +1695,7 @@ export class AccountSystem {
   // --- Profile screen --------------------------------------------------
   _drawProfile(ctx: CanvasRenderingContext2D, px: number, py: number, pw: number, ph: number) {
     const cx = px + pw / 2;
-    const ud: any    = this.users.get(this.currentUser || '') || {};
+    const ud: any    = this.currentUser ? this.users.get(this.currentUser) || {} : {};
     const stats: any = ud.stats || {};
     const now   = Date.now();
     const sessionMs   = this._sessionStart ? (now - this._sessionStart) : 0;
@@ -2036,7 +2024,7 @@ export class AccountSystem {
       const order = this.screen === "login"    ? ["login_user", "login_pass"] :
                     this.screen === "register" ? ["reg_user", "reg_pass", "reg_confirm"] : [];
       if (order.length) {
-        this._focusInput(order[(order.indexOf(focused || '') + 1) % order.length]);
+        if (focused) this._focusInput(order[(order.indexOf(focused) + 1) % order.length]);
         e.preventDefault();
       }
       return true;
@@ -2048,7 +2036,6 @@ export class AccountSystem {
       return true;
     }
 
-    if (!focused) return false;
     if (!focused) return false;
     if (e.key === "Backspace") { this.inputs[focused].value = this.inputs[focused].value.slice(0, -1); return true; }
     if (e.key.length === 1 && this.inputs[focused].value.length < 24) { this.inputs[focused].value += e.key; return true; }
@@ -2246,13 +2233,13 @@ export class AccountSystem {
 
   addPlayTime(ms: number) {
     if (!this.currentUser) return;
-    const ud = this.users.get(this.currentUser || '');
+    const ud = this.users.get(this.currentUser);
     if (ud) ud.stats.totalPlayTime = (ud.stats.totalPlayTime || 0) + ms;
   }
 
   saveGameData(player: any, gameData: any, craftData: any = {}) {
     if (!this.currentUser) return false;
-    const ud = this.users.get(this.currentUser || '');
+    const ud = this.users.get(this.currentUser);
     if (!ud) return false;
     if (!ud.stats) ud.stats = {};
     if (gameData) {
@@ -2282,7 +2269,7 @@ export class AccountSystem {
 
   loadGameData() {
     if (!this.currentUser) return null;
-    return this.users.get(this.currentUser || '')?.gameData || null;
+    return this.users.get(this.currentUser)?.gameData || null;
   }
 
   prepareGameData(player: any, gameData: any) {
@@ -2714,12 +2701,12 @@ export class GameClient {
       viewHeight: () => this.h,
       mainCells: () => this.slots,
       secondaryCells: () => this.secondary,
-      reloadProgress: (slot) => this.slotReload[slot] ?? 1,
-      slotHp: (slot) => this.slotHp[slot] ?? 1,
+      reloadProgress: (slot: number) => this.slotReload[slot] ?? 1,
+      slotHp: (slot: number) => this.slotHp[slot] ?? 1,
       draggingFrom: () => this.drag?.from ?? -1,
-      requestSwapSlot: (slot) => this.sendSwapRow(slot),
+      requestSwapSlot: (slot: number) => this.sendSwapRow(slot),
       requestSwapAll: () => this.sendSwapRow(SWAP_ROW_ALL),
-      drawTooltip: (cell, x, y) => this.tooltip(cell, x, y),
+      drawTooltip: (cell: Cell, x: number, y: number) => this.tooltip(cell, x, y),
     };
   }
 
@@ -3013,7 +3000,7 @@ export class GameClient {
         this.afkPending = false;
       }
     };
-    net.onMessage = (data) => this.handlePacket(data);
+    net.onMessage = (data) => this.handlePacket(new Uint8Array(data));
   }
 
   /** Sends a ping timestamp; the reply latency drives the debug overlay's ping readout. */
@@ -4175,7 +4162,7 @@ export class GameClient {
     const idx = Math.max(0, Math.min(RARITIES.length - 1, r));
     const c = RARITIES[idx]?.color ?? "rgb(160,160,160)";
     const m = c.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
-    if (m && m[1] !== undefined && m[2] !== undefined && m[3] !== undefined) {
+    if (m) {
       const out: [number, number, number] = [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)];
       return out;
     }
@@ -5762,7 +5749,7 @@ export class GameClient {
     // control while it is open.
     this.mobGallery.draw(ctx, this.time, W, H);
     // Account panel overlays everything when open.
-    this.accountSystem.draw(ctx, this.w, this.h);
+    this.accountSystem.draw(ctx);
   }
 
   private bonusModalRect(): Rect {
