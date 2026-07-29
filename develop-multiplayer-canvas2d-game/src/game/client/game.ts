@@ -3676,7 +3676,7 @@ export class GameClient {
     let dy = 0;
     const uiBusy = this.drag !== null || this.bagAnim > 0.4 || this.craftAnim > 0.4 || this.chat.inputActive;
 
-    if (!uiBusy && this.isMobile && this.mobileJoystick.active) {
+    if (!uiBusy && this.isMobile && this.mobileJoystick.active && !this.vk.active) {
       // Joystick overrides mouse movement on phone
       const jdx = this.mobileJoystick.currX - this.mobileJoystick.centerX;
       const jdy = this.mobileJoystick.currY - this.mobileJoystick.centerY;
@@ -4671,7 +4671,7 @@ export class GameClient {
         this.tryEnterFullscreen();
         return;
       }
-      if (this.scene === "game" && this.bagAnim < 0.2 && this.craftAnim < 0.2) {
+      if (this.scene === "game" && this.bagAnim < 0.2 && this.craftAnim < 0.2 && !this.vk.active) {
         if (this.mobileSpreadRect && hit(this.mobileSpreadRect, p.x, p.y)) {
           this.mobileSpreadActive = true;
           this.lastTouchTime = performance.now();
@@ -4707,7 +4707,7 @@ export class GameClient {
             break;
           }
         }
-        if (!hitHud) {
+        if (!hitHud && !this.vk.active) {
           // Allow starting joystick from any left-bottom touch as fallback
           if (p.x < this.w * 0.45 && p.y > this.h * 0.35) {
             this.mobileJoystick.active = true;
@@ -6983,7 +6983,7 @@ export class GameClient {
     this.quickSlot.draw(ctx);
 
     // Mobile controls: joystick + Spread (Space) / Contract (Shift) buttons
-    if (this.isMobile && this.mobileControlsVisible && this.bagAnim < 0.2 && this.craftAnim < 0.2) {
+    if (this.isMobile && this.mobileControlsVisible && this.bagAnim < 0.2 && this.craftAnim < 0.2 && !this.vk.active) {
       // Joystick base
       const joy = this.mobileJoystick;
       ctx.save();
