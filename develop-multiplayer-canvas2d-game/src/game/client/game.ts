@@ -4672,28 +4672,9 @@ export class GameClient {
         return;
       }
       if (this.scene === "game" && this.bagAnim < 0.2 && this.craftAnim < 0.2 && !this.vk.active) {
-        if (this.mobileSpreadRect && hit(this.mobileSpreadRect, p.x, p.y)) {
-          this.mobileSpreadActive = true;
-          this.lastTouchTime = performance.now();
-          try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
-          return;
-        }
-        if (this.mobileContractRect && hit(this.mobileContractRect, p.x, p.y)) {
-          this.mobileContractActive = true;
-          this.lastTouchTime = performance.now();
-          try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
-          return;
-        }
-        if (this.mobileJoystickRect && hit(this.mobileJoystickRect, p.x, p.y)) {
-          this.mobileJoystick.active = true;
-          this.mobileJoystick.pointerId = e.pointerId;
-          this.mobileJoystick.currX = p.x;
-          this.mobileJoystick.currY = p.y;
-          this.lastTouchTime = performance.now();
-          try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
-          return;
-        }
         // Check if the touch hits any HUD button or Map button first!
+        // This must happen before joystick/action checks so buttons like Chat
+        // (which may overlap the joystick area) are handled by gameClick instead.
         let hitHud = false;
         for (const b of this.hudButtons()) {
           if (hit(b.rect, p.x, p.y)) {
@@ -4701,13 +4682,36 @@ export class GameClient {
             break;
           }
         }
-        for (const b of this.mapButtons()) {
-          if (hit(b.rect, p.x, p.y)) {
-            hitHud = true;
-            break;
+        if (!hitHud) {
+          for (const b of this.mapButtons()) {
+            if (hit(b.rect, p.x, p.y)) {
+              hitHud = true;
+              break;
+            }
           }
         }
-        if (!hitHud && !this.vk.active) {
+        if (!hitHud) {
+          if (this.mobileSpreadRect && hit(this.mobileSpreadRect, p.x, p.y)) {
+            this.mobileSpreadActive = true;
+            this.lastTouchTime = performance.now();
+            try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
+            return;
+          }
+          if (this.mobileContractRect && hit(this.mobileContractRect, p.x, p.y)) {
+            this.mobileContractActive = true;
+            this.lastTouchTime = performance.now();
+            try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
+            return;
+          }
+          if (this.mobileJoystickRect && hit(this.mobileJoystickRect, p.x, p.y)) {
+            this.mobileJoystick.active = true;
+            this.mobileJoystick.pointerId = e.pointerId;
+            this.mobileJoystick.currX = p.x;
+            this.mobileJoystick.currY = p.y;
+            this.lastTouchTime = performance.now();
+            try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
+            return;
+          }
           // Allow starting joystick from any left-bottom touch as fallback
           if (p.x < this.w * 0.45 && p.y > this.h * 0.35) {
             this.mobileJoystick.active = true;
