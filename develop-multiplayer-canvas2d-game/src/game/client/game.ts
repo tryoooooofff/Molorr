@@ -531,10 +531,12 @@ class SettingsSystem {
 
         const viewW = x * 2;
         const viewH = y * 2;
-        const panelW = Math.min(320, Math.max(240, viewW - 24));
+        // Mobile: narrower + shorter panel so it doesn't cover the whole screen.
+        const isMobileView = viewW < 640;
+        const panelW = Math.min(isMobileView ? 280 : 320, Math.max(isMobileView ? 200 : 240, viewW - 24));
         const panelX = Math.min(118, Math.max(12, viewW - panelW - 12));
         const panelY = viewH <= 600 ? 8 : 16;
-        const panelH = Math.max(160, Math.min(480, viewH - panelY * 2));
+        const panelH = Math.max(140, Math.min(isMobileView ? 380 : 480, viewH - panelY * 2));
         this.panelRect = [panelX, panelY, panelW, panelH];
 
         const totalContentHeight = 880;
@@ -1577,8 +1579,13 @@ export class AccountSystem {
     if (!this.panelOpen) return;
     const W = (window as any).WIDTH || (window as any).innerWidth || ctx.canvas.width;
     const H = (window as any).HEIGHT || (window as any).innerHeight || ctx.canvas.height;
-    this.panelW = Math.min(480, W - 40);
-    this.panelH = Math.min(650, H - 40);
+    // Mobile: smaller panel so it doesn't dominate the screen.
+    const isMobileView = W < 640;
+    const maxW = isMobileView ? 360 : 480;
+    const maxH = isMobileView ? 520 : 650;
+    const margin = isMobileView ? 12 : 40;
+    this.panelW = Math.min(maxW, W - margin);
+    this.panelH = Math.min(maxH, H - margin);
     this.panelX = Math.floor((W - this.panelW) / 2);
     this.panelY = Math.floor((H - this.panelH) / 2);
     this._btns = [];
@@ -3589,8 +3596,9 @@ export class GameClient {
   private bagPanelRect(): Rect {
     const isMobileLayout = this.isMobile || this.w < 640;
     const shortMobile = isMobileLayout && this.h <= 600;
+    // Mobile panels are scaled down so more of the game world stays visible.
     const w = isMobileLayout
-      ? Math.min(shortMobile ? 520 : 440, this.w - 16)
+      ? Math.min(shortMobile ? 440 : 360, this.w - 16)
       : Math.min(400, this.w * 0.92);
     // Phone panels are modal and cover the HUD, so they can use the short
     // screen's full height instead of reserving another hotbar-sized strip.
@@ -3598,7 +3606,7 @@ export class GameClient {
     const topGap = shortMobile ? 8 : 18;
     const bottomGap = shortMobile ? 8 : 26;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
-    const idealH = shortMobile ? 390 : 560;
+    const idealH = shortMobile ? 320 : 460;
     const h = Math.min(idealH, availableH);
     const hidden = this.h + 20;
     const shown = topGap;
@@ -3723,14 +3731,15 @@ export class GameClient {
   private craftPanelRect(): Rect {
     const isMobileLayout = this.isMobile || this.w < 640;
     const shortMobile = isMobileLayout && this.h <= 600;
+    // Mobile craft panel is narrowed so it doesn't dominate the screen.
     const w = isMobileLayout
-      ? Math.min(this.w - 16, 840)
+      ? Math.min(this.w - 16, shortMobile ? 560 : 680)
       : Math.min(780, Math.floor(this.w * 0.92));
     const reservedHotbar = this.scene === "game" && !isMobileLayout ? this.hotbarHeight() : 0;
     const topGap = shortMobile ? 8 : 12;
     const bottomGap = shortMobile ? 8 : 18;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
-    const h = Math.min(shortMobile ? 420 : 620, availableH);
+    const h = Math.min(shortMobile ? 340 : 500, availableH);
     const t = ease.outCubic(this.craftAnim);
     if (isMobileLayout) {
       const hidden = this.h + 20;
@@ -4895,12 +4904,13 @@ export class GameClient {
       }
     }
     
-    // Left sidebar buttons (same functions)
-    if (actions.left_inventory && hit(actions.left_inventory, mx, my)) this.toggleBag();
-    if (actions.left_craft && hit(actions.left_craft, mx, my)) this.toggleCraft();
-    if (actions.left_bonus && hit(actions.left_bonus, mx, my)) this.bonusOpen = true;
-    if (actions.left_settings && hit(actions.left_settings, mx, my)) this.settings.togglePanel();
-    if (actions.left_account && hit(actions.left_account, mx, my)) this.accountSystem.openPanel();
+    // Left sidebar buttons (same functions) — each returns so a single
+    // tap never triggers two actions.
+    if (actions.left_account && hit(actions.left_account, mx, my)) { this.accountSystem.openPanel(); return; }
+    if (actions.left_inventory && hit(actions.left_inventory, mx, my)) { this.toggleBag(); return; }
+    if (actions.left_craft && hit(actions.left_craft, mx, my)) { this.toggleCraft(); return; }
+    if (actions.left_bonus && hit(actions.left_bonus, mx, my)) { this.bonusOpen = true; return; }
+    if (actions.left_settings && hit(actions.left_settings, mx, my)) { this.settings.togglePanel(); return; }
     
     // Play button (big button below biome grid)
     const playBtnRect = this.menuPlayButtonRect();
@@ -5763,8 +5773,9 @@ export class GameClient {
   }
 
   private bonusModalRect(): Rect {
-    const w = Math.min(350, this.w - 24);
-    const h = Math.min(290, this.h - 24);
+    const isMobileLayout = this.isMobile || this.w < 640;
+    const w = Math.min(isMobileLayout ? 300 : 350, this.w - 24);
+    const h = Math.min(isMobileLayout ? 240 : 290, this.h - 24);
     return { x: (this.w - w) / 2, y: (this.h - h) / 2, w, h };
   }
 
@@ -5927,6 +5938,9 @@ export class GameClient {
       text(ctx, `waiting for server${dots}`, this.w / 2, 36, 16, "#ffb066");
       ctx.restore();
     }
+    // Account panel overlays the game scene too, so the player can access
+    // it without returning to the main menu.
+    this.accountSystem.draw(ctx);
   }
 
   buildWallEdgeCache() {    
@@ -6853,8 +6867,8 @@ export class GameClient {
     ctx.globalAlpha = Math.min(1, this.bagAnim * 1.3);
 
     // main panel background, styled like the reference UI (blue card + dark border)
-    // Square corners (直角) per design request.
-    roundRect(ctx, p.x, p.y, p.w, p.h, 0);
+    // 5px rounded corners per design request.
+    roundRect(ctx, p.x, p.y, p.w, p.h, 5);
     ctx.fillStyle = "#5aa0db";
     ctx.fill();
     ctx.lineWidth = 5;
@@ -6944,8 +6958,8 @@ export class GameClient {
     const panelW = p.w - layout.pad * 2;
 
     ctx.save();
-    // Square corners (直角) per design request.
-    roundRect(ctx, panelX, panelY, panelW, panelH, 0);
+    // 5px rounded corners per design request.
+    roundRect(ctx, panelX, panelY, panelW, panelH, 5);
     ctx.fillStyle = "#3f7dc2";
     ctx.fill();
 
@@ -7472,8 +7486,8 @@ export class GameClient {
 
     const cx = this.w / 2;
     const cy = this.h / 2;
-    const panelW = Math.min(460, this.w - 32);
-    const panelH = this.isMobile ? 260 : 250;
+    const panelW = Math.min(this.isMobile ? 320 : 460, this.w - 32);
+    const panelH = this.isMobile ? 220 : 250;
     ctx.save();
     ctx.translate(cx, cy);
     ctx.scale(pulse, pulse);
