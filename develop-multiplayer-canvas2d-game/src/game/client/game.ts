@@ -1382,6 +1382,1069 @@ class TooltipSystem {
   }
 }
 
+/**
+ * AccountSystem — a self-contained local-storage account panel.
+ * Painted entirely on canvas2d (no DOM). Tracks per-user stats, login
+ * counts, session play-time, and exposes Export/Import/Clear actions.
+ *
+ * The class is intentionally defensive: every game-side hook
+ * (window.gameInstance.shopSystem, .player, .score, …) is accessed
+ * through optional chaining so the panel still works before the game
+ * wires those systems up.
+ */
+export class AccountSystem {
+  [k: string]: any;
+
+  currentUser: string | null;
+  users: Map<string, any>;
+  STORAGE_KEY = "flwrr_accounts_data";
+  LAST_USER_KEY = "flwrr_last_user";
+  LOGIN_COUNT_KEY = "flwrr_login_counts";
+  SESSION_STATS_KEY = "flwrr_session_stats";
+
+  // panel state
+  panelOpen = false;
+  panelW = 480;
+  panelH = 650;
+  panelX = 0;
+  panelY = 0;
+  screen: "menu" | "login" | "register" | "profile" = "menu";
+  hoveredBtn: string | null = null;
+  message: { text: string; color: string; ttl: number } | null = null;
+
+  // inputs
+  inputs: Record<string, any> = {
+    login_user:  { value: "", focused: false, label: "Username",         type: "text" },
+    login_pass:  { value: "", focused: false, label: "Password",         type: "password" },
+    reg_user:    { value: "", focused: false, label: "Username",         type: "text" },
+    reg_pass:    { value: "", focused: false, label: "Password",         type: "password" },
+    reg_confirm: { value: "", focused: false, label: "Confirm Password", type: "password" },
+  };
+  showPassLogin = false;
+  showPassReg = false;
+  showPassConfirm = false;
+
+  // UI helpers
+  _btns: Array<{ id: string; x: number; y: number; w: number; h: number }> = [];
+  _sessionStart: number | null = null;
+  _profileScrollOffset = 0;
+  _profileMaxOffset = 0;
+  _draggingScroll = false;
+  _dragStartY = 0;
+  _dragStartOffset = 0;
+
+  _statsUpdateTimer: any = null;
+  _cloudSaveTimer: any = null;
+  _justFocusedAt = 0;
+  loginCounts: Record<string, number> = {};
+
+  constructor() {
+    this.currentUser = null;
+    this.users = new Map();
+
+    this.loadAllUsers();
+    this.loadLoginCounts();
+    this.loadSessionStats();
+
+    setInterval(() => {
+      if (this.currentUser) {
+        this.saveSessionStats();
+        this.saveAllUsers();
+      }
+    }, 30000);
+
+    setTimeout(() => this.autoLogin(), 500);
+    this._startStatsUpdate();
+  }
+
+  // ====================================================================
+  //  Real-time stats
+  // ====================================================================
+  _startStatsUpdate() {
+    if (this._statsUpdateTimer) clearInterval(this._statsUpdateTimer);
+    this._statsUpdateTimer = setInterval(() => {
+      if (this.currentUser && this.panelOpen && this.screen === "profile") {
+        this.updateCurrentSessionStats();
+      }
+    }, 10000);
+  }
+
+  updateCurrentSessionStats() {
+    if (!this.currentUser) return;
+    const ud = this.users.get(this.currentUser);
+    if (!ud) return;
+    const game: any = (window as any).gameInstance;
+
+    if (this._sessionStart) {
+      ud.stats.totalPlayTime = (ud.stats.totalPlayTime || 0) + (Date.now() - this._sessionStart);
+      this._sessionStart = Date.now();
+    }
+
+    if (game) {
+      if ((game.score || 0) > (ud.stats.highestScore || 0)) ud.stats.highestScore = game.score;
+
+      if (game.enemiesKilled !== undefined) {
+        const diff = game.enemiesKilled - (ud.stats.lastSyncedKills || 0);
+        if (diff > 0) { ud.stats.totalKills = (ud.stats.totalKills || 0) + diff; ud.stats.lastSyncedKills = game.enemiesKilled; }
+      }
+
+      if (game.player?.xp !== undefined) {
+        const diff = game.player.xp - (ud.stats.lastSyncedXp || 0);
+        if (diff > 0) { ud.stats.totalXp = (ud.stats.totalXp || 0) + diff; ud.stats.lastSyncedXp = game.player.xp; }
+      }
+
+      if (game.shopSystem) {
+        const stars = game.shopSystem.getStarCount();
+        if (stars > (ud.stats.starsEarned || 0)) ud.stats.starsEarned = stars;
+      }
+
+      if (game.player?.inventory?.craftingSystem) {
+        const cs = game.player.inventory.craftingSystem;
+        if ((cs.totalCrafted || 0) > (ud.stats.petalsCrafted || 0)) ud.stats.petalsCrafted = cs.totalCrafted;
+        if ((cs.totalBurned  || 0) > (ud.stats.petalsBurned  || 0)) ud.stats.petalsBurned  = cs.totalBurned;
+      }
+    }
+    this.saveAllUsers();
+  }
+
+  saveSessionStats() {
+    if (!this.currentUser) return;
+    const ud = this.users.get(this.currentUser);
+    if (!ud) return;
+    if (this._sessionStart) {
+      ud.stats.totalPlayTime = (ud.stats.totalPlayTime || 0) + (Date.now() - this._sessionStart);
+      this._sessionStart = Date.now();
+    }
+    this.saveAllUsers();
+  }
+
+  loadSessionStats() {
+    try { if (localStorage.getItem(this.SESSION_STATS_KEY)) JSON.parse(localStorage.getItem(this.SESSION_STATS_KEY) || "{}"); } catch(_e) {}
+  }
+
+  // ====================================================================
+  //  Panel lifecycle
+  // ====================================================================
+  openPanel() {
+    this.panelOpen = true;
+    this.screen = this.currentUser ? "profile" : "menu";
+    this.message = null;
+    this._profileScrollOffset = 0;
+    this._clearInputs();
+    if (this.currentUser) this.updateCurrentSessionStats();
+  }
+
+  closePanel() {
+    this.panelOpen = false;
+    this.screen = "menu";
+    this.message = null;
+    this._clearInputs();
+    if (this.currentUser) this.saveSessionStats();
+  }
+
+  _clearInputs() {
+    for (const k of Object.keys(this.inputs)) { this.inputs[k].value = ""; this.inputs[k].focused = false; }
+    this.showPassLogin = this.showPassReg = this.showPassConfirm = false;
+    (window as any).hideMobileKeyboard?.();
+  }
+
+  _focusInput(key: string | null) {
+    for (const k of Object.keys(this.inputs)) this.inputs[k].focused = false;
+    if (key) {
+      this.inputs[key].focused = true;
+      this._justFocusedAt = Date.now();
+      const inp = this.inputs[key];
+      (window as any).showMobileKeyboard?.(inp.value, (val: string) => { inp.value = val; });
+    } else {
+      (window as any).hideMobileKeyboard?.();
+    }
+  }
+
+  _focusedKey(): string | null { return Object.keys(this.inputs).find(k => this.inputs[k].focused) || null; }
+
+  updateUIAfterLogin() {
+    const el = document.getElementById("current-user");
+    if (el) { el.style.display = "block"; el.innerHTML = `👤 ${this.currentUser}`; }
+    (window as any).gameInstance?.mainMenu?.recalculatePositions?.();
+  }
+
+  clearAutoLogin() { localStorage.removeItem(this.LAST_USER_KEY); }
+
+  // ====================================================================
+  //  Draw entry
+  // ====================================================================
+  draw(ctx: CanvasRenderingContext2D) {
+    if (!this.panelOpen) return;
+    const W = (window as any).WIDTH || (window as any).innerWidth || ctx.canvas.width;
+    const H = (window as any).HEIGHT || (window as any).innerHeight || ctx.canvas.height;
+    this.panelW = Math.min(480, W - 40);
+    this.panelH = Math.min(650, H - 40);
+    this.panelX = Math.floor((W - this.panelW) / 2);
+    this.panelY = Math.floor((H - this.panelH) / 2);
+    this._btns = [];
+    if (this.message) { this.message.ttl -= 16; if (this.message.ttl <= 0) this.message = null; }
+
+    this._drawPanel(ctx);
+  }
+
+  _drawPanel(ctx: CanvasRenderingContext2D) {
+    const { panelX: px, panelY: py, panelW: pw, panelH: ph } = this;
+    ctx.save();
+
+    // background
+    ctx.fillStyle = "#d94b4b";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(px, py, pw, ph, 16); else ctx.rect(px, py, pw, ph);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(0,0,0,0.3)";
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(px, py, pw, ph, 16); else ctx.rect(px, py, pw, ph);
+    ctx.stroke();
+
+    // title bar
+    const hdrH = 52;
+    ctx.fillStyle = "#c83f3f";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(px, py, pw, hdrH, [16, 16, 0, 0]); else ctx.rect(px, py, pw, hdrH);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(0,0,0,0.2)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(px + 10, py + hdrH); ctx.lineTo(px + pw - 10, py + hdrH); ctx.stroke();
+
+    this.drawStrokedText(ctx, "Account", px + pw / 2, py + hdrH / 2, 20, "center", "white");
+
+    this._drawStyledButton(ctx, "✕", [px + pw - 38, py + 10, 28, 28], [200, 60, 60], 16);
+    this._registerBtn("close", px + pw - 38, py + 10, 28, 28);
+
+    // content
+    const contentY = py + hdrH + 10;
+    const contentH = ph - hdrH - 10;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(px, py + hdrH, pw, contentH); ctx.clip();
+
+    if      (this.screen === "menu")     this._drawMenu(ctx, px, contentY, pw, contentH);
+    else if (this.screen === "login")    this._drawLogin(ctx, px, contentY, pw, contentH);
+    else if (this.screen === "register") this._drawRegister(ctx, px, contentY, pw, contentH);
+    else if (this.screen === "profile")  this._drawProfile(ctx, px, contentY, pw, contentH);
+
+    // message toast
+    if (this.message) {
+      const fade = Math.min(1, this.message.ttl / 400);
+      const isErr = this.message.color === "error";
+      const mw = pw - 40, mh = 36, mx = px + 20, my = py + ph - 56;
+      ctx.globalAlpha = fade;
+      ctx.fillStyle = isErr ? "rgba(180,30,30,0.92)" : "rgba(30,130,60,0.92)";
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(mx, my, mw, mh, 8); else ctx.rect(mx, my, mw, mh);
+      ctx.fill();
+      this.drawStrokedText(ctx, this.message.text, mx + mw / 2, my + mh / 2, 12, "center", "white");
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore();
+    ctx.restore();
+  }
+
+  // --- Menu screen -----------------------------------------------------
+  _drawMenu(ctx: CanvasRenderingContext2D, px: number, py: number, pw: number, _ph: number) {
+    const cx = px + pw / 2;
+    this.drawStrokedText(ctx, "lol", cx, py + 45, 48, "center", "white");
+    this.drawStrokedText(ctx, "Flwrr Account", cx, py + 95, 22, "center", "white");
+    this.drawStrokedText(ctx, "Sign in to save your progress", cx, py + 125, 12, "center", "rgba(255,255,255,0.5)");
+    const bw = pw - 80, bh = 42, bx = px + 40;
+    this._drawStyledButton(ctx, "Sign In",  [bx, py + 165, bw, bh], [36, 113, 163], 16);
+    this._registerBtn("menu_login",    bx, py + 165, bw, bh);
+    this._drawStyledButton(ctx, "Register", [bx, py + 215, bw, bh], [30, 132, 73],  16);
+    this._registerBtn("menu_register", bx, py + 215, bw, bh);
+    ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(px + 30, py + 275); ctx.lineTo(px + pw - 30, py + 275); ctx.stroke();
+    this.drawStrokedText(ctx, "Your data is stored locally on this device", cx, py + 295, 11, "center", "rgba(255,255,255,0.3)");
+  }
+
+  // --- Login screen ----------------------------------------------------
+  _drawLogin(ctx: CanvasRenderingContext2D, px: number, py: number, pw: number, _ph: number) {
+    const cx = px + pw / 2;
+    this._drawStyledButton(ctx, "←", [px + 16, py + 5, 28, 28], [100, 100, 120], 16);
+    this._registerBtn("back", px + 16, py + 5, 28, 28);
+    this.drawStrokedText(ctx, "Sign In", cx, py + 35, 18, "center", "white");
+    let iy = py + 65;
+    iy = this._drawInput(ctx, px + 24, iy, pw - 48, "login_user", false) + 12;
+    iy = this._drawInput(ctx, px + 24, iy, pw - 48, "login_pass", true, this.showPassLogin, "toggle_pass_login") + 20;
+    this._drawStyledButton(ctx, "Sign In", [px + 24, iy, pw - 48, 42], [36, 113, 163], 16);
+    this._registerBtn("do_login", px + 24, iy, pw - 48, 42);
+  }
+
+  // --- Register screen -------------------------------------------------
+  _drawRegister(ctx: CanvasRenderingContext2D, px: number, py: number, pw: number, _ph: number) {
+    const cx = px + pw / 2;
+    this._drawStyledButton(ctx, "←", [px + 16, py + 5, 28, 28], [100, 100, 120], 16);
+    this._registerBtn("back", px + 16, py + 5, 28, 28);
+    this.drawStrokedText(ctx, "Create Account", cx, py + 35, 18, "center", "white");
+    let iy = py + 65;
+    iy = this._drawInput(ctx, px + 24, iy, pw - 48, "reg_user",    false) + 12;
+    iy = this._drawInput(ctx, px + 24, iy, pw - 48, "reg_pass",    true, this.showPassReg,     "toggle_pass_reg")     + 12;
+    iy = this._drawInput(ctx, px + 24, iy, pw - 48, "reg_confirm", true, this.showPassConfirm, "toggle_pass_confirm") + 20;
+    this._drawStyledButton(ctx, "Create Account", [px + 24, iy, pw - 48, 42], [30, 132, 73], 16);
+    this._registerBtn("do_register", px + 24, iy, pw - 48, 42);
+  }
+
+  // --- Profile screen --------------------------------------------------
+  _drawProfile(ctx: CanvasRenderingContext2D, px: number, py: number, pw: number, ph: number) {
+    const cx = px + pw / 2;
+    const ud: any    = this.users.get(this.currentUser) || {};
+    const stats: any = ud.stats || {};
+    const now   = Date.now();
+    const sessionMs   = this._sessionStart ? (now - this._sessionStart) : 0;
+    const totalPlayMs = (stats.totalPlayTime || 0) + sessionMs;
+
+    // membership badge
+    const membership = (window as any).gameInstance?.shopSystem?.getMembershipTier?.();
+    if (membership) {
+      this.drawStrokedText(ctx, `[${membership.label}]`, cx, py + 95, 13, "center", "#ffffff");
+    }
+
+    // avatar
+    const avR = 34, avX = cx, avY = py + 38;
+    ctx.save();
+    ctx.fillStyle = "#e74c3c";
+    ctx.beginPath(); ctx.arc(avX, avY, avR, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#C82B19"; ctx.lineWidth = 4; ctx.stroke();
+    this._drawStar(ctx, avX, avY, 5, 18, 9, "#9C0000");
+    ctx.restore();
+
+    // username
+    this.drawStrokedText(ctx, this.currentUser || "", cx, py + 80, 18, "center", "#ffffff");
+
+    // stats grid
+    const statItems = [
+      { label: "Time Joined",    value: this._formatDate(ud.createdAt) },
+      { label: "Time Played",    value: this._formatDuration(totalPlayMs) },
+      { label: "XP",            value: this._formatNum(stats.totalXp) },
+      { label: "Stars",         value: this._formatNum(stats.starsEarned) },
+      { label: "Games Played",  value: this._formatNum(stats.gamesPlayed) },
+      { label: "Mobs Killed",    value: this._formatNum(stats.totalKills) },
+      { label: "Petals Picked", value: this._formatNum(stats.petalsPicked) },
+      { label: "Petals Crafted",value: this._formatNum(stats.petalsCrafted) },
+      { label: "Petals Burned", value: this._formatNum(stats.petalsBurned) },
+      { label: "Max Score",     value: this._formatNum(stats.highestScore) },
+    ];
+
+    const cols    = 2;
+    const cellW   = Math.floor((pw - 40) / cols);
+    const cellH   = 52;
+    const rows    = Math.ceil(statItems.length / cols);
+    const totalCH = rows * cellH;
+
+    const btnAreaH = 4 * 36 + 3 * 6 + 12;
+    const gridTop  = py + (membership ? 112 : 105);
+    const gridH    = ph - (gridTop - py) - btnAreaH;
+
+    this._profileMaxOffset    = Math.max(0, totalCH - gridH);
+    this._profileScrollOffset = Math.max(0, Math.min(this._profileMaxOffset, this._profileScrollOffset));
+
+    ctx.save();
+    ctx.beginPath(); ctx.rect(px + 10, gridTop, pw - 20, gridH); ctx.clip();
+
+    const oy = -this._profileScrollOffset;
+    for (let i = 0; i < statItems.length; i++) {
+      const col  = i % cols;
+      const row  = Math.floor(i / cols);
+      const item = statItems[i];
+      const cx2  = px + 20 + col * cellW;
+      const cy2  = gridTop + oy + row * cellH;
+      if (cy2 + cellH < gridTop || cy2 > gridTop + gridH) continue;
+
+      ctx.fillStyle = "rgba(0,0,0,0.22)";
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(cx2, cy2, cellW - 8, cellH - 8, 8); else ctx.rect(cx2, cy2, cellW - 8, cellH - 8);
+      ctx.fill();
+      this.drawStrokedText(ctx, item.label, cx2 + (cellW-8)/2, cy2 + 16, 11, "center", "rgba(255,255,255,0.6)");
+      this.drawStrokedText(ctx, item.value,  cx2 + (cellW-8)/2, cy2 + 36, 13, "center", "white");
+    }
+
+    // scrollbar
+    if (this._profileMaxOffset > 0) {
+      const sbX    = px + pw - 14;
+      const thumbH = Math.max(28, (gridH / totalCH) * gridH);
+      const thumbY = gridTop + (this._profileScrollOffset / this._profileMaxOffset) * (gridH - thumbH);
+      ctx.fillStyle = "rgba(0,0,0,0.25)";
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(sbX, gridTop, 8, gridH, 4); else ctx.rect(sbX, gridTop, 8, gridH);
+      ctx.fill();
+      ctx.fillStyle = this.hoveredBtn === "scrollbar" ? "rgba(255,255,255,0.6)" : "rgba(255,255,255,0.35)";
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(sbX, thumbY, 8, thumbH, 4); else ctx.rect(sbX, thumbY, 8, thumbH);
+      ctx.fill();
+      this._registerBtn("scrollbar", sbX - 4, gridTop, 16, gridH);
+    }
+
+    ctx.restore();
+
+    // bottom buttons
+    const btnY0  = gridTop + gridH + 8;
+    const btnH   = 36;
+    const gap    = 6;
+    const half   = Math.floor((pw - 56) / 2);
+
+    this._drawStyledButton(ctx, "Export", [px + 18,         btnY0,              half, btnH], [41, 128, 185], 13);
+    this._registerBtn("export_items", px + 18, btnY0, half, btnH);
+
+    this._drawStyledButton(ctx, "Import", [px + 20 + half,  btnY0,              half, btnH], [39, 174, 96],  13);
+    this._registerBtn("import_items", px + 20 + half, btnY0, half, btnH);
+
+    this._drawStyledButton(ctx, "Clear All Items", [px + 18, btnY0 + (btnH+gap),   pw - 36, btnH], [146, 43, 33], 13);
+    this._registerBtn("clear_items", px + 18, btnY0 + (btnH+gap), pw - 36, btnH);
+
+    this._drawStyledButton(ctx, "Sign Out",        [px + 18, btnY0 + (btnH+gap)*2, pw - 36, btnH], [93, 109, 126], 13);
+    this._registerBtn("do_logout", px + 18, btnY0 + (btnH+gap)*2, pw - 36, btnH);
+  }
+
+  // ====================================================================
+  //  Draw helpers
+  // ====================================================================
+  _drawStyledButton(ctx: CanvasRenderingContext2D, text: string, rect: [number, number, number, number], baseColor: [number, number, number], fontSize = 16) {
+    const [x, y, w, h] = rect;
+    const adj    = (rgb: number[], f: number) => rgb.map(c => Math.min(255, Math.max(0, Math.floor(c * f))));
+    const dark   = `rgb(${adj(baseColor, 0.82).join(",")})`;
+    const light  = `rgb(${baseColor.join(",")})`;
+    const stroke = `rgb(${adj(baseColor, 0.5).join(",")})`;
+
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, y, w, h, 10); else ctx.rect(x, y, w, h);
+    ctx.fillStyle = light; ctx.fill();
+
+    ctx.save();
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, y, w, h, 10); else ctx.rect(x, y, w, h);
+    ctx.clip();
+    ctx.fillStyle = dark; ctx.fillRect(x, y, w, h / 2);
+    ctx.restore();
+
+    ctx.strokeStyle = stroke; ctx.lineWidth = 4;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, y, w, h, 10); else ctx.rect(x, y, w, h);
+    ctx.stroke();
+
+    if (text) {
+      ctx.font = ` ${fontSize}px ${FONT_FAMILY}`;
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.strokeStyle = "black"; ctx.lineWidth = 4; ctx.lineJoin = "round";
+      ctx.strokeText(text, x + w / 2, y + h / 2);
+      ctx.fillStyle = "white"; ctx.fillText(text, x + w / 2, y + h / 2);
+    }
+  }
+
+  drawStrokedText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, fontSize: number, textAlign: CanvasTextAlign = "center", fillColor: string = "white") {
+    ctx.save();
+    ctx.font = ` ${fontSize}px ${FONT_FAMILY}`;
+    ctx.textAlign = textAlign; ctx.textBaseline = "middle";
+    ctx.strokeStyle = "black"; ctx.lineWidth = 3; ctx.lineJoin = "round";
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = fillColor; ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  _drawStar(ctx: CanvasRenderingContext2D, cx: number, cy: number, spikes: number, outer: number, inner: number, color: string) {
+    let rot = Math.PI / 2 * 3;
+    const step = Math.PI / spikes;
+    ctx.save();
+    ctx.lineJoin = "miter"; ctx.miterLimit = 10;
+    ctx.beginPath(); ctx.moveTo(cx, cy - outer);
+    for (let i = 0; i < spikes; i++) {
+      ctx.lineTo(cx + Math.cos(rot) * outer, cy + Math.sin(rot) * outer); rot += step;
+      ctx.lineTo(cx + Math.cos(rot) * inner, cy + Math.sin(rot) * inner); rot += step;
+    }
+    ctx.closePath();
+    ctx.fillStyle = color; ctx.fill();
+    ctx.strokeStyle = "#D10000"; ctx.lineWidth = 3; ctx.stroke();
+    ctx.restore();
+  }
+
+  _drawInput(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, key: string, isPassword: boolean, showPlain = false, toggleId: string | null = null) {
+    const inp = this.inputs[key];
+    const h = 42, isFoc = inp.focused;
+    this.drawStrokedText(ctx, inp.label.toUpperCase(), x, y + 2, 9, "left",
+      isFoc ? "#f1c40f" : "rgba(255,255,255,0.5)");
+    const bx = x, by = y + 8;
+    ctx.fillStyle   = isFoc ? "rgba(255,255,255,0.07)" : "rgba(255,255,255,0.04)";
+    ctx.strokeStyle = isFoc ? "rgba(241,196,15,0.7)"   : "rgba(255,255,255,0.12)";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(bx, by, w, h, 8); else ctx.rect(bx, by, w, h);
+    ctx.fill(); ctx.stroke();
+    this._registerBtn(key + "_box", bx, by, w, h);
+    const display = isPassword && !showPlain ? "•".repeat(inp.value.length) : inp.value;
+    const empty   = inp.value.length === 0;
+    ctx.font = `14px ${FONT_FAMILY}`;
+    ctx.fillStyle = empty ? "rgba(255,255,255,0.2)" : "white";
+    ctx.textAlign = "left"; ctx.textBaseline = "middle";
+    ctx.fillText(empty ? inp.label : display, bx + 12, by + h / 2);
+    if (isFoc && !empty && (Date.now() % 1000 < 500)) {
+      const tw = ctx.measureText(display).width;
+      ctx.fillStyle = "#f1c40f";
+      ctx.fillRect(bx + 12 + tw + 2, by + 10, 2, h - 20);
+    }
+    if (isPassword && toggleId) {
+      const ex = bx + w - 32, ey = by + (h - 22) / 2;
+      this._registerBtn(toggleId, ex, ey, 22, 22);
+      ctx.font = `16px ${FONT_FAMILY}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(showPlain ? "🙈" : "👁️", ex + 11, ey + 11);
+    }
+    return by + h;
+  }
+
+  _registerBtn(id: string, x: number, y: number, w: number, h: number) { this._btns.push({ id, x, y, w, h }); }
+
+  _hitTest(mx: number, my: number): string | null {
+    for (let i = this._btns.length - 1; i >= 0; i--) {
+      const b = this._btns[i];
+      if (mx >= b.x && mx <= b.x + b.w && my >= b.y && my <= b.y + b.h) return b.id;
+    }
+    return null;
+  }
+
+  // ====================================================================
+  //  Event handling
+  // ====================================================================
+  handleMouseMove(mx: number, my: number) {
+    if (!this.panelOpen) return false;
+    this.hoveredBtn = this._hitTest(mx, my);
+    if (this._draggingScroll && this._profileMaxOffset > 0) {
+      const trackH = Math.max(1, this.panelH - 52 - 10 - (4*36 + 3*6 + 12) - 200);
+      const ratio  = (my - this._dragStartY) / trackH;
+      this._profileScrollOffset = Math.max(0, Math.min(this._profileMaxOffset,
+        this._dragStartOffset + ratio * this._profileMaxOffset));
+    }
+    return true;
+  }
+
+  handleMouseDown(mx: number, my: number) {
+    if (!this.panelOpen) return false;
+    if (this._hitTest(mx, my) === "scrollbar") {
+      this._draggingScroll  = true;
+      this._dragStartY      = my;
+      this._dragStartOffset = this._profileScrollOffset;
+      return true;
+    }
+    return false;
+  }
+
+  handleMouseUp() { this._draggingScroll = false; }
+
+  handleWheel(deltaY: number) {
+    if (!this.panelOpen || this.screen !== "profile") return false;
+    this._profileScrollOffset = Math.max(0, Math.min(this._profileMaxOffset,
+      this._profileScrollOffset + (deltaY > 0 ? 40 : -40)));
+    return true;
+  }
+
+  handleClick(mx: number, my: number) {
+    if (!this.panelOpen) return false;
+    const id = this._hitTest(mx, my);
+    if (!id) {
+      if (mx < this.panelX || mx > this.panelX + this.panelW ||
+        my < this.panelY || my > this.panelY + this.panelH) this.closePanel();
+      return true;
+    }
+    if (id === "scrollbar") return true;
+
+    if (id === "close") { this.closePanel(); return true; }
+    if (id === "back")  { this.screen = "menu"; this._clearInputs(); return true; }
+
+    if (id.endsWith("_box")) { this._focusInput(id.replace("_box", "")); return true; }
+
+    if (id === "toggle_pass_login")   { this.showPassLogin   = !this.showPassLogin;   return true; }
+    if (id === "toggle_pass_reg")     { this.showPassReg     = !this.showPassReg;     return true; }
+    if (id === "toggle_pass_confirm") { this.showPassConfirm = !this.showPassConfirm; return true; }
+
+    if (id === "menu_login")    { this.screen = "login";    return true; }
+    if (id === "menu_register") { this.screen = "register"; return true; }
+
+    if (id === "do_login") {
+      const u = this.inputs.login_user.value.trim();
+      const p = this.inputs.login_pass.value;
+      const res = this.login(u, p);
+      if (res.success) {
+        this._sessionStart = Date.now();
+        this.screen = "profile";
+        this.message = { text: `✅ Welcome back, ${u}!`, color: "success", ttl: 2800 };
+        this._clearInputs();
+        this.updateUIAfterLogin();
+        if ((window as any).gameInstance?.onLoginSuccess) (window as any).gameInstance.onLoginSuccess(res.gameData);
+      } else {
+        this.message = { text: `❌ ${res.message}`, color: "error", ttl: 2800 };
+      }
+      return true;
+    }
+
+    if (id === "do_register") {
+      const u = this.inputs.reg_user.value.trim();
+      const p = this.inputs.reg_pass.value;
+      const p2 = this.inputs.reg_confirm.value;
+      if (p !== p2) { this.message = { text: "❌ Passwords do not match", color: "error", ttl: 2800 }; return true; }
+      const res = this.createAccount(u, p);
+      if (res.success) {
+        this.message = { text: "✅ Account created! Signing in…", color: "success", ttl: 2800 };
+        setTimeout(() => {
+          const lr = this.login(u, p);
+          if (lr.success) {
+            this._sessionStart = Date.now();
+            this.screen = "profile";
+            this._clearInputs();
+            this.updateUIAfterLogin();
+          }
+        }, 800);
+      } else {
+        this.message = { text: `❌ ${res.message}`, color: "error", ttl: 2800 };
+      }
+      return true;
+    }
+
+    if (id === "do_logout") {
+      this.saveSessionStats();
+      this.logout();
+      this.screen = "menu";
+      const el = document.getElementById("current-user");
+      if (el) el.style.display = "none";
+      this.message = { text: "👋 Signed out", color: "success", ttl: 2800 };
+      return true;
+    }
+
+    if (id === "export_items") { this.closePanel(); (window as any).handleExportItems?.(); return true; }
+    if (id === "import_items") { this.closePanel(); (window as any).handleImportItems?.(); return true; }
+    if (id === "clear_items")  { (window as any).handleClearAllItems?.(); this.message = { text: "🗑️ All items cleared", color: "error", ttl: 2800 }; return true; }
+
+    return true;
+  }
+
+  handleKeyDown(e: KeyboardEvent) {
+    if (!this.panelOpen) return false;
+    const focused = this._focusedKey();
+
+    if (e.key === "Escape") { this.closePanel(); return true; }
+
+    if (e.key === "Tab") {
+      const order = this.screen === "login"    ? ["login_user", "login_pass"] :
+                    this.screen === "register" ? ["reg_user", "reg_pass", "reg_confirm"] : [];
+      if (order.length) {
+        this._focusInput(order[(order.indexOf(focused) + 1) % order.length]);
+        e.preventDefault();
+      }
+      return true;
+    }
+
+    if (e.key === "Enter") {
+      const btnId = this.screen === "login" ? "do_login" : this.screen === "register" ? "do_register" : null;
+      if (btnId) { const btn = this._btns.find(b => b.id === btnId); if (btn) this.handleClick(btn.x + 1, btn.y + 1); }
+      return true;
+    }
+
+    if (!focused) return false;
+    if (e.key === "Backspace") { this.inputs[focused].value = this.inputs[focused].value.slice(0, -1); return true; }
+    if (e.key.length === 1 && this.inputs[focused].value.length < 24) { this.inputs[focused].value += e.key; return true; }
+    return false;
+  }
+
+  // ====================================================================
+  //  Formatting
+  // ====================================================================
+  _formatDate(ts: number) {
+    if (!ts) return "—";
+    const d = new Date(ts);
+    return `${String(d.getMonth()+1).padStart(2,"0")}/${String(d.getDate()).padStart(2,"0")}/${String(d.getFullYear()).slice(2)}`;
+  }
+
+  _formatDuration(ms: number) {
+    if (!ms || ms <= 0) return "0m";
+    const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
+    return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m` : "<1m";
+  }
+
+  _formatNum(n: number) {
+    if (!n) return "0";
+    if (n >= 1000000000) return (n / 1000000000).toFixed(2) + "b";
+    if (n >= 1000000)     return (n / 1000000).toFixed(2) + "m";
+    if (n >= 1000)         return (n / 1000).toFixed(1) + "k";
+    return n.toLocaleString();
+  }
+
+  // ====================================================================
+  //  Core account logic
+  // ====================================================================
+  loadAllUsers() {
+    try {
+      const raw = localStorage.getItem(this.STORAGE_KEY);
+      this.users = raw ? new Map(Object.entries(JSON.parse(raw))) : new Map();
+      if (!raw) this.saveAllUsers();
+    } catch(_e) { this.users = new Map(); }
+  }
+
+  loadLoginCounts() {
+    try { this.loginCounts = JSON.parse(localStorage.getItem(this.LOGIN_COUNT_KEY) || "{}"); }
+    catch(_e) { this.loginCounts = {}; }
+  }
+
+  saveLoginCounts() {
+    try { localStorage.setItem(this.LOGIN_COUNT_KEY, JSON.stringify(this.loginCounts)); } catch(_e) {}
+  }
+
+  recordLogin(username: string) {
+    this.loginCounts[username] = (this.loginCounts[username] || 0) + 1;
+    this.saveLoginCounts();
+    localStorage.setItem(this.LAST_USER_KEY, username);
+  }
+
+  getMostUsedAccount(): string | null {
+    let best: string | null = null, max = 0;
+    for (const [u, c] of Object.entries(this.loginCounts)) {
+      if (this.users.has(u) && c > max) { max = c; best = u; }
+    }
+    return best;
+  }
+
+  getLastLoginAccount(): string | null { return localStorage.getItem(this.LAST_USER_KEY); }
+
+  async autoLogin() {
+    if (this.currentUser) return;
+    const username = this.getLastLoginAccount() || this.getMostUsedAccount();
+    if (!username) return;
+    const ud = this.users.get(username);
+    if (!ud) return;
+    this.currentUser   = username;
+    ud.lastLogin       = Date.now();
+    this._sessionStart = Date.now();
+
+    if ((window as any).showCloudLoading) (window as any).showCloudLoading("Loading save...");
+    const remote = await (window as any).cloudLoad?.(username, (window as any).getSaveToken?.(username));
+    if ((window as any).hideCloudLoading) (window as any).hideCloudLoading();
+    if (remote && remote !== "OFFLINE" && (!ud.gameData || (remote.timestamp || 0) > (ud.gameData.timestamp || 0))) {
+      ud.gameData = remote;
+    }
+
+    this.saveAllUsers();
+    this.updateUIAfterLogin();
+    if ((window as any).gameInstance?.onLoginSuccess) (window as any).gameInstance.onLoginSuccess(ud.gameData);
+    return { success: true, gameData: ud.gameData };
+  }
+
+  saveAllUsers() {
+    try { localStorage.setItem(this.STORAGE_KEY, JSON.stringify(Object.fromEntries(this.users))); return true; }
+    catch(_e) { return false; }
+  }
+
+  createAccount(username: string, password: string) {
+    if (this.users.has(username)) return { success: false, message: "Username already taken" };
+    if (username.length < 3 || username.length > 20) return { success: false, message: "Username must be 3–20 characters" };
+    if (password.length < 3 || password.length > 20) return { success: false, message: "Password must be 3–20 characters" };
+
+    this.users.set(username, {
+      username,
+      password: this.hashPassword(password),
+      createdAt: Date.now(),
+      lastLogin: null,
+      gameData: null,
+      stats: {
+        totalPlayTime: 0,
+        totalKills: 0,
+        highestScore: 0,
+        gamesPlayed: 0,
+        wins: 0,
+        multiplayerGames: 0,
+        singleGames: 0,
+        petalsBurned: 0,
+        petalsCrafted: 0,
+        petalsPicked: 0,
+        totalXp: 0,
+        totalDamage: 0,
+        starsEarned: 0,
+        lastSyncedKills: 0,
+        lastSyncedXp: 0,
+      },
+    });
+
+    const saved = this.saveAllUsers();
+    if (!saved) return { success: false, message: "Save failed, please retry" };
+
+    const loginResult = this.login(username, password);
+    if (loginResult.success && (window as any).gameInstance) {
+      const gi = (window as any).gameInstance;
+      if (gi.player) {
+        gi.player.xp = 0;
+        if (gi.player.levelSystem) {
+          gi.player.levelSystem.level = 1;
+          gi.player.levelSystem.currentXp = 0;
+        }
+      }
+      if (gi.shopSystem) gi.shopSystem.stars = 0;
+      gi.initializeDefaultItems?.();
+      gi.syncAllPetalsFromQuickSlot?.();
+      gi.requestRedraw?.();
+    }
+
+    return { success: true };
+  }
+
+  login(username: string, password: string) {
+    const ud = this.users.get(username);
+    if (!ud) return { success: false, message: "Username not found" };
+    if (ud.password !== this.hashPassword(password)) return { success: false, message: "Incorrect password" };
+
+    ud.lastLogin = Date.now();
+    ud.stats.gamesPlayed = (ud.stats.gamesPlayed || 0) + 1;
+    this.currentUser = username;
+    this.saveAllUsers();
+    this.recordLogin(username);
+
+    const gi = (window as any).gameInstance;
+    if (gi && gi.player) {
+      const gameData = ud.gameData;
+      if (gameData) {
+        this.applyGameData(gi.player, gameData);
+      } else {
+        gi.player.xp = 0;
+        if (gi.player.levelSystem) {
+          gi.player.levelSystem.level = 1;
+          gi.player.levelSystem.currentXp = 0;
+        }
+        if (gi.shopSystem) gi.shopSystem.stars = 0;
+        gi.initializeDefaultItems?.();
+      }
+
+      gi.syncAllPetalsFromQuickSlot?.();
+      if (gi.player.inventory) gi.player.inventory.cacheDirty = true;
+      gi.requestRedraw?.();
+    }
+
+    this.updateUIAfterLogin();
+
+    (window as any).cloudLoad?.(username, (window as any).getSaveToken?.(username)).then((remote: any) => {
+      if (remote && remote !== "OFFLINE" && (window as any).gameInstance?.player) {
+        if (!ud.gameData || (remote.timestamp || 0) > (ud.gameData.timestamp || 0)) {
+          ud.gameData = remote;
+          this.applyGameData((window as any).gameInstance.player, remote);
+          (window as any).gameInstance.syncAllPetalsFromQuickSlot?.();
+          if ((window as any).gameInstance.player.inventory) (window as any).gameInstance.player.inventory.cacheDirty = true;
+          (window as any).gameInstance.requestRedraw?.();
+        }
+      }
+    });
+
+    return { success: true, gameData: ud.gameData, stats: ud.stats };
+  }
+
+  logout() {
+    if (this.currentUser) this.saveSessionStats();
+    this.currentUser = null; this._sessionStart = null;
+  }
+
+  addPlayTime(ms: number) {
+    if (!this.currentUser) return;
+    const ud = this.users.get(this.currentUser);
+    if (ud) ud.stats.totalPlayTime = (ud.stats.totalPlayTime || 0) + ms;
+  }
+
+  saveGameData(player: any, gameData: any, craftData: any = {}) {
+    if (!this.currentUser) return false;
+    const ud = this.users.get(this.currentUser);
+    if (!ud) return false;
+    if (!ud.stats) ud.stats = {};
+    if (gameData) {
+      if ((gameData.score||0) > (ud.stats.highestScore||0)) ud.stats.highestScore = gameData.score;
+      if (gameData.enemiesKilled) {
+        const diff = gameData.enemiesKilled - (ud.stats.lastSyncedKills||0);
+        if (diff > 0) { ud.stats.totalKills = (ud.stats.totalKills||0) + diff; ud.stats.lastSyncedKills = gameData.enemiesKilled; }
+      }
+      if (gameData.xpGained) {
+        const diff = gameData.xpGained - (ud.stats.lastSyncedXp||0);
+        if (diff > 0) { ud.stats.totalXp = (ud.stats.totalXp||0) + diff; ud.stats.lastSyncedXp = gameData.xpGained; }
+      }
+      if (gameData.damageDealt) ud.stats.totalDamage = (ud.stats.totalDamage||0) + gameData.damageDealt;
+      if (gameData.starsEarned) ud.stats.starsEarned = (ud.stats.starsEarned||0) + gameData.starsEarned;
+    }
+    if (craftData.petalsBurned)  ud.stats.petalsBurned  = (ud.stats.petalsBurned ||0) + craftData.petalsBurned;
+    if (craftData.petalsCrafted) ud.stats.petalsCrafted = (ud.stats.petalsCrafted||0) + craftData.petalsCrafted;
+    ud.gameData = this.prepareGameData(player, gameData);
+    const saved = this.saveAllUsers();
+
+    clearTimeout(this._cloudSaveTimer);
+    this._cloudSaveTimer = setTimeout(() => {
+      (window as any).cloudSave?.(this.currentUser, (window as any).getSaveToken?.(this.currentUser), ud.gameData);
+    }, 4000);
+
+    return saved;
+  }
+
+  loadGameData() {
+    if (!this.currentUser) return null;
+    return this.users.get(this.currentUser)?.gameData || null;
+  }
+
+  prepareGameData(player: any, gameData: any) {
+    const gi = (window as any).gameInstance;
+    const autoSave  = gi?.autoSaveSystem;
+    const slotCount = player.getTotalSlotCount?.() ?? 5;
+    const compSlots = (slots: any) => {
+      if (!slots) return [];
+      if (autoSave?.compressSlotsForCloud) return autoSave.compressSlotsForCloud(slots);
+      return slots.map((item: any, i: number) => item?.toDict ? { slot_index: i, ...item.toDict() } : null).filter(Boolean);
+    };
+    return {
+      timestamp: Date.now(), slot_count: slotCount, compressed: true,
+      player_data: {
+        player_rarity: player.playerRarity || "Common", health: player.health || 100,
+        max_health: player.maxHealth || 100, petal_count: player.petalCount || 5,
+        level: player.levelSystem?.level || 1, current_xp: player.levelSystem?.currentXp || 0,
+        total_xp: player.xp || 0, stars: gi?.shopSystem?.getStarCount() || 0,
+        player_position: {
+          x: player.physicsBody?.position?.x || ((window as any).WORLD_WIDTH||5000)/2,
+          y: player.physicsBody?.position?.y || ((window as any).WORLD_HEIGHT||5000)/2,
+        },
+      },
+      inventory: (autoSave?.compressItemsForCloud)
+        ? autoSave.compressItemsForCloud(player.inventory?.items || [])
+        : (player.inventory?.items || []).map((i: any) => i?.toDict?.()).filter(Boolean),
+      quick_slot: compSlots(player.quickSlot?.slots),
+      secondary_slot: compSlots(player.quickSlot?.secondarySlots),
+      game_data: { score: gameData?.score||0, enemies_killed: gameData?.enemiesKilled||0, current_wave: gameData?.currentWave||1 },
+      version: "2.0.0",
+    };
+  }
+
+  applyGameData(player: any, saveData: any) {
+    if (!saveData) return null;
+    const gi = (window as any).gameInstance;
+    const autoSave    = gi?.autoSaveSystem;
+    const isCompressed = saveData.compressed === true;
+    const targetCount = Math.max(saveData.slot_count||5, player.getTotalSlotCount?.() ?? 5);
+
+    if (saveData.player_data) {
+      const pd = saveData.player_data;
+      if (player.levelSystem) {
+        player.levelSystem.level     = pd.level || 1;
+        player.levelSystem.currentXp = pd.current_xp || 0;
+        player.xp        = pd.total_xp || 0;
+        player.baseMaxHealth = player.levelSystem.getHpForLevel(player.levelSystem.level);
+        player.maxHealth = pd.max_health || player.baseMaxHealth;
+        player.health    = Math.min(pd.health || player.maxHealth, player.maxHealth);
+      }
+      player.petalCount = Math.max(5, pd.petal_count||5, targetCount);
+      if (pd.player_rarity) player.playerRarity = pd.player_rarity;
+      if (pd.stars !== undefined && gi?.shopSystem) {
+        const diff = pd.stars - gi.shopSystem.getStarCount();
+        if (diff > 0) gi.shopSystem.addStars(diff);
+      }
+      if (pd.player_position && player.physicsBody) {
+        player.physicsBody.position.x = pd.player_position.x || ((window as any).WORLD_WIDTH||5000)/2;
+        player.physicsBody.position.y = pd.player_position.y || ((window as any).WORLD_HEIGHT||5000)/2;
+      }
+    }
+
+    if (player.inventory) player.inventory.items = [];
+    if (player.quickSlot) {
+      player.quickSlot.slots          = new Array(targetCount).fill(null);
+      player.quickSlot.secondarySlots = new Array(targetCount).fill(null);
+    }
+
+    const makeItem = (d: any) => {
+      if (!d?.type || !d?.rarity) return null;
+      try {
+        const DNA = (window as any).DNA, Item = (window as any).Item;
+        const item = d.type === "DNA" ? new DNA(d.rarity, parseInt(d.level)||1) : new Item(d.type, parseInt(d.level)||1, d.rarity);
+        item.count = d.count || 1;
+        ["durability","maxDurability","isBroken","reloadTime","baseReloadTime","armor"].forEach(k => { if (d[k] !== undefined) item[k] = d[k]; });
+        return item;
+      } catch(_e) { return null; }
+    };
+
+    if (saveData.inventory && player.inventory)
+      player.inventory.items = (isCompressed && autoSave?.decompressItemsForCloud)
+        ? autoSave.decompressItemsForCloud(saveData.inventory)
+        : saveData.inventory.map(makeItem).filter(Boolean);
+
+    const restoreSlots = (raw: any, slots: any[]) => {
+      if (isCompressed && autoSave?.decompressSlotsForCloud) {
+        autoSave.decompressSlotsForCloud(raw, targetCount).forEach((item: any, i: number) => { if (item && i < slots.length) slots[i] = item; });
+      } else {
+        raw.forEach((d: any) => { if (d?.slot_index < slots.length) { const item = makeItem(d); if (item) slots[d.slot_index] = item; } });
+      }
+    };
+    if (saveData.quick_slot     && player.quickSlot) restoreSlots(saveData.quick_slot,     player.quickSlot.slots);
+    if (saveData.secondary_slot && player.quickSlot) restoreSlots(saveData.secondary_slot, player.quickSlot.secondarySlots);
+
+    this.recreatePetals(player);
+    player.updateStatsFromPetals?.();
+    for (let i = 0; i < player.quickSlot.slots.length; i++) player.quickSlot.updatePetalFromSlot(i);
+    return saveData.game_data || {};
+  }
+
+  recreatePetals(player: any) {
+    const qs = player.quickSlot.slots, old = player.petals;
+    const Petal = (window as any).Petal;
+    if (!Petal) return;
+    player.petals = [];
+    for (let i = 0; i < player.petalCount; i++) {
+      const p = new Petal(player, i, player.petalCount);
+      if (i < old.length) { p.stillMode = old[i].stillMode; p.stillPosition = old[i].stillPosition; }
+      player.petals.push(p);
+      if (i < qs.length && qs[i]) p.updateFromQuickSlot(i);
+    }
+    player.recalculatePetalAngles?.();
+    player.updateStatsFromPetals?.();
+  }
+
+  hashPassword(password: string) {
+    let hash = 0;
+    for (let i = 0; i < password.length; i++) { hash = ((hash << 5) - hash) + password.charCodeAt(i); hash = hash & hash; }
+    return hash.toString(36);
+  }
+
+  isLoggedIn()      { return this.currentUser !== null; }
+  getCurrentUser()  { return this.currentUser; }
+  getAllUsers()      { return Array.from(this.users.keys()); }
+  getUserStats(u: string)   { return this.users.get(u)?.stats || null; }
+  getCurrentStats() { return this.currentUser ? this.getUserStats(this.currentUser) : null; }
+
+  deleteAccount(username: string, password: string) {
+    const ud = this.users.get(username);
+    if (!ud) return { success: false, message: "Username not found" };
+    if (ud.password !== this.hashPassword(password)) return { success: false, message: "Incorrect password" };
+    this.users.delete(username);
+    if (this.currentUser === username) this.currentUser = null;
+    this.saveAllUsers();
+    return { success: true };
+  }
+
+  exportAccounts() {
+    const blob = new Blob([JSON.stringify({ exportTime: Date.now(), accounts: Object.fromEntries(this.users) }, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `flwrr_accounts_${new Date().toISOString().slice(0,10)}.json`;
+    a.click(); URL.revokeObjectURL(url);
+    return { success: true };
+  }
+
+  importAccounts(jsonStr: string) {
+    try {
+      const data = JSON.parse(jsonStr);
+      if (!data.accounts) return { success: false, message: "Invalid file" };
+      for (const [u, d] of Object.entries(data.accounts)) this.users.set(u, d);
+      this.saveAllUsers();
+      return { success: true, message: `Imported ${Object.keys(data.accounts).length} accounts` };
+    } catch(e: any) { return { success: false, message: "Import failed: " + e.message }; }
+  }
+
+  clearAllAccounts() {
+    if (confirm("Delete ALL accounts? This cannot be undone!")) {
+      this.users.clear(); this.currentUser = null;
+      localStorage.removeItem(this.STORAGE_KEY);
+      return true;
+    }
+    return false;
+  }
+}
+
 export class GameClient {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -1410,6 +2473,8 @@ export class GameClient {
   /** Main-menu bestiary; kill counts are tracked locally by mob + rarity. */
   private mobGallery = new MobGallery();
   private chat = new ChatSystem();
+  /** Canvas-painted account panel (local-storage based). */
+  private accountSystem = new AccountSystem();
   private squadCode = "";
 
   // Rose arrival burst. The absorption travel itself is authoritative petal
@@ -3269,6 +4334,11 @@ export class GameClient {
   private onContext = (e: Event) => e.preventDefault();
 
   private onKeyDown = (e: KeyboardEvent) => {
+    // Account panel captures all keyboard input while open.
+    if (this.accountSystem.panelOpen && this.accountSystem.handleKeyDown(e)) {
+      e.preventDefault();
+      return;
+    }
     if (this.scene === "menu" && this.mobGallery.handleKey(e.key)) {
       e.preventDefault();
       return;
@@ -3383,6 +4453,8 @@ export class GameClient {
     const p = this.pointerPos(e);
     this.mx = p.x;
     this.my = p.y;
+    // Account panel hover tracking (only when open).
+    if (this.accountSystem.panelOpen) this.accountSystem.handleMouseMove(p.x, p.y);
     // Mobile joystick handling: if active, clamp current point to radius
     if (this.isMobile && this.mobileJoystick.active) {
       const dx = p.x - this.mobileJoystick.centerX;
@@ -3413,6 +4485,11 @@ export class GameClient {
     const p = this.pointerPos(e);
     this.mx = p.x;
     this.my = p.y;
+    // Account panel: intercept the press (scrollbar drag or click).
+    if (this.accountSystem.panelOpen) {
+      if (this.accountSystem.handleMouseDown(p.x, p.y)) return;
+      if (this.accountSystem.handleClick(p.x, p.y)) return;
+    }
     // The AFK prompt outranks every other pointer target, including the mobile
     // joystick and action buttons which would otherwise swallow the touch.
     if (this.scene === "game" && (this.afkPending || this.afkKicked)) {
@@ -3488,6 +4565,8 @@ export class GameClient {
   };
 
   private onPointerUp = (e: PointerEvent) => {
+    // Account panel: release any scrollbar drag.
+    if (this.accountSystem.panelOpen) this.accountSystem.handleMouseUp();
     // Release mobile touch buttons
     if (this.isMobile) {
       this.mobileSpreadActive = false;
@@ -3512,6 +4591,12 @@ export class GameClient {
   };
 
   private onWheel = (e: WheelEvent) => {
+    // Account panel: scroll the profile stats grid.
+    if (this.accountSystem.panelOpen && this.accountSystem.handleWheel(e.deltaY)) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     if (this.scene === "menu" && this.mobGallery.handleWheel(e.deltaY)) {
       e.preventDefault();
       e.stopPropagation();
@@ -3721,11 +4806,11 @@ export class GameClient {
     const isMobileLayout = this.isMobile || W < 640;
 
     if (isMobileLayout) {
-      // Phone: a compact five-button bar above the menu instructions.
-      const BTN_W = Math.min(78, (W - 36) / 5);
+      // Phone: a compact six-button bar above the menu instructions.
+      const BTN_W = Math.min(72, (W - 40) / 6);
       const BTN_H = 36;
       const GAP = 5;
-      const totalW = BTN_W * 5 + GAP * 4;
+      const totalW = BTN_W * 6 + GAP * 5;
       const startX = (W - totalW) / 2;
       const y = H - BTN_H - 45;
       buttons['left_inventory'] = { x: startX, y, w: BTN_W, h: BTN_H };
@@ -3733,18 +4818,20 @@ export class GameClient {
       buttons['left_gallery'] = { x: startX + (BTN_W + GAP) * 2, y, w: BTN_W, h: BTN_H };
       buttons['left_bonus'] = { x: startX + (BTN_W + GAP) * 3, y, w: BTN_W, h: BTN_H };
       buttons['left_settings'] = { x: startX + (BTN_W + GAP) * 4, y, w: BTN_W, h: BTN_H };
+      buttons['left_account'] = { x: startX + (BTN_W + GAP) * 5, y, w: BTN_W, h: BTN_H };
     } else {
       // Desktop: left sidebar
       const LEFT_X = 14;
       const LEFT_W = 90;
       const LEFT_H = 45;
       const LEFT_GAP = 10;
-      const leftMidY = H / 2 - (LEFT_H * 5 + LEFT_GAP * 4) / 2;
+      const leftMidY = H / 2 - (LEFT_H * 6 + LEFT_GAP * 5) / 2;
       buttons['left_inventory'] = { x: LEFT_X, y: leftMidY, w: LEFT_W, h: LEFT_H };
       buttons['left_craft'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP), w: LEFT_W, h: LEFT_H };
       buttons['left_gallery'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 2, w: LEFT_W, h: LEFT_H };
       buttons['left_bonus'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 3, w: LEFT_W, h: LEFT_H };
       buttons['left_settings'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 4, w: LEFT_W, h: LEFT_H };
+      buttons['left_account'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 5, w: LEFT_W, h: LEFT_H };
     }
 
     return buttons;
@@ -3813,6 +4900,7 @@ export class GameClient {
     if (actions.left_craft && hit(actions.left_craft, mx, my)) this.toggleCraft();
     if (actions.left_bonus && hit(actions.left_bonus, mx, my)) this.bonusOpen = true;
     if (actions.left_settings && hit(actions.left_settings, mx, my)) this.settings.togglePanel();
+    if (actions.left_account && hit(actions.left_account, mx, my)) this.accountSystem.openPanel();
     
     // Play button (big button below biome grid)
     const playBtnRect = this.menuPlayButtonRect();
@@ -4575,6 +5663,7 @@ export class GameClient {
       left_gallery: [70, 145, 94],
       left_bonus: [217, 154, 38],
       left_settings: [127, 140, 141],
+      left_account: [217, 75, 75],
     };
     const leftBtnHoverColors: Record<string, [number, number, number]> = {
       left_inventory: [41, 128, 185],
@@ -4582,9 +5671,10 @@ export class GameClient {
       left_gallery: [53, 120, 76],
       left_bonus: [195, 130, 30],
       left_settings: [100, 110, 110],
+      left_account: [180, 50, 50],
     };
     
-    for (const key of ['left_inventory', 'left_craft', 'left_gallery', 'left_bonus', 'left_settings']) {
+    for (const key of ['left_inventory', 'left_craft', 'left_gallery', 'left_bonus', 'left_settings', 'left_account']) {
       const rect = actions[key];
       if (!rect) continue;
       const isHov = hit(rect, this.mx, this.my);
@@ -4602,7 +5692,8 @@ export class GameClient {
         left_craft: isMobileLayout ? 'Craft' : '[C]raft',
         left_gallery: isMobileLayout ? 'Mobs' : 'Mobs',
         left_bonus: 'Bonus',
-        left_settings: 'Settings'
+        left_settings: 'Settings',
+        left_account: 'Account'
       };
       ctx.strokeText(labels[key] || '', rect.x + rect.w / 2, rect.y + rect.h / 2);
       ctx.fillStyle = 'white';
@@ -4667,6 +5758,8 @@ export class GameClient {
     // Draw last: this floating panel intentionally overlays every main-menu
     // control while it is open.
     this.mobGallery.draw(ctx, this.time, W, H);
+    // Account panel overlays everything when open.
+    this.accountSystem.draw(ctx);
   }
 
   private bonusModalRect(): Rect {
@@ -5760,7 +6853,8 @@ export class GameClient {
     ctx.globalAlpha = Math.min(1, this.bagAnim * 1.3);
 
     // main panel background, styled like the reference UI (blue card + dark border)
-    roundRect(ctx, p.x, p.y, p.w, p.h, 10);
+    // Square corners (直角) per design request.
+    roundRect(ctx, p.x, p.y, p.w, p.h, 0);
     ctx.fillStyle = "#5aa0db";
     ctx.fill();
     ctx.lineWidth = 5;
@@ -5850,7 +6944,8 @@ export class GameClient {
     const panelW = p.w - layout.pad * 2;
 
     ctx.save();
-    roundRect(ctx, panelX, panelY, panelW, panelH, 6);
+    // Square corners (直角) per design request.
+    roundRect(ctx, panelX, panelY, panelW, panelH, 0);
     ctx.fillStyle = "#3f7dc2";
     ctx.fill();
 
