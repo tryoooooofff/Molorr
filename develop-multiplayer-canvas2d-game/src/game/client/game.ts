@@ -1104,9 +1104,21 @@ class ChatSystem {
           // 3. Numbers (use upcoming rarity color)
           if (!found && /^\d/.test(remaining)) {
             const match = remaining.match(/^(\d+)(x)?/);
-            if (match) {
-              const number = match[1];
-              const hasX = match[2] === 'x';
+            if (!match) {
+              // fallback: treat as plain character
+              const char = remaining[0];
+              ctx.strokeStyle = '#000000';
+              ctx.lineWidth = 3;
+              ctx.strokeText(char, xOffset, y);
+              ctx.fillStyle = '#ffffff';
+              ctx.fillText(char, xOffset, y);
+              xOffset += ctx.measureText(char).width;
+              remaining = remaining.substring(1);
+              found = true;
+              continue;
+            }
+            const number = match[1];
+            const hasX = match[2] === 'x';
               const numberStartOffset = xOffset;
               let tempRemaining = remaining.substring(number.length);
               if (hasX) tempRemaining = tempRemaining.substring(1);
@@ -2024,7 +2036,7 @@ export class AccountSystem {
       const order = this.screen === "login"    ? ["login_user", "login_pass"] :
                     this.screen === "register" ? ["reg_user", "reg_pass", "reg_confirm"] : [];
       if (order.length) {
-        this._focusInput(order[(order.indexOf(focused) + 1) % order.length]);
+        this._focusInput(order[(order.indexOf(focused || '') + 1) % order.length]);
         e.preventDefault();
       }
       return true;
@@ -2036,6 +2048,7 @@ export class AccountSystem {
       return true;
     }
 
+    if (!focused) return false;
     if (!focused) return false;
     if (e.key === "Backspace") { this.inputs[focused].value = this.inputs[focused].value.slice(0, -1); return true; }
     if (e.key.length === 1 && this.inputs[focused].value.length < 24) { this.inputs[focused].value += e.key; return true; }
@@ -4162,7 +4175,7 @@ export class GameClient {
     const idx = Math.max(0, Math.min(RARITIES.length - 1, r));
     const c = RARITIES[idx]?.color ?? "rgb(160,160,160)";
     const m = c.match(/rgb\((\d+),\s*(\d+),\s*(\d+)\)/);
-    if (m) {
+    if (m && m[1] !== undefined && m[2] !== undefined && m[3] !== undefined) {
       const out: [number, number, number] = [parseInt(m[1], 10), parseInt(m[2], 10), parseInt(m[3], 10)];
       return out;
     }
