@@ -1473,7 +1473,7 @@ export class AccountSystem {
 
   updateCurrentSessionStats() {
     if (!this.currentUser) return;
-    const ud = this.users.get(this.currentUser);
+    const ud = this.users.get(this.currentUser || '');
     if (!ud) return;
     const game: any = (window as any).gameInstance;
 
@@ -1506,7 +1506,7 @@ export class AccountSystem {
 
   saveSessionStats() {
     if (!this.currentUser) return;
-    const ud = this.users.get(this.currentUser);
+    const ud = this.users.get(this.currentUser || '');
     if (!ud) return;
     if (this._sessionStart) {
       ud.stats.totalPlayTime = (ud.stats.totalPlayTime || 0) + (Date.now() - this._sessionStart);
@@ -1570,10 +1570,10 @@ export class AccountSystem {
   // ====================================================================
   //  Draw entry
   // ====================================================================
-  draw(ctx: CanvasRenderingContext2D) {
+  draw(ctx: CanvasRenderingContext2D, viewWidth?: number, viewHeight?: number) {
     if (!this.panelOpen) return;
-    const W = (window as any).WIDTH || (window as any).innerWidth || ctx.canvas.width;
-    const H = (window as any).HEIGHT || (window as any).innerHeight || ctx.canvas.height;
+    const W = viewWidth || (window as any).innerWidth || ctx.canvas.width;
+    const H = viewHeight || (window as any).innerHeight || ctx.canvas.height;
     // Mobile: smaller panel so it doesn't dominate the screen.
     const isMobileView = W < 640;
     const maxW = isMobileView ? 360 : 480;
@@ -1695,7 +1695,7 @@ export class AccountSystem {
   // --- Profile screen --------------------------------------------------
   _drawProfile(ctx: CanvasRenderingContext2D, px: number, py: number, pw: number, ph: number) {
     const cx = px + pw / 2;
-    const ud: any    = this.users.get(this.currentUser) || {};
+    const ud: any    = this.users.get(this.currentUser || '') || {};
     const stats: any = ud.stats || {};
     const now   = Date.now();
     const sessionMs   = this._sessionStart ? (now - this._sessionStart) : 0;
@@ -2233,13 +2233,13 @@ export class AccountSystem {
 
   addPlayTime(ms: number) {
     if (!this.currentUser) return;
-    const ud = this.users.get(this.currentUser);
+    const ud = this.users.get(this.currentUser || '');
     if (ud) ud.stats.totalPlayTime = (ud.stats.totalPlayTime || 0) + ms;
   }
 
   saveGameData(player: any, gameData: any, craftData: any = {}) {
     if (!this.currentUser) return false;
-    const ud = this.users.get(this.currentUser);
+    const ud = this.users.get(this.currentUser || '');
     if (!ud) return false;
     if (!ud.stats) ud.stats = {};
     if (gameData) {
@@ -2269,7 +2269,7 @@ export class AccountSystem {
 
   loadGameData() {
     if (!this.currentUser) return null;
-    return this.users.get(this.currentUser)?.gameData || null;
+    return this.users.get(this.currentUser || '')?.gameData || null;
   }
 
   prepareGameData(player: any, gameData: any) {
@@ -5749,7 +5749,7 @@ export class GameClient {
     // control while it is open.
     this.mobGallery.draw(ctx, this.time, W, H);
     // Account panel overlays everything when open.
-    this.accountSystem.draw(ctx);
+    this.accountSystem.draw(ctx, this.w, this.h);
   }
 
   private bonusModalRect(): Rect {
