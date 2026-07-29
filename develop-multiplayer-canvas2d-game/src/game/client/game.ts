@@ -3579,14 +3579,14 @@ export class GameClient {
     // Mobile panels are scaled down so more of the game world stays visible.
     const w = isMobileLayout
       ? Math.min(shortMobile ? 440 : 360, this.w - 16)
-      : Math.min(400, this.w * 0.92);
+      : Math.min(380, this.w * 0.92);
     // Phone panels are modal and cover the HUD, so they can use the short
     // screen's full height instead of reserving another hotbar-sized strip.
     const reservedHotbar = this.scene === "game" && !isMobileLayout ? this.hotbarHeight() : 0;
     const topGap = shortMobile ? 8 : 18;
     const bottomGap = shortMobile ? 8 : 26;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
-    const idealH = shortMobile ? 320 : 460;
+    const idealH = shortMobile ? 320 : 610;
     const h = Math.min(idealH, availableH);
     const hidden = this.h + 20;
     const shown = topGap;
@@ -3714,12 +3714,12 @@ export class GameClient {
     // Mobile craft panel is narrowed so it doesn't dominate the screen.
     const w = isMobileLayout
       ? Math.min(this.w - 16, shortMobile ? 560 : 680)
-      : Math.min(780, Math.floor(this.w * 0.92));
+      : Math.min(800, Math.floor(this.w * 0.92));
     const reservedHotbar = this.scene === "game" && !isMobileLayout ? this.hotbarHeight() : 0;
     const topGap = shortMobile ? 8 : 12;
     const bottomGap = shortMobile ? 8 : 18;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
-    const h = Math.min(shortMobile ? 340 : 500, availableH);
+    const h = Math.min(shortMobile ? 340 : 560, availableH);
     const t = ease.outCubic(this.craftAnim);
     if (isMobileLayout) {
       const hidden = this.h + 20;
