@@ -321,6 +321,7 @@ export function drawItemIcon(
   size: number,
   spin = 0,
   rarity: number = 0,
+  compact = false,
 ) {
   const def = ITEMS[itemId];
   if (!def) return;
@@ -387,10 +388,11 @@ export function drawItemIcon(
     }
     case 2: { // Stinger
       const count = getStingerPetalCount(rarity);
+      const s = compact ? 0.65 : 1.0;
       if (count === 1) {
         // A lone stinger triangle should sit in the middle of the icon
         // (pointing up), not off to the side facing the center.
-        const R = size * 1.15;
+        const R = size * 1.15 * s;
         ctx.beginPath();
         ctx.moveTo(0, -R);
         ctx.lineTo(-R * 0.866, R * 0.5);
@@ -403,9 +405,9 @@ export function drawItemIcon(
           ctx.save();
           ctx.rotate((i * 2 * Math.PI / count) - Math.PI / 2);
           ctx.beginPath();
-          ctx.moveTo(0, size * 0.4);
-          ctx.lineTo(-size * 0.5, size * 1.4);
-          ctx.lineTo(size * 0.5, size * 1.4);
+          ctx.moveTo(0, size * 0.4 * s);
+          ctx.lineTo(-size * 0.5 * s, size * 1.4 * s);
+          ctx.lineTo(size * 0.5 * s, size * 1.4 * s);
           ctx.closePath();
           ctx.fill();
           ctx.stroke();
@@ -1092,7 +1094,7 @@ export function drawCard(
   const showName = opts.showName !== false && !!def;
   const iconSize = size * 0.28;
   const iconCy = cy - (showName ? r.h * 0.07 : 0);
-  drawItemIcon(ctx, cell.item, cx, iconCy, iconSize, 0, cell.rarity);
+  drawItemIcon(ctx, cell.item, cx, iconCy, iconSize, 0, cell.rarity, cell.item === 2);
 
   // Item name (bottom band) with the reference word-wrap logic.
   if (showName && def) {
