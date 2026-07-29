@@ -1513,7 +1513,7 @@ class VirtualKeyboard {
       if (hit(kr.rect, mx, my)) {
         if (kr.action === 'done') {
           this.active = false;
-          return { handled: true };
+          return { handled: true, key: 'Enter' };
         }
         if (kr.action === 'toggle') {
           this.numMode = !this.numMode;
@@ -3732,19 +3732,12 @@ export class GameClient {
   }
 
   private bagPanelRect(): Rect {
-    const isMobileLayout = this.isMobile || this.w < 640;
-    const shortMobile = isMobileLayout && this.h <= 600;
-    // Mobile panels are scaled down so more of the game world stays visible.
-    const w = isMobileLayout
-      ? Math.min(shortMobile ? 440 : 360, this.w - 16)
-      : Math.min(380, this.w * 0.92);
-    // Phone panels are modal and cover the HUD, so they can use the short
-    // screen's full height instead of reserving another hotbar-sized strip.
-    const reservedHotbar = this.scene === "game" && !isMobileLayout ? this.hotbarHeight() : 0;
-    const topGap = shortMobile ? 8 : 18;
-    const bottomGap = shortMobile ? 8 : 26;
+    const w = Math.min(380, this.w * 0.92);
+    const reservedHotbar = this.scene === "game" ? this.hotbarHeight() : 0;
+    const topGap = 18;
+    const bottomGap = 26;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
-    const idealH = shortMobile ? 320 : 610;
+    const idealH = 610;
     const h = Math.min(idealH, availableH);
     const hidden = this.h + 20;
     const shown = topGap;
@@ -3755,29 +3748,28 @@ export class GameClient {
   /** Geometry for the scrollable item grid + header widgets inside the bag panel. */
   private bagLayout() {
     const p = this.bagPanelRect();
-    const compact = (this.isMobile || this.w < 640) && this.h <= 600;
-    const cols = compact && p.w >= 480 ? 6 : 5;
-    const gap = compact ? 6 : 10;
-    const pad = compact ? 10 : 15;
+    const cols = 5;
+    const gap = 10;
+    const pad = 15;
     const slotSize = Math.max(28, Math.floor((p.w - pad * 2 - gap * (cols - 1)) / cols));
     const itemHeight = slotSize + gap;
-    const headerH = compact ? 34 : 44;
+    const headerH = 44;
     const barY = p.y + headerH;
-    const barH = compact ? 24 : 28;
-    const dropW = Math.min(compact ? 100 : 120, p.w * 0.3);
+    const barH = 28;
+    const dropW = Math.min(120, p.w * 0.3);
     const barGap = 6;
     const barW = p.w - dropW - barGap - pad * 2;
     const barX = p.x + pad;
     const dropX = barX + barW + barGap;
-    const statsH = compact ? 72 : 92;
-    const gridTop = barY + barH + (compact ? 8 : 12);
+    const statsH = 92;
+    const gridTop = barY + barH + 12;
     const gridBottom = p.y + p.h - statsH - 6;
     const gridH = Math.max(1, gridBottom - gridTop);
     const maxVisibleRows = Math.max(1, Math.floor(gridH / itemHeight));
     const scrollTrack: Rect = { x: p.x + p.w - pad + 2, y: gridTop, w: 6, h: gridH };
     return {
       panel: p,
-      compact,
+      compact: false,
       cols,
       gap,
       pad,
@@ -3867,22 +3859,13 @@ export class GameClient {
   }
 
   private craftPanelRect(): Rect {
-    const isMobileLayout = this.isMobile || this.w < 640;
-    const shortMobile = isMobileLayout && this.h <= 600;
-    // Mobile craft panel is narrowed so it doesn't dominate the screen.
-    const w = isMobileLayout
-      ? Math.min(this.w - 16, shortMobile ? 560 : 680)
-      : Math.min(800, Math.floor(this.w * 0.92));
-    const reservedHotbar = this.scene === "game" && !isMobileLayout ? this.hotbarHeight() : 0;
-    const topGap = shortMobile ? 8 : 12;
-    const bottomGap = shortMobile ? 8 : 18;
+    const w = Math.min(800, Math.floor(this.w * 0.92));
+    const reservedHotbar = this.scene === "game" ? this.hotbarHeight() : 0;
+    const topGap = 12;
+    const bottomGap = 18;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
-    const h = Math.min(shortMobile ? 340 : 560, availableH);
+    const h = Math.min(560, availableH);
     const t = ease.outCubic(this.craftAnim);
-    if (isMobileLayout) {
-      const hidden = this.h + 20;
-      return { x: (this.w - w) / 2, y: hidden + (topGap - hidden) * t, w, h };
-    }
     const hidden = this.w + 20;
     const shown = this.w - w - 16;
     return { x: hidden + (shown - hidden) * t, y: topGap, w, h };
@@ -3897,27 +3880,23 @@ export class GameClient {
    */
   private craftLayout() {
     const p = this.craftPanelRect();
-    const compact = (this.isMobile || this.w < 640) && this.h <= 600;
-    const pad = compact ? 10 : 14;
-    const headerH = compact ? 32 : 42;
-    const tabsH = compact ? 28 : 32;
-    const barH = compact ? 22 : 26;
+    const pad = 14;
+    const headerH = 42;
+    const tabsH = 32;
+    const barH = 26;
 
-    // On a short landscape screen every vertical region scales down together:
-    // animation, filters, status, and the scrollable item matrix all remain
-    // inside the panel rather than relying on a desktop minimum height.
     const logRect: Rect = {
       x: p.x + pad,
-      y: p.y + (compact ? 7 : 10),
-      w: compact ? Math.min(120, p.w * 0.18) : 150,
-      h: compact ? 70 : 82,
+      y: p.y + 10,
+      w: 150,
+      h: 82,
     };
-    const tabsY = p.y + (compact ? 7 : 10);
+    const tabsY = p.y + 10;
 
-    const bigSize = compact ? Math.max(34, Math.min(44, p.h * 0.13)) : 70;
-    const radius = compact ? Math.max(38, Math.min(48, p.h * 0.14)) : 80;
-    const cx = p.x + p.w * (compact ? 0.36 : 0.38);
-    const cy = p.y + (compact ? Math.max(82, Math.min(112, p.h * 0.29)) : 148);
+    const bigSize = 70;
+    const radius = 80;
+    const cx = p.x + p.w * 0.38;
+    const cy = p.y + 148;
 
     const bigSlots: Rect[] = [];
     for (let i = 0; i < CRAFT_CARD_COUNT; i++) {
@@ -3928,41 +3907,41 @@ export class GameClient {
     }
     const singleSlot: Rect = { x: cx - bigSize / 2, y: cy - bigSize / 2, w: bigSize, h: bigSize };
 
-    const resultSize = compact ? Math.min(66, bigSize * 1.45) : 88;
+    const resultSize = 88;
     const resultRect: Rect = { x: cx - resultSize / 2, y: cy - resultSize / 2, w: resultSize, h: resultSize };
 
-    const actionW = compact ? 88 : 110;
-    const actionH = compact ? 32 : 36;
+    const actionW = 110;
+    const actionH = 36;
     const actionRect: Rect = { x: p.x + p.w - actionW - 14, y: cy - actionH / 2, w: actionW, h: actionH };
-    const closeRect: Rect = { x: p.x + p.w - 34, y: p.y + (compact ? 7 : 10), w: 24, h: 24 };
+    const closeRect: Rect = { x: p.x + p.w - 34, y: p.y + 10, w: 24, h: 24 };
 
-    const craftBottom = cy + radius + bigSize / 2 + (compact ? 8 : 24);
-    const barGap = compact ? 5 : 8;
-    const dropW = compact ? Math.min(92, p.w * 0.2) : 110;
-    const barW = compact ? Math.min(170, p.w * 0.3) : Math.min(210, p.w * 0.34);
+    const craftBottom = cy + radius + bigSize / 2 + 24;
+    const barGap = 8;
+    const dropW = 110;
+    const barW = Math.min(210, p.w * 0.34);
     const dropX = p.x + pad;
-    const barY = craftBottom + (compact ? 2 : 4);
+    const barY = craftBottom + 4;
     const barX = dropX + dropW + barGap;
-    const infoY = barY + barH + (compact ? 6 : 10);
-    const gridTop = infoY + (compact ? 32 : 38);
-    const gridBottom = p.y + p.h - (compact ? 7 : 10);
+    const infoY = barY + barH + 10;
+    const gridTop = infoY + 38;
+    const gridBottom = p.y + p.h - 10;
 
     const cols = RARITIES.length;
-    const gapSmall = compact ? 3 : 6;
+    const gapSmall = 6;
     const maxGridWidth = p.w - pad * 2 - 18;
     const widthLimitedSlot = Math.floor((maxGridWidth - gapSmall * (cols - 1)) / cols);
     const availableGridH = Math.max(1, gridBottom - gridTop);
-    const slotSizeSmall = Math.max(18, Math.min(compact ? 32 : 40, widthLimitedSlot, availableGridH));
+    const slotSizeSmall = Math.max(18, Math.min(40, widthLimitedSlot, availableGridH));
     const itemHeightSmall = slotSizeSmall + gapSmall;
     const totalGridWidth = cols * (slotSizeSmall + gapSmall) - gapSmall;
     const gridStartX = p.x + p.w / 2 - totalGridWidth / 2;
     const gridH = availableGridH;
     const maxVisibleRows = Math.max(1, Math.floor(gridH / itemHeightSmall));
-    const scrollTrack: Rect = { x: gridStartX + totalGridWidth + (compact ? 5 : 10), y: gridTop, w: 6, h: gridH };
+    const scrollTrack: Rect = { x: gridStartX + totalGridWidth + 10, y: gridTop, w: 6, h: gridH };
 
     return {
       panel: p,
-      compact,
+      compact: false,
       cols,
       gap: gapSmall,
       pad,
@@ -4399,16 +4378,14 @@ export class GameClient {
       return [
         { id: "bag", rect: { x: 12, y, w: compactW, h: compactH }, label: invLabel, color: "#3d8bd6" },
         { id: "craft", rect: { x: 12 + compactW + gap, y, w: compactW, h: compactH }, label: "Craft", color: "#c9762b" },
-        { id: "chat", rect: { x: 12 + (compactW + gap) * 2, y, w: compactW, h: compactH }, label: "Chat", color: "#4a7a9a" },
-        { id: "menu", rect: { x: 12 + (compactW + gap) * 3, y, w: compactW, h: compactH }, label: "Menu", color: "#8a4d4d" },
+        { id: "menu", rect: { x: 12 + (compactW + gap) * 2, y, w: compactW, h: compactH }, label: "Menu", color: "#8a4d4d" },
       ];
     }
     if (isMobileLayout) {
       return [
         { id: "bag", rect: { x: 16, y: this.hudButtonRowY(0), w: bw, h: bh }, label: invLabel, color: "#3d8bd6" },
         { id: "craft", rect: { x: 16, y: this.hudButtonRowY(1), w: bw, h: bh }, label: "Craft", color: "#c9762b" },
-        { id: "chat", rect: { x: 16, y: this.hudButtonRowY(2), w: bw, h: bh }, label: "Chat", color: "#4a7a9a" },
-        { id: "menu", rect: { x: 16, y: this.hudButtonRowY(3), w: bw, h: bh }, label: "Menu", color: "#8a4d4d" },
+        { id: "menu", rect: { x: 16, y: this.hudButtonRowY(2), w: bw, h: bh }, label: "Menu", color: "#8a4d4d" },
       ];
     } else {
       return [
@@ -5156,15 +5133,7 @@ export class GameClient {
       if (!hit(b.rect, mx, my)) continue;
       if (b.id === "bag") this.toggleBag();
       if (b.id === "craft") this.toggleCraft();
-      if (b.id === "chat") {
-        this.chat.inputActive = true;
-        this.chat.inputText = "";
-        if (this.isMobile) {
-          this.vk.active = true;
-          this.vk.target = 'chat';
-          this.vk.numMode = false;
-        }
-      }
+
       if (b.id === "menu") this.gotoMenu();
       return;
     }
@@ -5196,6 +5165,19 @@ export class GameClient {
         this.dragY = my;
       }
       return;
+    }
+
+    // Mobile: tap chat box to open keyboard
+    if (this.isMobile && !this.vk.active) {
+      const chatScreenH = this.h - this.hotbarHeight() + 50;
+      const chatPanelY = chatScreenH - this.chat.height - 2;
+      if (mx >= 15 && mx <= 15 + this.chat.width && my >= chatPanelY && my <= chatPanelY + this.chat.height) {
+        this.chat.inputActive = true;
+        this.vk.active = true;
+        this.vk.target = 'chat';
+        this.vk.numMode = false;
+        return;
+      }
     }
   }
 
