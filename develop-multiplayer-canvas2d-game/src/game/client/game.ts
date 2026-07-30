@@ -419,7 +419,7 @@ class SettingsSystem {
                 this.showDebugInfo = data.showDebugInfo !== undefined ? data.showDebugInfo : false;
             }
         } catch(e) {}
-        this._forceRedraw();
+        this._forceRedraw(); 
     }
 
     save() {
@@ -3815,7 +3815,9 @@ export class GameClient {
     const topGap = 18 * mobileScale;
     const bottomGap = 26 * mobileScale;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
-    const h = Math.min(610, availableH) * mobileScale * heightMult;
+    let h = Math.min(610, availableH) * mobileScale * heightMult;
+    // Inventory is 40% taller in the game scene so players can see more items.
+    if (this.scene === "game") h *= 1.4;
     const hidden = this.h + 20;
     const shown = topGap;
     const t = ease.outCubic(this.bagAnim);
@@ -4803,11 +4805,11 @@ private bagLayout() {
             break;
           }
         }
-        for (const b of this.mapButtons()) {
-          if (hit(b.rect, p.x, p.y)) {
-            hitHud = true;
-            break;
-          }
+        // Prevent the joystick fallback from swallowing touches inside the
+        // bag panel so mobile players can always drag items from inventory.
+        if (this.bagOpen && this.bagAnim > 0.35) {
+          const bagRect = this.bagPanelRect();
+          if (hit(bagRect, p.x, p.y)) { hitHud = true; }
         }
         if (!hitHud) {
           // Allow starting joystick from any left-bottom touch as fallback
@@ -5635,9 +5637,20 @@ private bagLayout() {
     }
 
     this.bagSearchActive = false;
-    // Consume the click: any press that lands inside the bag panel (even on
-    // its background) must NOT fall through to HUD buttons, hotbar cells, or
-    // the world below. Returning true tells the caller the click was handled.
+    // Click on a bag item card → start a drag immediately. Previously this
+    // method returned true for every click inside the panel, which prevented
+    // drag-from-bag from ever working on both desktop and mobile.
+    const bagSlotIdx = this.bagSlotAtPoint(mx, my);
+    if (bagSlotIdx >= 0) {
+      const bagCell = this.cellAt(bagSlotIdx);
+      if (bagCell) {
+        this.drag = { from: bagSlotIdx, cell: { ...bagCell, count: 1 } };
+        this.dragX = mx;
+        this.dragY = my;
+        return true;
+      }
+    }
+    // Consumed: click on bag panel background — don't fall through to game world.
     return true;
   }
 
