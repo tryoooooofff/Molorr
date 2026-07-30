@@ -1317,7 +1317,11 @@ export class GameServer {
         continue;
       }
       const absorbs = isAbsorbItem(cell.item) && (!!def.heal || !!def.shield);
-      const orbitRadius = absorbs ? Math.min(p.orbit, 62) : p.orbit;
+      // Magnets and summons (eggs) stay close like Rose/Shell — they never
+      // spread out no matter the spread flag, so their visual radius stays
+      // tight while other petals still fan out on attack.
+      const staysTight = isSummon || (def.name ?? "").toLowerCase().includes("magnet");
+      const orbitRadius = (absorbs || staysTight) ? Math.min(p.orbit, 62) : p.orbit;
       const tx = p.x + Math.cos(slotAngle) * orbitRadius;
       const ty = p.y + Math.sin(slotAngle) * orbitRadius;
       if (absorbs) {
@@ -1360,11 +1364,13 @@ export class GameServer {
       const pr = def.radius * (1 + cell.rarity * 0.06);
       let targetMob: Mob | null = null;
       let targetDist = Infinity;
+      let totalIncoming = 0;
       for (const mob of world.mobs) {
         if (mob.friendly) continue;
         this.collisionCounter.n++;
         const d = Math.hypot(mob.x - st.x, mob.y - st.y);
         if (d >= mob.radius + pr) continue;
+        totalIncoming += mob.damage * 0.5;
         if (d < targetDist) { targetDist = d; targetMob = mob; }
       }
       if (targetMob && st.hitCd <= 0) {
@@ -1372,7 +1378,7 @@ export class GameServer {
         targetMob.lastHitBy = p.id;
         targetMob.targetId = p.id;
         targetMob.addDamage(p.id, dmg);
-        st.hp -= targetMob.damage * 0.3;
+        st.hp -= totalIncoming;
         st.hitCd = 0.25;
         const kb = 90 / (targetMob.radius / 20);
         targetMob.vx += ((targetMob.x - st.x) / (targetDist || 1)) * kb;
