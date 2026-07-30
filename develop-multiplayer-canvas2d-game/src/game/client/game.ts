@@ -3787,6 +3787,18 @@ export class GameClient {
     // Keep mouse buttons as well for usability: left click = spread, right click = contract
     if ((this.mouseDown && !uiBusy) || isSpaceDown) flags |= 1;
     if (this.rightDown || isShiftDown) flags |= 2;
+    // Magnets and all egg-type (summon) items should never spread.
+    if ((flags & 1) !== 0) {
+      for (const slot of this.slots) {
+        if (!slot) continue;
+        const def = ITEMS[slot.item];
+        if (!def) continue;
+        if (def.kind === "summon" || (def.name ?? "").toLowerCase().includes("magnet")) {
+          flags &= ~1;
+          break;
+        }
+      }
+    }
     const w = new Writer(8);
     w.u8(C2S.INPUT).i8(dx * 100).i8(dy * 100).u8(flags);
     this.net.send(w.bytes());
@@ -3816,8 +3828,6 @@ export class GameClient {
     const bottomGap = 26 * mobileScale;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
     let h = Math.min(610, availableH) * mobileScale * heightMult;
-    // Inventory is 20% taller on mobile in-game so items aren't cramped.
-    if (this.scene === "game" && this.isMobile) h *= 1.2;
     const hidden = this.h + 20;
     const shown = topGap;
     const t = ease.outCubic(this.bagAnim);
