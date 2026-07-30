@@ -3809,7 +3809,7 @@ export class GameClient {
     const isLandscape = this.w > this.h;
     const mobileScale = isMobile ? 0.5 : 1;
     const widthMult = isMobile && isLandscape ? 1.5 : 1;   // +50% width
-    const heightMult = isMobile && isLandscape ? 2 : 1;    // ×2 height
+    const heightMult = isMobile && isLandscape ? 2.5 : 1;    // ×2 height
     const w = Math.min(380, this.w * 0.92) * mobileScale * widthMult;
     const reservedHotbar = this.scene === "game" ? this.hotbarHeight() : 0;
     const topGap = 18 * mobileScale;
@@ -3823,53 +3823,69 @@ export class GameClient {
   }
 
   /** Geometry for the scrollable item grid + header widgets inside the bag panel. */
-  private bagLayout() {
-    const p = this.bagPanelRect();
-    const scale = Math.min(1, p.w / 380);
-    const cols = 5;
-    const gap = 10 * scale;
-    const pad = 15 * scale;
-    const slotSize = Math.max(28 * scale, Math.floor((p.w - pad * 2 - gap * (cols - 1)) / cols));
-    const itemHeight = slotSize + gap;
-    const headerH = 44 * scale;
-    const barY = p.y + headerH;
-    const barH = 28 * scale;
-    const dropW = Math.min(120, p.w * 0.3);
-    const barGap = 6 * scale;
-    const barW = p.w - dropW - barGap - pad * 2;
-    const barX = p.x + pad;
-    const dropX = barX + barW + barGap;
-    const statsH = 92 * scale;
-    const gridTop = barY + barH + 12 * scale;
-    const gridBottom = p.y + p.h - statsH - 6 * scale;
-    const gridH = Math.max(1, gridBottom - gridTop);
-    const maxVisibleRows = Math.max(1, Math.floor(gridH / itemHeight));
-    const scrollTrack: Rect = { x: p.x + p.w - pad + 2, y: gridTop, w: 6, h: gridH };
-    return {
-      panel: p,
-      compact: false,
-      scale,
-      cols,
-      gap,
-      pad,
-      slotSize,
-      itemHeight,
-      headerH,
-      barX,
-      barY,
-      barW,
-      barH,
-      dropX,
-      dropW,
-      gridTop,
-      gridH,
-      maxVisibleRows,
-      statsH,
-      closeRect: { x: p.x + p.w - 34 * scale, y: p.y + 10 * scale, w: 24 * scale, h: 24 * scale } as Rect,
-      scrollTrack,
-    };
+private bagLayout() {
+  const p = this.bagPanelRect();
+  const isMobile = this.isMobile || this.w < 640;
+  const scale = Math.min(1, p.w / 380);
+  
+  // 【修改】手机端更密集：减少间距
+  let gap = 10 * scale;
+  let pad = 15 * scale;
+  let cols = 5;
+  
+  if (isMobile) {
+    gap = 8 * scale;     
+    pad = 12 * scale;   
+    cols = 5;
   }
-
+  
+  const slotSize = Math.max(28 * scale, Math.floor((p.w - pad * 2 - gap * (cols - 1)) / cols));
+  const itemHeight = slotSize + gap;
+  const headerH = 44 * scale;
+  const barY = p.y + headerH;
+  const barH = 28 * scale;
+  const dropW = Math.min(120, p.w * 0.3);
+  const barGap = 6 * scale;
+  const barW = p.w - dropW - barGap - pad * 2;
+  const barX = p.x + pad;
+  const dropX = barX + barW + barGap;
+  
+  // 【修改】手机端降低统计面板高度
+  let statsH = 92 * scale;
+  if (isMobile) {
+    statsH = 70 * scale;  // 从92减小到76
+  }
+  
+  const gridTop = barY + barH + 12 * scale;
+  const gridBottom = p.y + p.h - statsH - 6 * scale;
+  const gridH = Math.max(1, gridBottom - gridTop);
+  const maxVisibleRows = Math.max(1, Math.floor(gridH / itemHeight));
+  const scrollTrack: Rect = { x: p.x + p.w - pad + 2, y: gridTop, w: 6, h: gridH };
+  
+  return {
+    panel: p,
+    compact: false,
+    scale,
+    cols,
+    gap,
+    pad,
+    slotSize,
+    itemHeight,
+    headerH,
+    barX,
+    barY,
+    barW,
+    barH,
+    dropX,
+    dropW,
+    gridTop,
+    gridH,
+    maxVisibleRows,
+    statsH,
+    closeRect: { x: p.x + p.w - 34 * scale, y: p.y + 10 * scale, w: 24 * scale, h: 24 * scale } as Rect,
+    scrollTrack,
+  };
+}
   private bagEntries(): { slot: number; cell: Cell }[] {
     const entries: { slot: number; cell: Cell }[] = [];
     for (let i = 0; i < this.bag.length; i++) {
@@ -4010,7 +4026,8 @@ export class GameClient {
     const actionRect: Rect = { x: p.x + p.w - actionW - 14, y: cy - actionH / 2, w: actionW, h: actionH };
     const closeRect: Rect = { x: p.x + p.w - 34, y: p.y + 10 * scale, w: 24, h: 24 };
 
-    const craftBottom = cy + radius + bigSize / 2 + 24 * scale;
+    // [Change 1] Reduced padding from 24 to 10 to lift the bottom bar up
+    const craftBottom = cy + radius + bigSize / 2 + 10 * scale;
     const barGap = 8 * scale;
     const dropW = Math.min(110, p.w * 0.2);
     const barW = Math.min(210, p.w * 0.34);
@@ -4018,7 +4035,10 @@ export class GameClient {
     const barY = craftBottom + 4 * scale;
     const barX = dropX + dropW + barGap;
     const infoY = barY + barH + 10 * scale;
-    const gridTop = infoY + 38 * scale;
+
+    // [Change 2] Reduced offset from 38 to 10 to expand grid height significantly
+    const gridTop = infoY + 10 * scale;
+    
     const gridBottom = p.y + p.h - 10 * scale;
 
     const cols = RARITIES.length;
@@ -4068,6 +4088,7 @@ export class GameClient {
       logRect,
     };
   }
+
 
   private craftModeRects(): { mode: "normal" | "oracle" | "trade"; rect: Rect; label: string; color: string }[] {
     const layout = this.craftLayout();
@@ -4494,27 +4515,6 @@ export class GameClient {
     }
   }
 
-  private mapButtons(): { id: number; rect: Rect }[] {
-    const isMobileLayout = this.isMobile || this.w < 640;
-    const isLandscapePhone = isMobileLayout && this.w > this.h && this.h <= 600;
-    const bw = isLandscapePhone ? 62 : isMobileLayout ? 78 : 92;
-    const bh = isLandscapePhone ? 34 : isMobileLayout ? 36 : 38;
-    const buttonGap = isLandscapePhone ? 5 : 8;
-    const totalW = MAPS.length * bw + (MAPS.length - 1) * buttonGap;
-    const x = this.w - totalW - 12;
-
-    // Landscape phones put both navigation groups on one compact row beneath
-    // the status cards. Action controls remain lower down at the screen edges.
-    const btnSize = Math.min(70, Math.max(54, this.w * 0.15));
-    const gap = 12;
-    const baseY = isLandscapePhone
-      ? 82
-      : isMobileLayout
-        ? (this.h - this.hotbarHeight() - btnSize * 2 - gap - 22 - bh - 12)
-        : this.hudButtonRowY(0);
-
-    return MAPS.map((m, idx) => ({ id: m.id, rect: { x: x + idx * (bw + buttonGap), y: baseY, w: bw, h: bh } }));
-  }
 
   // ---------------------------------------------------------------- events
   private sendNeutralInput() {
@@ -5257,17 +5257,7 @@ export class GameClient {
       if (b.id === "menu") this.gotoMenu();
       return;
     }
-    for (const b of this.mapButtons()) {
-      if (!hit(b.rect, mx, my)) continue;
-      if (b.id !== this.mapId) {
-        this.selectedMap = b.id;
-        this.mapFlash = 1;
-        const w = new Writer(4);
-        w.u8(C2S.CHANGE_MAP).u8(b.id);
-        this.net?.send(w.bytes());
-      }
-      return;
-    }
+
 
     // Mobile: clicking the chatbox triggers the keyboard
     if (this.isMobile) {
@@ -7056,10 +7046,6 @@ export class GameClient {
 
     // buttons
     for (const b of this.hudButtons()) button(ctx, b.rect, b.label, b.color, hit(b.rect, this.mx, this.my), shortMobile ? 13 : 16);
-    for (const b of this.mapButtons()) {
-      const active = b.id === this.mapId;
-      button(ctx, b.rect, MAPS[b.id].name, active ? "#3fae60" : "#41505f", hit(b.rect, this.mx, this.my), shortMobile ? 11 : 15);
-    }
 
     // minimap
     const mm = shortMobile ? 82 : 132;
