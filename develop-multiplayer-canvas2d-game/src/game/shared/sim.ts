@@ -249,7 +249,7 @@ export class Drop {
     public rarity: number,
     public ownerId = 0,
     public ttl = 45,
-    /** Cards merged into this one card. Nearby identical drops stack instead of littering. */
+    /** Cards merged into one card. Nearby identical drops stack instead of littering. */
     public count = 1
   ) {}
 }
@@ -511,11 +511,6 @@ export class GameServer {
 
   /**
    * Marks the client as active, restarting the idle countdown.
-   *
-   * `canDismiss` is false for ordinary gameplay packets: once the prompt is up,
-   * only an explicit AFK_ACK (the button click) may take it down. That keeps
-   * the check meaningful — a stuck key, a bumped mouse, or the neutral input
-   * the client starts sending when the prompt opens must not answer it.
    */
   private markActive(c: ClientState, canDismiss = false) {
     if (c.afkPending) {
@@ -529,7 +524,6 @@ export class GameServer {
     c.idleSeconds = 0;
   }
 
-  /** Pushes the current AFK check state (active flag + countdown) to a client. */
   private sendAfkState(c: ClientState) {
     const w = new Writer(4);
     w.u8(S2C.AFK_CHECK)
@@ -539,11 +533,6 @@ export class GameServer {
     c.afkLastSent = c.afkPending ? Math.ceil(c.afkSecondsLeft) : -1;
   }
 
-  /**
-   * Advances every client's idle timer, opens the AFK check when idle passes
-   * AFK_IDLE_SECONDS, and flags a kick when the check expires unanswered.
-   * Clients without a player (still on the menu) are never checked.
-   */
   private updateAfk(dt: number) {
     for (const c of this.clients.values()) {
       if (!c.player || c.kick) continue;
@@ -555,7 +544,6 @@ export class GameServer {
           this.sendAfkState(c);
           continue;
         }
-        // Only resend when the whole-second value actually changes.
         const secs = Math.ceil(c.afkSecondsLeft);
         if (secs !== c.afkLastSent) this.sendAfkState(c);
         continue;
@@ -565,22 +553,11 @@ export class GameServer {
         c.afkPending = true;
         c.afkSecondsLeft = AFK_CHECK_SECONDS;
         this.sendAfkState(c);
-        this.sendChatToClient(
-          c,
-          `Are you still there? Click [AFK CHECK] within ${AFK_CHECK_SECONDS}s or you will be disconnected.`,
-          "System",
-          true,
-          false
-        );
+        this.sendChatToClient(c, `Are you still there? Click [AFK CHECK] within ${AFK_CHECK_SECONDS}s or you will be disconnected.`, "System", true, false);
       }
     }
   }
 
-  /**
-   * Returns the ids of clients the AFK sweep decided to disconnect and clears
-   * the flag. Hosts poll this right after tick() and close the matching socket;
-   * the resulting close event still routes through removeClient() as usual.
-   */
   drainKicks(): number[] {
     const ids: number[] = [];
     for (const [id, c] of this.clients) {
@@ -592,7 +569,6 @@ export class GameServer {
     return ids;
   }
 
-  /** True while the client should be showing the [AFK CHECK] button. */
   isAfkPending(id: number): boolean {
     return this.clients.get(id)?.afkPending ?? false;
   }
@@ -602,7 +578,6 @@ export class GameServer {
     if (c?.player) {
       const w = this.worlds[c.player.mapId];
       w.mobs = w.mobs.filter((m) => m.ownerId !== c.player!.id);
-      // Clean up squad membership on disconnect
       if (c.player.squadCode) {
         this.removePlayerFromSquad(c.player);
       }
@@ -630,10 +605,6 @@ export class GameServer {
     if (!c) return;
     const r = new Reader(data);
     const type = r.u8();
-    // Every packet except INPUT is a deliberate act, so it resets the idle
-    // timer. INPUT is judged on its payload below. Only AFK_ACK may dismiss an
-    // open prompt; PING/BONUS_STATUS are client-driven housekeeping and prove
-    // nothing about the human.
     if (type !== C2S.INPUT && type !== C2S.PING && type !== C2S.BONUS_STATUS) {
       this.markActive(c, type === C2S.AFK_ACK);
     }
@@ -649,30 +620,21 @@ export class GameServer {
         p.xp = xp;
         for (let i = 0; i < SLOT_COUNT; i++) p.slots[i] = readCell(r);
         for (let i = 0; i < SECONDARY_SLOT_COUNT; i++) p.secondary[i] = readCell(r);
-
-        // Bag length is dynamic (unlimited bag), so it travels as u16.
         const bagCount = Math.min(r.u16(), BAG_MAX);
         if (p.bag.length < bagCount) p.bag.length = bagCount;
         for (let i = 0; i < bagCount; i++) p.bag[i] = readCell(r);
         for (let i = 0; i < p.bag.length; i++) if (p.bag[i] === undefined) p.bag[i] = null;
-
-        // Cooldowns are stored client-side (same trust model as xp above) as
-        // "seconds remaining" so they survive reconnects without clock-sync issues.
         const oracleSecLeft = r.u32();
         const tradeSecLeft = r.u32();
         const now = Date.now();
         p.nextOracleAt = oracleSecLeft > 0 ? now + oracleSecLeft * 1000 : 0;
         p.nextTradeAt = tradeSecLeft > 0 ? now + tradeSecLeft * 1000 : 0;
-
         this.setBonusStatus(p, r.remaining >= 3 ? r.u8() : 1, r.remaining >= 2 ? r.u16() : 0);
-
         if (!p.slots.some(Boolean) && !p.secondary.some(Boolean) && !p.bag.some(Boolean)) {
           p.slots[0] = { item: 0, rarity: 0, count: 1 };
           p.slots[1] = { item: 0, rarity: 0, count: 1 };
           p.slots[2] = { item: 1, rarity: 0, count: 1 };
           p.slots[3] = { item: 0, rarity: 0, count: 1 };
-          // A fresh player starts with a couple of backups already racked so
-          // the secondary row is discoverable from the very first match.
           p.secondary[0] = { item: 2, rarity: 0, count: 1 };
           p.secondary[1] = { item: 8, rarity: 0, count: 1 };
         }
@@ -690,10 +652,6 @@ export class GameServer {
         p.inDx = r.i8() / 100;
         p.inDy = r.i8() / 100;
         p.flags = r.u8();
-        // Activity is a *change* in input, not merely non-zero input. Movement
-        // follows the mouse, so a player who walks away leaves the cursor
-        // parked and the client keeps resending an identical non-zero packet
-        // at 20 Hz forever — that must read as idle, not as activity.
         if (p.inDx !== c.lastInDx || p.inDy !== c.lastInDy || p.flags !== c.lastFlags) {
           c.lastInDx = p.inDx;
           c.lastInDy = p.inDy;
@@ -704,8 +662,6 @@ export class GameServer {
       }
 
       case C2S.AFK_ACK: {
-        // The button was clicked. markActive() already ran above and cleared
-        // the pending check, so there is nothing else to do.
         break;
       }
 
@@ -719,12 +675,8 @@ export class GameServer {
       case C2S.SWAP: {
         const p = c.player;
         if (!p) return;
-        // Cell indices can exceed 255 now that the bag sits behind two hotbar
-        // rows, so both endpoints travel as u16.
         const from = r.u16();
         const to = r.u16();
-        // Bag entries are stacks, but dragging an inventory card equips/moves
-        // one item at a time. Hotbar drags keep their existing swap behaviour.
         if (isBagCell(from)) this.moveOneFromBag(p, from, to);
         else this.swapCells(p, from, to);
         break;
@@ -742,10 +694,7 @@ export class GameServer {
       case C2S.CRAFT: {
         const p = c.player;
         if (!p) return;
-        const item = r.u8();
-        const rarity = r.u8();
-        const count = r.u16(); // total cards to consume for this batch craft
-        this.craft(c, p, item, rarity, count || CRAFT_CARD_COUNT);
+        this.craft(c, p, r.u8(), r.u8(), r.u16() || CRAFT_CARD_COUNT);
         break;
       }
 
@@ -759,10 +708,7 @@ export class GameServer {
       case C2S.TRADE: {
         const p = c.player;
         if (!p) return;
-        const item = r.u8();
-        const rarity = r.u8();
-        const count = r.u16();
-        this.trade(c, p, item, rarity, count);
+        this.trade(c, p, r.u8(), r.u8(), r.u16());
         break;
       }
 
@@ -821,13 +767,7 @@ export class GameServer {
     return code;
   }
 
-  private sendChatToClient(
-    c: ClientState,
-    text: string,
-    sender: string,
-    isSystem: boolean,
-    isCraftReport: boolean
-  ) {
+  private sendChatToClient(c: ClientState, text: string, sender: string, isSystem: boolean, isCraftReport: boolean) {
     const w = new Writer(256);
     w.u8(S2C.CHAT);
     w.str(text.slice(0, 200));
@@ -864,26 +804,19 @@ export class GameServer {
   private removePlayerFromSquad(p: Player): string | null {
     if (!p.squadCode) return null;
     const squad = this.squads.get(p.squadCode);
-    if (!squad) {
-      p.squadCode = "";
-      return null;
-    }
+    if (!squad) { p.squadCode = ""; return null; }
     squad.members.delete(p.id);
     const oldCode = p.squadCode;
     p.squadCode = "";
-    // If the squad is empty, remove it
-    if (squad.members.size === 0) {
-      this.squads.delete(oldCode);
-    }
+    if (squad.members.size === 0) this.squads.delete(oldCode);
     return oldCode;
   }
 
   private canJoinSquad(p: Player, squad: Squad): string | null {
     if (squad.members.size >= SQUAD_MAX_MEMBERS) return "Squad is full.";
-    // Check level gap
     for (const member of squad.members.values()) {
       if (Math.abs(p.level - member.level) > SQUAD_LEVEL_GAP_MAX) {
-        return `Level gap too large (max ${SQUAD_LEVEL_GAP_MAX}). Your level: ${p.level}, their level: ${member.level}.`;
+        return `Level gap too large (max ${SQUAD_LEVEL_GAP_MAX}).`;
       }
     }
     return null;
@@ -893,13 +826,7 @@ export class GameServer {
   private handleChat(c: ClientState, p: Player, msg: string) {
     const trimmed = msg.trim();
     if (!trimmed) return;
-    // Commands start with /
-    if (trimmed.startsWith("/")) {
-      this.handleCommand(c, p, trimmed);
-      return;
-    }
-    // Regular chat messages travel as body text only. The client renders the
-    // sender field itself, so prepending it here produced "name: name: hello".
+    if (trimmed.startsWith("/")) { this.handleCommand(c, p, trimmed); return; }
     this.broadcastChatToMap(p.mapId, trimmed, p.name);
   }
 
@@ -907,163 +834,76 @@ export class GameServer {
     const parts = cmd.split(/\s+/);
     const command = parts[0].toLowerCase();
     switch (command) {
-      case "/claim": {
-        // Server-side daily claim notification
-        // The actual claim logic is client-side (BonusSystem), but we send
-        // a confirmation message back
+      case "/claim":
         this.sendChatToClient(c, "Daily bonus can be claimed from the main menu.", "System", true, false);
         break;
-      }
-      case "/create_public_squad": {
-        if (p.squadCode) {
-          this.sendChatToClient(c, "You are already in a squad. Use /leave_squad first.", "System", true, false);
-          return;
-        }
-        const code = this.generateSquadCode();
-        const squad: Squad = {
-          code,
-          isPublic: true,
-          members: new Map(),
-          createdAt: Date.now(),
-        };
-        squad.members.set(p.id, {
-          clientId: this.getClientIdForPlayer(p),
-          playerId: p.id,
-          name: p.name,
-          level: p.level,
-        });
-        this.squads.set(code, squad);
-        p.squadCode = code;
-        this.sendChatToClient(c, `Public squad created! Code: ${code}`, "System", true, false);
-        this.sendSquadUpdate(c, code);
-        break;
-      }
+      case "/create_public_squad":
       case "/create_private_squad": {
-        if (p.squadCode) {
-          this.sendChatToClient(c, "You are already in a squad. Use /leave_squad first.", "System", true, false);
-          return;
-        }
-        const code = this.generateSquadCode();
-        const squad: Squad = {
-          code,
-          isPublic: false,
-          members: new Map(),
-          createdAt: Date.now(),
-        };
-        squad.members.set(p.id, {
-          clientId: this.getClientIdForPlayer(p),
-          playerId: p.id,
-          name: p.name,
-          level: p.level,
-        });
-        this.squads.set(code, squad);
-        p.squadCode = code;
-        this.sendChatToClient(c, `Private squad created! Code: ${code}`, "System", true, false);
-        this.sendSquadUpdate(c, code);
+        if (p.squadCode) { this.sendChatToClient(c, "Already in a squad. Use /leave_squad first.", "System", true, false); return; }
+        const key = this.generateSquadCode();
+        const sq: Squad = { code: key, isPublic: command === "/create_public_squad", members: new Map(), createdAt: Date.now() };
+        sq.members.set(p.id, { clientId: this.getClientIdForPlayer(p), playerId: p.id, name: p.name, level: p.level });
+        this.squads.set(key, sq);
+        p.squadCode = key;
+        this.sendChatToClient(c, `${command === "/create_public_squad" ? "Public" : "Private"} squad created! Code: ${key}`, "System", true, false);
+        this.sendSquadUpdate(c, key);
         break;
       }
       case "/join_squad": {
-        const squadCode = (parts[1] || "").toUpperCase();
-        if (!squadCode) {
-          this.sendChatToClient(c, "Usage: /join_squad <CODE>", "System", true, false);
-          return;
-        }
-        if (p.squadCode) {
-          this.sendChatToClient(c, "You are already in a squad. Use /leave_squad first.", "System", true, false);
-          return;
-        }
-        const squad = this.squads.get(squadCode);
-        if (!squad) {
-          this.sendChatToClient(c, "Squad not found.", "System", true, false);
-          return;
-        }
-        const error = this.canJoinSquad(p, squad);
-        if (error) {
-          this.sendChatToClient(c, error, "System", true, false);
-          return;
-        }
-        squad.members.set(p.id, {
-          clientId: this.getClientIdForPlayer(p),
-          playerId: p.id,
-          name: p.name,
-          level: p.level,
-        });
-        p.squadCode = squadCode;
-        this.sendChatToClient(c, `Joined squad! Code: ${squadCode} (${squad.members.size} members)`, "System", true, false);
-        this.sendSquadUpdate(c, squadCode);
-        // Notify other squad members
-        this.broadcastChatToSquad(squadCode, `System: ${p.name} joined the squad.`, "System");
+        const code = (parts[1] || "").toUpperCase();
+        if (!code) { this.sendChatToClient(c, "Usage: /join_squad <CODE>", "System", true, false); return; }
+        if (p.squadCode) { this.sendChatToClient(c, "Already in a squad.", "System", true, false); return; }
+        const sq = this.squads.get(code);
+        if (!sq) { this.sendChatToClient(c, "Squad not found.", "System", true, false); return; }
+        const err = this.canJoinSquad(p, sq);
+        if (err) { this.sendChatToClient(c, err, "System", true, false); return; }
+        sq.members.set(p.id, { clientId: this.getClientIdForPlayer(p), playerId: p.id, name: p.name, level: p.level });
+        p.squadCode = code;
+        this.sendChatToClient(c, `Joined squad! Code: ${code} (${sq.members.size} members)`, "System", true, false);
+        this.sendSquadUpdate(c, code);
+        this.broadcastChatToSquad(code, `System: ${p.name} joined the squad.`, "System");
         break;
       }
       case "/leave_squad": {
-        if (!p.squadCode) {
-          this.sendChatToClient(c, "You are not in a squad.", "System", true, false);
-          return;
-        }
-        const oldCode = p.squadCode;
-        const squad = this.squads.get(oldCode);
+        if (!p.squadCode) { this.sendChatToClient(c, "Not in a squad.", "System", true, false); return; }
+        const old = p.squadCode;
+        const sq = this.squads.get(old);
         this.removePlayerFromSquad(p);
-        this.sendChatToClient(c, "You left the squad.", "System", true, false);
+        this.sendChatToClient(c, "Left the squad.", "System", true, false);
         this.sendSquadUpdate(c, "");
-        // Notify remaining members
-        if (squad && squad.members.size > 0) {
-          this.broadcastChatToSquad(oldCode, `System: ${p.name} left the squad.`, "System");
-        }
+        if (sq && sq.members.size > 0) this.broadcastChatToSquad(old, `System: ${p.name} left.`, "System");
         break;
       }
       case "/find_public_squad": {
-        if (p.squadCode) {
-          this.sendChatToClient(c, "You are already in a squad. Use /leave_squad first.", "System", true, false);
-          return;
-        }
-        // Find all public squads where the level gap is acceptable
+        if (p.squadCode) { this.sendChatToClient(c, "Already in a squad.", "System", true, false); return; }
         const candidates: Squad[] = [];
-        for (const squad of this.squads.values()) {
-          if (!squad.isPublic) continue;
-          if (squad.members.size >= SQUAD_MAX_MEMBERS) continue;
-          const error = this.canJoinSquad(p, squad);
-          if (!error) candidates.push(squad);
+        for (const sq of this.squads.values()) {
+          if (!sq.isPublic || sq.members.size >= SQUAD_MAX_MEMBERS) continue;
+          if (!this.canJoinSquad(p, sq)) candidates.push(sq);
         }
-        if (candidates.length === 0) {
-          this.sendChatToClient(c, "No available public squads found.", "System", true, false);
-          return;
-        }
-        // Pick a random one
+        if (!candidates.length) { this.sendChatToClient(c, "No available public squads found.", "System", true, false); return; }
         const chosen = candidates[Math.floor(Math.random() * candidates.length)];
-        chosen.members.set(p.id, {
-          clientId: this.getClientIdForPlayer(p),
-          playerId: p.id,
-          name: p.name,
-          level: p.level,
-        });
+        chosen.members.set(p.id, { clientId: this.getClientIdForPlayer(p), playerId: p.id, name: p.name, level: p.level });
         p.squadCode = chosen.code;
         this.sendChatToClient(c, `Auto-joined public squad! Code: ${chosen.code} (${chosen.members.size} members)`, "System", true, false);
         this.sendSquadUpdate(c, chosen.code);
-        this.broadcastChatToSquad(chosen.code, `System: ${p.name} joined the squad.`, "System");
+        this.broadcastChatToSquad(chosen.code, `System: ${p.name} joined.`, "System");
         break;
       }
-      default: {
+      default:
         this.sendChatToClient(c, `Unknown command: ${command}`, "System", true, false);
-        break;
-      }
     }
   }
 
   private getClientIdForPlayer(p: Player): number {
-    for (const [clientId, c] of this.clients.entries()) {
-      if (c.player === p) return clientId;
-    }
+    for (const [id, c] of this.clients.entries()) { if (c.player === p) return id; }
     return 0;
   }
 
   private sendWelcome(c: ClientState, p: Player) {
     const map = MAPS[p.mapId];
     const w = new Writer(64 + map.walls.length * 8);
-    w.u8(S2C.WELCOME)
-      .u16(p.id)
-      .u8(p.mapId)
-      .u16(map.width)
-      .u16(map.height);
+    w.u8(S2C.WELCOME).u16(p.id).u8(p.mapId).u16(map.width).u16(map.height);
     w.u16(map.walls.length);
     for (const wall of map.walls) w.u16(wall.x).u16(wall.y).u16(wall.w).u16(wall.h);
     c.send(w.bytes());
@@ -1071,23 +911,9 @@ export class GameServer {
     p.statsDirty = true;
   }
 
-  private pushEvent(
-    c: ClientState,
-    kind: number,
-    x: number,
-    y: number,
-    value: number,
-    item = EMPTY_ITEM,
-    rarity = 0
-  ) {
+  private pushEvent(c: ClientState, kind: number, x: number, y: number, value: number, item = EMPTY_ITEM, rarity = 0) {
     const w = new Writer(16);
-    w.u8(S2C.EVENT)
-      .u8(kind)
-      .i16(Math.round(x))
-      .i16(Math.round(y))
-      .u32(Math.max(0, Math.round(value)))
-      .u8(item)
-      .u8(rarity);
+    w.u8(S2C.EVENT).u8(kind).i16(Math.round(x)).i16(Math.round(y)).u32(Math.max(0, Math.round(value))).u8(item).u8(rarity);
     c.events.push(w.bytes());
   }
 
@@ -1097,11 +923,6 @@ export class GameServer {
   }
 
   // ------------------------------------------------------------- inventory
-  /**
-   * Reads any cell by flat index. The address space is laid out as
-   * `[main row][secondary row][bag...]`, so one number can point at any cell
-   * the player owns.
-   */
   private cellAt(p: Player, idx: number): Cell | null {
     if (isMainCell(idx)) return p.slots[idx] ?? null;
     if (idx < HOTBAR_CELLS) return p.secondary[idx - SLOT_COUNT] ?? null;
@@ -1109,16 +930,9 @@ export class GameServer {
   }
 
   private setCell(p: Player, idx: number, cell: Cell | null) {
-    if (isMainCell(idx)) {
-      p.slots[idx] = cell;
-      return;
-    }
-    if (idx < HOTBAR_CELLS) {
-      p.secondary[idx - SLOT_COUNT] = cell;
-      return;
-    }
+    if (isMainCell(idx)) { p.slots[idx] = cell; return; }
+    if (idx < HOTBAR_CELLS) { p.secondary[idx - SLOT_COUNT] = cell; return; }
     const bagIdx = idx - HOTBAR_CELLS;
-    // Grow (and null-fill) the unlimited bag if the target cell is past the end.
     while (p.bag.length <= bagIdx) p.bag.push(null);
     p.bag[bagIdx] = cell;
   }
@@ -1134,12 +948,10 @@ export class GameServer {
       this.setCell(p, a, cb);
       this.setCell(p, b, ca);
     }
-    // Only the main row grows petals, so a secondary-only move is free.
     if (isMainCell(a) || isMainCell(b)) this.rebuildPetals(p);
     p.dirty = true;
   }
 
-  /** Swap one main slot with its secondary partner (number-key hotkeys). */
   private swapRowSlot(p: Player, slot: number) {
     if (slot < 0 || slot >= Math.min(SLOT_COUNT, SECONDARY_SLOT_COUNT)) return;
     const main = p.slots[slot] ?? null;
@@ -1147,23 +959,20 @@ export class GameServer {
     if (!main && !backup) return;
     p.slots[slot] = backup;
     p.secondary[slot] = main;
-    // The petal that just arrived starts on cooldown so hot-swapping mid-fight
-    // can't be used to dodge reload timers.
     this.rebuildPetals(p);
     this.startReload(p, slot);
     p.dirty = true;
   }
 
-  /** Swap the whole main row with the whole secondary row (the "R" hotkey). */
   private swapAllRows(p: Player) {
     const n = Math.min(SLOT_COUNT, SECONDARY_SLOT_COUNT);
     let touched = false;
     for (let i = 0; i < n; i++) {
-      const main = p.slots[i] ?? null;
-      const backup = p.secondary[i] ?? null;
-      if (!main && !backup) continue;
-      p.slots[i] = backup;
-      p.secondary[i] = main;
+      const m = p.slots[i] ?? null;
+      const b = p.secondary[i] ?? null;
+      if (!m && !b) continue;
+      p.slots[i] = b;
+      p.secondary[i] = m;
       touched = true;
     }
     if (!touched) return;
@@ -1172,10 +981,6 @@ export class GameServer {
     p.dirty = true;
   }
 
-  /**
-   * Puts the petal in `slot` into its reload state. Used after a hot-swap so a
-   * freshly racked petal has to spin up like any other reload.
-   */
   private startReload(p: Player, slot: number) {
     const cell = p.slots[slot];
     const st = p.petals[slot];
@@ -1186,7 +991,6 @@ export class GameServer {
     st.timer = def.reload > 0 ? def.reload : 0.001;
   }
 
-  /** Move one card out of an inventory stack, never the full item type. */
   private moveOneFromBag(p: Player, from: number, to: number) {
     if (from === to || !isBagCell(from) || to >= TOTAL_CELLS) return;
     const source = this.cellAt(p, from);
@@ -1194,18 +998,11 @@ export class GameServer {
     const one: Cell = { item: source.item, rarity: source.rarity, count: 1 };
     const target = this.cellAt(p, to);
     if (isHotbarCell(to)) {
-      // Equipping/racking one item replaces whatever occupied that hotbar cell.
-      // Return the displaced card to the unlimited bag before placing the
-      // single dragged item. This is what makes dragging onto either row work.
       if (target && !this.addItem(p, target.item, target.rarity, target.count)) return;
       this.setCell(p, to, one);
-      // Only the main row runs petals; racking into the backup row is inert.
       if (isMainCell(to)) this.rebuildPetals(p);
     } else {
-      // A one-item drag can fill an empty bag cell or add to a matching stack;
-      // it never overwrites an unrelated stack.
-      if (target && (target.item !== one.item || target.rarity !== one.rarity || target.count >= 999))
-        return;
+      if (target && (target.item !== one.item || target.rarity !== one.rarity || target.count >= 999)) return;
       if (target) target.count += 1;
       else this.setCell(p, to, one);
     }
@@ -1214,21 +1011,9 @@ export class GameServer {
     p.dirty = true;
   }
 
-  /**
-   * Puts `count` cards of item+rarity into the bag.
-   *
-   * The bag is unlimited: existing stacks are topped up to 999 first, then any
-   * leftover spills into free cells, and the bag grows if there are none. This
-   * is what makes a mob that drops 2-3 items at once always deliver *all* of
-   * them — previously the second and third drop were silently rejected (and the
-   * pickup then failed forever) as soon as the 32 fixed cells were occupied.
-   *
-   * Returns false only in the pathological case of hitting BAG_MAX.
-   */
   addItem(p: Player, item: number, rarity: number, count = 1): boolean {
     if (count <= 0) return true;
     let left = count;
-    // 1) top up existing stacks of the same item+rarity
     for (const cell of p.bag) {
       if (left <= 0) break;
       if (cell && cell.item === item && cell.rarity === rarity && cell.count < 999) {
@@ -1238,14 +1023,10 @@ export class GameServer {
         left -= put;
       }
     }
-    // 2) spill the remainder into free cells, growing the bag as needed
     while (left > 0) {
       let idx = p.bag.indexOf(null);
       if (idx < 0) {
-        if (p.bag.length >= BAG_MAX) {
-          p.dirty = true;
-          return false;
-        }
+        if (p.bag.length >= BAG_MAX) { p.dirty = true; return false; }
         idx = p.bag.length;
         p.bag.push(null);
       }
@@ -1257,7 +1038,6 @@ export class GameServer {
     return true;
   }
 
-  /** Removes up to `count` cards of item+rarity from a player's bag. Returns how many were actually removed. */
   private takeFromBag(p: Player, item: number, rarity: number, count: number): number {
     let need = count;
     for (let i = 0; i < p.bag.length && need > 0; i++) {
@@ -1277,12 +1057,6 @@ export class GameServer {
     return have;
   }
 
-  /**
-   * Batch craft — consumes `totalCards` cards of `item`+`rarity` and performs
-   * `attempts = max(1, floor(totalCards / CRAFT_CARDS_PER_ATTEMPT))` rolls.
-   * Each successful roll creates one upgraded card. On total failure, 1-4
-   * cards are kept and the rest are destroyed.
-   */
   private craft(c: ClientState, p: Player, item: number, rarity: number, totalCards: number) {
     if (item >= ITEMS.length || ITEMS[item].kind === "trinket") return;
     const successRate = craftChanceFor(rarity);
@@ -1293,14 +1067,11 @@ export class GameServer {
     if (used !== needed) return;
     const attempts = Math.max(1, Math.floor(needed / CRAFT_CARDS_PER_ATTEMPT));
     let successes = 0;
-    for (let i = 0; i < attempts; i++) {
-      if (Math.random() < successRate) successes++;
-    }
+    for (let i = 0; i < attempts; i++) { if (Math.random() < successRate) successes++; }
     if (successes > 0) {
       this.addItem(p, item, rarity + 1, successes);
       this.pushEvent(c, EVT.CRAFT_OK, p.x, p.y, successes, item, rarity + 1);
     } else {
-      // All failed: keep 1-4 cards; destroy the rest
       const kept = 1 + Math.floor(Math.random() * Math.min(4, needed));
       this.addItem(p, item, rarity, kept);
       this.pushEvent(c, EVT.CRAFT_FAIL, p.x, p.y, needed - kept, item, rarity);
@@ -1308,12 +1079,10 @@ export class GameServer {
     p.dirty = true;
   }
 
-  /** Guaranteed one-tier rarity upgrade (no RNG) at the cost of many cards and a long cooldown. */
   private oracle(c: ClientState, p: Player, item: number, rarity: number) {
     if (item >= ITEMS.length || ITEMS[item].kind === "trinket") return;
     const required = oracleRequiredCount(rarity);
-    if (required === undefined) return;
-    if (Date.now() < p.nextOracleAt) return;
+    if (required === undefined || Date.now() < p.nextOracleAt) return;
     const have = this.countOf(p, item, rarity);
     if (have < required) return;
     this.takeFromBag(p, item, rarity, required);
@@ -1325,10 +1094,8 @@ export class GameServer {
     p.statsDirty = true;
   }
 
-  /** Converts cards into Coin trinkets (1:1) on a cooldown — a way to cash out unwanted rarities. */
   private trade(c: ClientState, p: Player, item: number, rarity: number, requestedCount: number) {
-    if (item >= ITEMS.length || ITEMS[item].kind === "trinket") return;
-    if (Date.now() < p.nextTradeAt) return;
+    if (item >= ITEMS.length || ITEMS[item].kind === "trinket" || Date.now() < p.nextTradeAt) return;
     const have = this.countOf(p, item, rarity);
     const want = requestedCount > 0 ? Math.min(requestedCount, have) : have;
     if (want <= 0) return;
@@ -1345,83 +1112,51 @@ export class GameServer {
   private spawnPlayer(p: Player) {
     const map = MAPS[p.mapId];
     const wallGrid = this.wallGrids[p.mapId];
-
-    // Try to spawn near a grid spawn point first
     const spawnTiles = findSpawnTiles(p.mapId);
     if (spawnTiles.length > 0) {
       const tile = spawnTiles[Math.floor(Math.random() * spawnTiles.length)];
       const tileW = map.width / BLOCK_GRID_COLS;
       const tileH = map.height / BLOCK_GRID_ROWS;
-      // Random position within the spawn-point tile
       for (let tries = 0; tries < 20; tries++) {
         const x = tile.col * tileW + Math.random() * tileW;
         const y = tile.row * tileH + Math.random() * tileH;
         const [cx, cy] = collideWalls(wallGrid, x, y, 40);
         if (Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01) {
-          p.x = x;
-          p.y = y;
-          p.hp = p.maxHp;
-          p.alive = true;
-          p.statsDirty = true;
+          p.x = x; p.y = y; p.hp = p.maxHp; p.alive = true; p.statsDirty = true;
           return;
         }
       }
     }
-    // Fallback: random position (original behaviour)
     for (let tries = 0; tries < 60; tries++) {
       const x = 200 + Math.random() * (map.width - 400);
       const y = 200 + Math.random() * (map.height - 400);
       const [cx, cy] = collideWalls(wallGrid, x, y, 40);
-      if (Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01) {
-        p.x = x;
-        p.y = y;
-        break;
-      }
-      p.x = x;
-      p.y = y;
+      if (Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01) { p.x = x; p.y = y; break; }
+      p.x = x; p.y = y;
     }
-    p.hp = p.maxHp;
-    p.alive = true;
-    p.statsDirty = true;
+    p.hp = p.maxHp; p.alive = true; p.statsDirty = true;
   }
 
   private spawnMob(mapId: number) {
     const map = MAPS[mapId];
     const wallGrid = this.wallGrids[mapId];
-    
     const type = map.mobs[(Math.random() * map.mobs.length) | 0];
-    let rarity = 0;
-    let x = 0;
-    let y = 0;
-    let placed = false;
+    let rarity = 0, x = 0, y = 0, placed = false;
     for (let tries = 0; tries < 80; tries++) {
       x = 200 + Math.random() * (map.width - 400);
       y = 200 + Math.random() * (map.height - 400);
       const zone = getBlockAt(mapId, x, y);
-      // Only spawn in zone tiles (A-G); skip walls ('1'). Spawn-point tiles
-      // are mapped to zone A by getBlockAt.
       if (zone < "A" || zone > "G") continue;
-      // Roll the rarity before testing space: the collision check must use the
-      // real radius, including the 10× Eternal scale, not the base radius.
-      const candidateRarity = rollZoneRarity(zone);
-      const candidateRadius = MOBS[type].radius * mobSizeMult(candidateRarity);
-      const [cx, cy] = collideWalls(wallGrid, x, y, candidateRadius + 6);
+      const cr = rollZoneRarity(zone);
+      const crRadius = MOBS[type].radius * mobSizeMult(cr);
+      const [cx, cy] = collideWalls(wallGrid, x, y, crRadius + 6);
       if (Math.abs(cx - x) >= 0.01 || Math.abs(cy - y) >= 0.01) continue;
-      rarity = candidateRarity;
-      placed = true;
-      break;
+      rarity = cr; placed = true; break;
     }
-    // A huge high-rarity mob may not fit a narrow section of the map. Leave
-    // this spawn slot empty and retry next tick instead of creating it inside
-    // a wall with an incorrect collision box.
     if (!placed) return;
     this.worlds[mapId].mobs.push(new Mob(this.nextId++, type, mapId, x, y, rarity));
   }
 
-  /**
-   * Flat max-HP granted by equipped petals (Cactus). Only the main hotbar row
-   * counts — the secondary row is inert standby storage, like everywhere else.
-   */
   private healthBonusOf(p: Player): number {
     let bonus = 0;
     for (let i = 0; i < SLOT_COUNT; i++) {
@@ -1440,23 +1175,17 @@ export class GameServer {
       const ratio = p.hp / p.maxHp;
       p.maxHp = maxHp;
       p.hp = Math.min(maxHp, Math.max(1, ratio * maxHp));
-      // Shield is capped at maxHp, so a shrinking pool must be trimmed too.
       if (p.shield > maxHp) p.shield = maxHp;
       p.statsDirty = true;
     }
-    if (lvl !== p.level) {
-      p.level = lvl;
-      p.statsDirty = true;
-    }
+    if (lvl !== p.level) { p.level = lvl; p.statsDirty = true; }
   }
 
-  /** Immediately despawn every friendly mob tied to one summon slot. */
   private despawnPets(p: Player, slot: number) {
     const pets = p.pets[slot] || [];
-    if (pets.length <= 0) return;
     for (const pet of pets) {
-      const world = this.worlds[pet.mapId];
-      if (world) world.mobs = world.mobs.filter((m) => m !== pet);
+      const w = this.worlds[pet.mapId];
+      if (w) w.mobs = w.mobs.filter((m) => m !== pet);
     }
     p.pets[slot] = [];
   }
@@ -1467,34 +1196,16 @@ export class GameServer {
       const old = p.petals[i];
       const cell = p.slots[i];
       const def = cell ? ITEMS[cell.item] : null;
-      // Summons orbit as normal petals too — they only vanish while reloading
-      // right after they hatch a mob.
       const orbits = !!def && orbitsAsPetal(def.kind);
       const maxHp = orbits ? def!.health * rarityMult(cell!.rarity) : 1;
       petals.push({
-        id: old?.id ?? this.nextId++,
-        alive: orbits,
-        hp: maxHp,
-        maxHp,
-        timer: 0,
-        x: p.x,
-        y: p.y,
-        hitCd: 0,
-        specialTimer: cell && isAbsorbItem(cell.item) ? ROSE_HEAL_DELAY : 0,
-        absorbTimer: 0,
+        id: old?.id ?? this.nextId++, alive: orbits, hp: maxHp, maxHp, timer: 0,
+        x: p.x, y: p.y, hitCd: 0,
+        specialTimer: cell && isAbsorbItem(cell.item) ? ROSE_HEAL_DELAY : 0, absorbTimer: 0,
       });
-      // A summon's pets only live while the exact same egg stays equipped in
-      // that same main hotbar slot. Moving/removing/upgrading the egg despawns
-      // its old pets instantly; a freshly equipped egg can hatch new ones later.
       const pets = p.pets[i] || [];
-      const sameSummon =
-        !!cell &&
-        !!def &&
-        def.kind === "summon" &&
-        pets.every(
-          (pet) =>
-            pet.type === def.petMob && pet.sourceItem === cell.item && pet.sourceRarity === cell.rarity
-        );
+      const sameSummon = !!cell && !!def && def.kind === "summon" &&
+        pets.every((pet) => pet.type === def.petMob && pet.sourceItem === cell.item && pet.sourceRarity === cell.rarity);
       if (pets.length > 0 && !sameSummon) this.despawnPets(p, i);
     }
     p.petals = petals;
@@ -1507,11 +1218,8 @@ export class GameServer {
     this.updateAfk(dt);
     const players: Player[] = [];
     for (const c of this.clients.values()) if (c.player) players.push(c.player);
-
     for (const p of players) this.updatePlayer(p, dt, players);
     for (let m = 0; m < MAPS.length; m++) this.updateWorld(m, dt, players);
-    // Mob/player separation happens in updateWorld and can displace a player.
-    // Never allow that secondary push to leave the authoritative circle in a wall.
     for (const p of players) {
       if (!p.alive) continue;
       const map = MAPS[p.mapId];
@@ -1529,14 +1237,11 @@ export class GameServer {
     if (!p.alive) return;
     const map = MAPS[p.mapId];
     const wallGrid = this.wallGrids[p.mapId];
-
     let speedBonus = 0;
     for (let i = 0; i < SLOT_COUNT; i++) {
       const cell = p.slots[i];
       if (!cell) continue;
       const def = ITEMS[cell.item];
-      // Summons orbit like petals, so a reloading one stops granting its
-      // passive stats exactly like a broken petal does.
       const alive = orbitsAsPetal(def.kind) ? p.petals[i]?.alive : true;
       if (!alive) continue;
       if (def.speed) speedBonus += def.speed * (1 + cell.rarity * 0.12);
@@ -1550,7 +1255,6 @@ export class GameServer {
     [p.x, p.y] = moveCircleWithWalls(wallGrid, p.x, p.y, p.vx * dt, p.vy * dt, PLAYER_RADIUS, this.collisionCounter);
     p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
     p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
-    // player vs player soft collision
     for (const o of players) {
       if (o === p || o.mapId !== p.mapId || !o.alive) continue;
       this.collisionCounter.n++;
@@ -1563,12 +1267,9 @@ export class GameServer {
         p.y += (dy / d) * push;
       }
     }
-    // Soft player collision above can push a flower into a nearby wall. Repair
-    // that displacement before this authoritative position is broadcast.
     [p.x, p.y] = collideWalls(wallGrid, p.x, p.y, PLAYER_RADIUS, this.collisionCounter);
     p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
     p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
-
     p.hurtCd = Math.max(0, p.hurtCd - dt);
     const attack = (p.flags & 1) !== 0;
     const defend = (p.flags & 2) !== 0;
@@ -1595,7 +1296,6 @@ export class GameServer {
       const def = ITEMS[cell.item];
       const isSummon = def.kind === "summon";
       if (!orbitsAsPetal(def.kind)) continue;
-      // Drop pets that died / left the map before deciding whether to hatch.
       if (isSummon) this.cleanupPets(p, i);
       const slotAngle = p.baseAngle + (index / Math.max(1, liveCount)) * Math.PI * 2;
       index++;
@@ -1611,26 +1311,16 @@ export class GameServer {
         }
         continue;
       }
-      // A summon that is orbiting (i.e. finished reloading) immediately hatches
-      // the next missing pet, then goes back into reload. It only shows up as a
-      // normal petal while its pets are out fighting.
       if (isSummon && (p.pets[i]?.length ?? 0) < getSummonCount(cell.item)) {
         this.hatchPet(p, i, cell);
-        st.alive = false;
-        st.hp = 0;
-        st.timer = def.reload;
+        st.alive = false; st.hp = 0; st.timer = def.reload;
         continue;
       }
-      // Absorb petals (Rose, Shell) stay at the normal/defending orbit instead
-      // of being pushed out to attack. Once ready and the owner has something
-      // to top up, the authoritative petal travels into the flower, applies its
-      // one-shot effect exactly once, then starts its reload.
       const absorbs = isAbsorbItem(cell.item) && (!!def.heal || !!def.shield);
       const orbitRadius = absorbs ? Math.min(p.orbit, 62) : p.orbit;
       const tx = p.x + Math.cos(slotAngle) * orbitRadius;
       const ty = p.y + Math.sin(slotAngle) * orbitRadius;
       if (absorbs) {
-        // Rose fills HP; Shell fills the shield pool (capped at maxHp).
         const missing = def.heal ? Math.max(0, p.maxHp - p.hp) : Math.max(0, p.maxHp - p.shield);
         st.specialTimer = Math.max(0, st.specialTimer - dt);
         if (st.absorbTimer > 0) {
@@ -1638,115 +1328,73 @@ export class GameServer {
           st.x += (p.x - st.x) * travelStep;
           st.y += (p.y - st.y) * travelStep;
           st.absorbTimer = Math.max(0, st.absorbTimer - dt);
-          if (st.absorbTimer <= 0) {
-            if (missing > 0) {
-              const amount = Math.min(missing, (def.heal ?? def.shield ?? 0) * rarityMult(cell.rarity));
-              if (def.heal) p.hp += amount;
-              else p.shield += amount;
-              p.statsDirty = true;
-              const owner = this.clientOf(p.id);
-              if (owner) this.pushEvent(owner, EVT.HEAL, p.x, p.y, Math.round(amount), cell.item, cell.rarity);
-              st.alive = false;
-              st.hp = 0;
-              st.timer = def.reload;
-            }
-            // If another petal filled the player first, this one remains alive
-            // and returns to orbit instead of wasting a reload cycle.
+          if (st.absorbTimer <= 0 && missing > 0) {
+            const amount = Math.min(missing, (def.heal ?? def.shield ?? 0) * rarityMult(cell.rarity));
+            if (def.heal) p.hp += amount; else p.shield += amount;
+            p.statsDirty = true;
+            const owner = this.clientOf(p.id);
+            if (owner) this.pushEvent(owner, EVT.HEAL, p.x, p.y, Math.round(amount), cell.item, cell.rarity);
+            st.alive = false; st.hp = 0; st.timer = def.reload;
           }
           continue;
         }
         st.x += (tx - st.x) * Math.min(1, dt * 14);
         st.y += (ty - st.y) * Math.min(1, dt * 14);
-        if (st.specialTimer <= 0 && missing > 0) {
-          st.absorbTimer = ROSE_ABSORB_TIME;
-          continue;
-        }
+        if (st.specialTimer <= 0 && missing > 0) { st.absorbTimer = ROSE_ABSORB_TIME; continue; }
       } else {
         st.x += (tx - st.x) * Math.min(1, dt * 14);
         st.y += (ty - st.y) * Math.min(1, dt * 14);
       }
-      // Passive heal-over-time (Leaf, Starfish): applies every tick while the
-      // petal is alive and orbiting. Scales with rarity like the Rose one-shot.
       if (def.healPerSec && p.hp < p.maxHp) {
         const threshold = def.healPerSecThreshold ?? 1;
         if (p.hp / p.maxHp < threshold) {
           const restored = Math.min(p.maxHp - p.hp, def.healPerSec * rarityMult(cell.rarity) * dt);
-          if (restored > 0) {
-            p.hp += restored;
-            p.statsDirty = true;
-          }
+          if (restored > 0) { p.hp += restored; p.statsDirty = true; }
         }
       }
-      // Passive shield generation (Shell petal): builds shield while orbiting.
-      // 1 shield point absorbs 2 damage. Max shield = player maxHp.
       if (def.shieldPerSec) {
         const maxShield = p.maxHp;
-        if (p.shield < maxShield) {
-          p.shield = Math.min(maxShield, p.shield + def.shieldPerSec * rarityMult(cell.rarity) * dt);
-          p.statsDirty = true;
-        }
+        if (p.shield < maxShield) { p.shield = Math.min(maxShield, p.shield + def.shieldPerSec * rarityMult(cell.rarity) * dt); p.statsDirty = true; }
       }
       const dmg = def.damage * rarityMult(cell.rarity);
       const pr = def.radius * (1 + cell.rarity * 0.06);
       let targetMob: Mob | null = null;
       let targetDist = Infinity;
-      let totalIncoming = 0;
-      // OPTIMIZATION: Use spatial hash here too if needed, but for now iterate
-      // Optimize: only check hostile mobs
       for (const mob of world.mobs) {
         if (mob.friendly) continue;
         this.collisionCounter.n++;
         const d = Math.hypot(mob.x - st.x, mob.y - st.y);
         if (d >= mob.radius + pr) continue;
-        totalIncoming += mob.damage * 0.5;
-        if (d < targetDist) {
-          targetDist = d;
-          targetMob = mob;
-        }
+        if (d < targetDist) { targetDist = d; targetMob = mob; }
       }
       if (targetMob && st.hitCd <= 0) {
         targetMob.hp -= dmg;
         targetMob.lastHitBy = p.id;
         targetMob.targetId = p.id;
         targetMob.addDamage(p.id, dmg);
-        st.hp -= totalIncoming;
+        st.hp -= targetMob.damage * 0.3;
         st.hitCd = 0.25;
         const kb = 90 / (targetMob.radius / 20);
         targetMob.vx += ((targetMob.x - st.x) / (targetDist || 1)) * kb;
         targetMob.vy += ((targetMob.y - st.y) / (targetDist || 1)) * kb;
         if (st.hp <= 0) {
-          st.alive = false;
-          st.timer = def.reload;
-          st.specialTimer = 0;
-          st.absorbTimer = 0;
+          st.alive = false; st.timer = def.reload; st.specialTimer = 0; st.absorbTimer = 0;
           if (isSummon) this.despawnPets(p, i);
         }
       }
     }
   }
 
-  /** Drops dead / off-map pets from a summon slot's live list. */
   private cleanupPets(p: Player, slot: number) {
     const pets = p.pets[slot] || [];
-    const activePets: Mob[] = [];
+    const active: Mob[] = [];
     for (const pet of pets) {
-      if (pet && pet.hp > 0 && pet.mapId === p.mapId) {
-        activePets.push(pet);
-      } else if (pet) {
-        const w = this.worlds[pet.mapId];
-        if (w) w.mobs = w.mobs.filter((m) => m !== pet);
-      }
+      if (pet && pet.hp > 0 && pet.mapId === p.mapId) active.push(pet);
+      else if (pet) { const w = this.worlds[pet.mapId]; if (w) w.mobs = w.mobs.filter((m) => m !== pet); }
     }
-    p.pets[slot] = activePets;
+    p.pets[slot] = active;
   }
 
-  /**
-   * Hatches this summon's batch of pets for `slot`. The caller puts the summon
-   * petal into reload afterwards.
-   *
-   * Batch size, cap and spawn protection all come from `SUMMON_CFG`, so a new
-   * egg is a data row rather than a new spawn method.
-   */
   private hatchPet(p: Player, slot: number, cell: Cell) {
     const def = ITEMS[cell.item];
     if (def.petMob === undefined) return;
@@ -1754,28 +1402,17 @@ export class GameServer {
     const room = getSummonCount(cell.item) - pets.length;
     const toSpawn = Math.min(getSummonBatch(cell.item), Math.max(0, room));
     if (toSpawn <= 0) return;
-    // One rarity roll per cycle, so a batch hatches as a matched set.
     const rarity = this.getSummonRarityWithDna(p, cell);
     const protection = getSpawnProtection(cell.item);
     const map = MAPS[p.mapId];
     for (let i = 0; i < toSpawn; i++) {
-      // Scatter around the player instead of always the same corner offset.
       const angle = Math.random() * Math.PI * 2;
       const dist = 40 + Math.random() * 30;
       const x = clamp(p.x + Math.cos(angle) * dist, 40, map.width - 40);
       const y = clamp(p.y + Math.sin(angle) * dist, 40, map.height - 40);
       const m = new Mob(this.nextId++, def.petMob, p.mapId, x, y, rarity, true);
-      m.ownerId = p.id;
-      m.ownerSlot = slot;
-      m.sourceItem = cell.item;
-      m.sourceRarity = cell.rarity;
-      m.maxHp = Math.round(m.maxHp * 1.4);
-      m.hp = m.maxHp;
-      // Keep summon damage fair: a friendly mob hits exactly as hard as the
-      // same wild mob at the same rarity.
-      // Stationary mobs (Rock, Cactus) stay rooted as pets: the old
-      // `Math.max(70, ...)` floor gave every summon a walking speed, which made
-      // friendly rocks chase things they are not supposed to be able to chase.
+      m.ownerId = p.id; m.ownerSlot = slot; m.sourceItem = cell.item; m.sourceRarity = cell.rarity;
+      m.maxHp = Math.round(m.maxHp * 1.4); m.hp = m.maxHp;
       if (m.speed > 0) m.speed = Math.max(70, m.speed * 1.5);
       m.spawnProtection = protection;
       this.worlds[p.mapId].mobs.push(m);
@@ -1784,24 +1421,11 @@ export class GameServer {
     p.pets[slot] = pets;
   }
 
-  /**
-   * Rarity of the mob a summon hatches.
-   *
-   * The egg's own rarity is normally mapped one tier down
-   * (`mapRarityToSummonRarity`); eggs flagged `noDowngrade` hatch at their own
-   * rarity. If the player has an equipped, unbroken DNA petal of at least the
-   * egg's rarity, the hatch gets a small chance (base 1%, plus the clover
-   * bonus) to come out one tier *above* the mapped rarity.
-   *
-   * No DNA item exists in ITEMS yet — the lookup below is intentionally kept so
-   * that adding one (`kind: "dna"`) enables the mechanic with no further work.
-   */
   private getSummonRarityWithDna(p: Player, cell: Cell): number {
     const def = ITEMS[cell.item];
     if (!def || def.kind !== "summon") return 0;
     const summonRarity = Math.max(0, Math.min(MAX_RARITY, cell.rarity));
     const mappedRarity = def.noDowngrade ? summonRarity : mapRarityToSummonRarity(summonRarity);
-    // Look for an equipped, unbroken DNA petal at least as rare as the egg.
     let hasValidDna = false;
     const cloverRarities: number[] = [];
     for (let i = 0; i < SLOT_COUNT; i++) {
@@ -1825,158 +1449,71 @@ export class GameServer {
     const world = this.worlds[mapId];
     const wallGrid = this.wallGrids[mapId];
     const here = players.filter((p) => p.mapId === mapId && p.alive);
-
-    // --------------------------------------------------------
-    // Spatial Hashing for Mobs (One-time build per tick)
-    // --------------------------------------------------------
-    const MOB_CELL_SIZE = 250; // Grid size for mob collisions
+    const MOB_CELL_SIZE = 250;
     const mobGrid = new Map<string, Mob[]>();
-    const getMobGridKey = (x: number, y: number) =>
-      `${Math.floor(x / MOB_CELL_SIZE)},${Math.floor(y / MOB_CELL_SIZE)}`;
-
-    // Populate grid
-    for (const mob of world.mobs) {
-      const key = getMobGridKey(mob.x, mob.y);
-      if (!mobGrid.has(key)) mobGrid.set(key, []);
-      mobGrid.get(key)!.push(mob);
-    }
-    // Helper to get nearby mobs
-    const getNearbyMobs = (x: number, y: number): Mob[] => {
-      const cx = Math.floor(x / MOB_CELL_SIZE);
-      const cy = Math.floor(y / MOB_CELL_SIZE);
-      const result: Mob[] = [];
-      for (let dx = -1; dx <= 1; dx++) {
-        for (let dy = -1; dy <= 1; dy++) {
-          const key = `${cx + dx},${cy + dy}`;
-          const cell = mobGrid.get(key);
-          if (cell) result.push(...cell);
-        }
-      }
-      return result;
+    const getKey = (x: number, y: number) => `${Math.floor(x / MOB_CELL_SIZE)},${Math.floor(y / MOB_CELL_SIZE)}`;
+    for (const mob of world.mobs) { const k = getKey(mob.x, mob.y); if (!mobGrid.has(k)) mobGrid.set(k, []); mobGrid.get(k)!.push(mob); }
+    const getNearby = (x: number, y: number) => {
+      const cx = Math.floor(x / MOB_CELL_SIZE), cy = Math.floor(y / MOB_CELL_SIZE);
+      const r: Mob[] = [];
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) { const c = mobGrid.get(`${cx + dx},${cy + dy}`); if (c) r.push(...c); }
+      return r;
     };
-    // --------------------------------------------------------
-
     for (let i = world.mobs.length - 1; i >= 0; i--) {
       const mob = world.mobs[i];
       mob.hitCd = Math.max(0, mob.hitCd - dt);
       mob.spawnProtection = Math.max(0, mob.spawnProtection - dt);
-      // targeting
       let target: { x: number; y: number; id: number } | null = null;
       let best = Infinity;
       if (mob.friendly) {
-        for (const other of world.mobs) {
-          if (other.friendly) continue;
-          const d = Math.hypot(other.x - mob.x, other.y - mob.y);
-          if (d < 520 && d < best) {
-            best = d;
-            target = other;
-          }
-        }
+        for (const other of world.mobs) { if (!other.friendly) { const d = Math.hypot(other.x - mob.x, other.y - mob.y); if (d < 520 && d < best) { best = d; target = other; } } }
         const owner = here.find((p) => p.id === mob.ownerId);
-        if (owner) {
-          const od = Math.hypot(owner.x - mob.x, owner.y - mob.y);
-          if (!target || od > 260) target = { x: owner.x, y: owner.y, id: owner.id };
-        }
+        if (owner) { const od = Math.hypot(owner.x - mob.x, owner.y - mob.y); if (!target || od > 260) target = { x: owner.x, y: owner.y, id: owner.id }; }
       } else {
-        for (const p of here) {
-          const d = Math.hypot(p.x - mob.x, p.y - mob.y);
-          if (d < 460 && d < best) {
-            best = d;
-            target = { x: p.x, y: p.y, id: p.id };
-          }
-        }
-        for (const other of world.mobs) {
-          if (!other.friendly) continue;
-          const d = Math.hypot(other.x - mob.x, other.y - mob.y);
-          if (d < 380 && d < best) {
-            best = d;
-            target = other;
-          }
-        }
+        for (const p of here) { const d = Math.hypot(p.x - mob.x, p.y - mob.y); if (d < 460 && d < best) { best = d; target = { x: p.x, y: p.y, id: p.id }; } }
+        for (const other of world.mobs) { if (other.friendly) { const d = Math.hypot(other.x - mob.x, other.y - mob.y); if (d < 380 && d < best) { best = d; target = other; } } }
       }
       if (target && mob.speed > 0) {
-        const dx = target.x - mob.x;
-        const dy = target.y - mob.y;
-        const d = Math.hypot(dx, dy) || 1;
+        const dx = target.x - mob.x, dy = target.y - mob.y, d = Math.hypot(dx, dy) || 1;
         mob.vx += ((dx / d) * mob.speed - mob.vx) * Math.min(1, dt * 4);
         mob.vy += ((dy / d) * mob.speed - mob.vy) * Math.min(1, dt * 4);
         mob.angle = Math.atan2(dy, dx);
       } else if (mob.speed > 0) {
         mob.wander -= dt;
-        if (mob.wander <= 0) {
-          mob.wander = 1.5 + Math.random() * 3;
-          mob.angle = Math.random() * Math.PI * 2;
-        }
+        if (mob.wander <= 0) { mob.wander = 1.5 + Math.random() * 3; mob.angle = Math.random() * Math.PI * 2; }
         mob.vx += (Math.cos(mob.angle) * mob.speed * 0.4 - mob.vx) * Math.min(1, dt * 2);
         mob.vy += (Math.sin(mob.angle) * mob.speed * 0.4 - mob.vy) * Math.min(1, dt * 2);
-      } else {
-        mob.vx *= 0.9;
-        mob.vy *= 0.9;
-      }
-      mob.x += mob.vx * dt;
-      mob.y += mob.vy * dt;
-      mob.x = clamp(mob.x, mob.radius, map.width - mob.radius);
-      mob.y = clamp(mob.y, mob.radius, map.height - mob.radius);
-      const [cx, cy] = collideWalls(wallGrid, mob.x, mob.y, mob.radius, this.collisionCounter);
-      mob.x = cx;
-      mob.y = cy;
-      // mob vs mob collision box
-      // OPTIMIZED: Use spatial hash
-      const nearbyMobs = getNearbyMobs(mob.x, mob.y);
-      for (const other of nearbyMobs) {
+      } else { mob.vx *= 0.9; mob.vy *= 0.9; }
+      mob.x += mob.vx * dt; mob.y += mob.vy * dt;
+      mob.x = clamp(mob.x, mob.radius, map.width - mob.radius); mob.y = clamp(mob.y, mob.radius, map.height - mob.radius);
+      [mob.x, mob.y] = collideWalls(wallGrid, mob.x, mob.y, mob.radius, this.collisionCounter);
+      const nearby = getNearby(mob.x, mob.y);
+      for (const other of nearby) {
         if (other === mob) continue;
         this.collisionCounter.n++;
-        const dx = mob.x - other.x;
-        const dy = mob.y - other.y;
-        const d = Math.hypot(dx, dy);
-        const min = mob.radius + other.radius;
+        const dx = mob.x - other.x, dy = mob.y - other.y, d = Math.hypot(dx, dy), min = mob.radius + other.radius;
         if (d < min && d > 0.001) {
-          const push = (min - d) * 0.4;
-          mob.x += (dx / d) * push;
-          mob.y += (dy / d) * push;
+          const push = (min - d) * 0.4; mob.x += (dx / d) * push; mob.y += (dy / d) * push;
           if (mob.friendly !== other.friendly && mob.hitCd <= 0) {
-            // friendly pets fight hostiles
-            const attacker = mob.friendly ? mob : other;
-            const victim = mob.friendly ? other : mob;
-            // A just-hatched pet can't be chipped down before it gets moving.
-            if (victim.spawnProtection <= 0) {
-              const dmg = attacker.damage * 0.6;
-              victim.hp -= dmg;
-              victim.lastHitBy = attacker.ownerId;
-              if (!victim.friendly && attacker.friendly && attacker.ownerId) {
-                victim.addDamage(attacker.ownerId, dmg);
-              }
-            }
+            const attacker = mob.friendly ? mob : other, victim = mob.friendly ? other : mob;
+            if (victim.spawnProtection <= 0) { const dmg = attacker.damage * 0.6; victim.hp -= dmg; victim.lastHitBy = attacker.ownerId; if (!victim.friendly && attacker.friendly && attacker.ownerId) victim.addDamage(attacker.ownerId, dmg); }
             if (attacker.spawnProtection <= 0) attacker.hp -= victim.damage * 0.3;
-            mob.hitCd = 0.5;
-            other.hitCd = 0.5;
+            mob.hitCd = 0.5; other.hitCd = 0.5;
           }
         }
       }
-      // hostile mob vs players
       if (!mob.friendly) {
         for (const p of here) {
           this.collisionCounter.n++;
           const d = Math.hypot(p.x - mob.x, p.y - mob.y);
           if (d < mob.radius + PLAYER_RADIUS) {
             const push = (mob.radius + PLAYER_RADIUS - d) * 0.5;
-            const ux = (p.x - mob.x) / (d || 1);
-            const uy = (p.y - mob.y) / (d || 1);
-            p.x += ux * push;
-            p.y += uy * push;
-            mob.x -= ux * push * 0.4;
-            mob.y -= uy * push * 0.4;
+            const ux = (p.x - mob.x) / (d || 1), uy = (p.y - mob.y) / (d || 1);
+            p.x += ux * push; p.y += uy * push; mob.x -= ux * push * 0.4; mob.y -= uy * push * 0.4;
             if (p.hurtCd <= 0) {
               let dmg = mob.damage;
-              // Shield absorbs damage first: 1 shield point blocks 2 damage.
-              if (p.shield > 0 && dmg > 0) {
-                const absorbed = Math.min(p.shield * 2, dmg);
-                p.shield -= absorbed / 2;
-                dmg -= absorbed;
-              }
-              p.hp -= dmg;
-              p.hurtCd = 0.55;
-              p.statsDirty = true;
+              if (p.shield > 0 && dmg > 0) { const absorbed = Math.min(p.shield * 2, dmg); p.shield -= absorbed / 2; dmg -= absorbed; }
+              p.hp -= dmg; p.hurtCd = 0.55; p.statsDirty = true;
               const c = this.clientOf(p.id);
               if (c) this.pushEvent(c, EVT.HIT, p.x, p.y, Math.round(mob.damage));
               if (p.hp <= 0) this.killPlayer(p);
@@ -1988,29 +1525,18 @@ export class GameServer {
         world.mobs.splice(i, 1);
         if (mob.friendly) {
           const owner = here.find((p) => p.id === mob.ownerId);
-          if (owner && mob.ownerSlot >= 0) {
-            // The slot's summon petal re-hatches (and re-enters reload) on the
-            // next tick, as soon as it is done orbiting.
-            owner.pets[mob.ownerSlot] = (owner.pets[mob.ownerSlot] || []).filter((m) => m !== mob);
-          }
+          if (owner && mob.ownerSlot >= 0) owner.pets[mob.ownerSlot] = (owner.pets[mob.ownerSlot] || []).filter((m) => m !== mob);
           continue;
         }
         this.onMobKilled(mob, mapId);
         continue;
       }
     }
-    // drops
-    for (let i = world.drops.length - 1; i >= 0; i--) {
-      const d = world.drops[i];
-      d.ttl -= dt;
-      if (d.ttl <= 0) world.drops.splice(i, 1);
-    }
-    // respawn mobs
+    for (let i = world.drops.length - 1; i >= 0; i--) { const d = world.drops[i]; d.ttl -= dt; if (d.ttl <= 0) world.drops.splice(i, 1); }
     const hostiles = world.mobs.filter((m) => !m.friendly).length;
     if (hostiles < this.mobCapForMap(mapId) && Math.random() < 0.5) this.spawnMob(mapId);
   }
 
-  /** Applies a bounded one-hour daily-bonus window supplied with local progress. */
   private setBonusStatus(p: Player, multiplier: number, seconds: number) {
     const safeMultiplier = Math.max(1, Math.min(5, Math.floor(multiplier)));
     const safeSeconds = Math.max(0, Math.min(60 * 60, Math.floor(seconds)));
@@ -2018,16 +1544,11 @@ export class GameServer {
     p.bonusEndsAt = safeSeconds > 0 ? Date.now() + safeSeconds * 1000 : 0;
   }
 
-  /** Extra whole copies of every drop this player earns, on top of the base one. */
   private dropMultiplierFor(p: Player | null): number {
     if (!p || p.bonusEndsAt <= Date.now()) return 1;
     return p.bonusMultiplier;
   }
 
-  /**
-   * Highest-rarity Magic Core equipped in the player's hotbar, or -1 if none.
-   * A Core lets magic item variants drop and caps (never raises) their rarity.
-   */
   private magicCoreRarity(p: Player | null): number {
     if (!p || MAGIC_CORE_ITEM < 0) return -1;
     let best = -1;
@@ -2043,18 +1564,14 @@ export class GameServer {
     const maxHp = mob.maxHp > 0 ? mob.maxHp : 1;
     const perPlayerThreshold = maxHp * 0.05;
     const playerToSquadCode = new Map<number, string>();
-    for (const [code, squad] of this.squads.entries()) {
-      for (const pid of squad.members.keys()) playerToSquadCode.set(pid, code);
-    }
+    for (const [code, squad] of this.squads.entries()) { for (const pid of squad.members.keys()) playerToSquadCode.set(pid, code); }
     for (const squad of this.squads.values()) {
       const memberIds = Array.from(squad.members.keys());
       if (memberIds.length === 0) continue;
       let total = 0;
       for (const pid of memberIds) total += mob.damageByPlayer.get(pid) || 0;
       const required = perPlayerThreshold * memberIds.length;
-      if (total >= required) {
-        for (const pid of memberIds) eligible.add(pid);
-      }
+      if (total >= required) { for (const pid of memberIds) eligible.add(pid); }
     }
     for (const [pid, dmg] of mob.damageByPlayer.entries()) {
       if (playerToSquadCode.has(pid)) continue;
@@ -2064,7 +1581,6 @@ export class GameServer {
   }
 
   private onMobKilled(mob: Mob, mapId: number) {
-    // Friendly pets never drop loot — they just despawn.
     if (mob.friendly) return;
     const def = MOBS[mob.type];
     const world = this.worlds[mapId];
@@ -2072,116 +1588,71 @@ export class GameServer {
     const killer = killerClient?.player ?? null;
     if (killer) {
       const xp = Math.round(def.xp * (1 + mob.rarity * 0.9));
-      killer.xp += xp;
-      this.applyLevel(killer);
-      killer.statsDirty = true;
+      killer.xp += xp; this.applyLevel(killer); killer.statsDirty = true;
       this.pushEvent(killerClient!, EVT.XP, mob.x, mob.y, xp);
-      // The client uses the event rarity to unlock the matching Mob Gallery
-      // entry, while `value` remains the stable mob type id.
       this.pushEvent(killerClient!, EVT.KILL, mob.x, mob.y, mob.type, EMPTY_ITEM, mob.rarity);
     }
-    // Keep the ground from filling up with stale cards: once the map is at the
-    // cap the oldest few are swept away so fresh loot always has a home.
-    if (world.drops.length >= MAX_DROPPED_CARDS) {
-      world.drops.splice(0, DROP_TRIM_COUNT);
-    }
-    const dropCount = this.dropMultiplierFor(killer);
-    const coreRarity = this.magicCoreRarity(killer);
-    // Drops follow the mob's actual rarity row exactly:
-    // RARITY_DROP_RATES["mob rarity"]["drop rarity"] = probability.
-    // No map-bias reroll and no item/drop-entry factor are applied here.
+    if (world.drops.length >= MAX_DROPPED_CARDS) { world.drops.splice(0, DROP_TRIM_COUNT); }
     const mobRarityIndex = Math.max(0, Math.min(MAX_RARITY, mob.rarity));
     const mobRarityName = RARITIES[mobRarityIndex].name;
-    const rarityIndexOf = (name: string) =>
-      Math.max(0, Math.min(MAX_RARITY, RARITIES.findIndex((r) => r.name === name)));
-    // Every entry of the mob's drop table drops on every kill. `drop.chance` is
-    // kept in the data for compatibility, but rarity is rolled solely by the
-    // mob rarity table in getDropRarityByItem.
-    const rolled: { item: number; rarity: number; dropNum: number }[] = [];
-    for (const drop of def.drops) {
-      for (let i = 0; i < dropCount; i++) {
-        // Normal item: rarity is rolled straight from the mob-rarity table,
-        // untouched by any Magic Core the player may be holding.
-        let item = drop.item;
-        let rarity = rarityIndexOf(getDropRarityByItem(drop.item, mobRarityName));
-        // Magic variant: only reachable while a Magic Core is equipped, and only
-        // when the variant's own roll beats Common. The Core then clamps the
-        // result down to its own rarity — it can never push a drop higher.
-        const magicItem = MAGIC_ITEM_MAP[drop.item];
-        if (magicItem !== undefined && coreRarity >= 0) {
-          const magicRarity = rarityIndexOf(getDropRarityByItem(magicItem, mobRarityName));
-          if (magicRarity > 0) {
-            item = magicItem;
-            rarity = Math.min(magicRarity, coreRarity);
-          }
-        }
-        rolled.push({ item, rarity, dropNum: i });
-      }
-    }
+    const rarityIndexOf = (name: string) => Math.max(0, Math.min(MAX_RARITY, RARITIES.findIndex((r) => r.name === name)));
+    // Per-player loot: each eligible looter gets their own private copy of every
+    // drop. Non-squad players only see their own drops; squad members each get
+    // an independent copy so everyone gets loot without stealing.
     const eligibleLooters = this.computeEligibleLooters(mob);
-    // If no one met the 5% threshold (or squad pooled threshold), no loot spawns — enforces the damage requirement
     if (eligibleLooters.size === 0) return;
-    // Scatter each card at a random angle, pushing later copies of the same
-    // item further out so a stacked multi-drop fans away from the corpse
-    // instead of piling onto one spot.
-    rolled.forEach((roll) => {
-      const angle = Math.random() * Math.PI * 2;
-      const distance = (Math.random() * 20 + 10) * (1 + roll.dropNum * 0.5);
-      const x = mob.x + Math.cos(angle) * distance;
-      const y = mob.y + Math.sin(angle) * distance;
-      this.spawnDrop(mapId, roll.item, roll.rarity, x, y, killer ? killer.id : 0, eligibleLooters);
-    });
+    for (const looterId of eligibleLooters) {
+      const looterClient = this.clientOf(looterId);
+      const looterPlayer = looterClient?.player ?? null;
+      const looterDropMult = this.dropMultiplierFor(looterPlayer);
+      const looterCoreRarity = this.magicCoreRarity(looterPlayer);
+      const rolled: { item: number; rarity: number; dropNum: number }[] = [];
+      for (const drop of def.drops) {
+        for (let i = 0; i < looterDropMult; i++) {
+          let item = drop.item;
+          let rarity = rarityIndexOf(getDropRarityByItem(drop.item, mobRarityName));
+          const magicItem = MAGIC_ITEM_MAP[drop.item];
+          if (magicItem !== undefined && looterCoreRarity >= 0) {
+            const magicRarity = rarityIndexOf(getDropRarityByItem(magicItem, mobRarityName));
+            if (magicRarity > 0) { item = magicItem; rarity = Math.min(magicRarity, looterCoreRarity); }
+          }
+          rolled.push({ item, rarity, dropNum: i });
+        }
+      }
+      rolled.forEach((roll) => {
+        const angle = Math.random() * Math.PI * 2;
+        const distance = (Math.random() * 20 + 10) * (1 + roll.dropNum * 0.5);
+        const x = mob.x + Math.cos(angle) * distance;
+        const y = mob.y + Math.sin(angle) * distance;
+        // Private drop: only this looter can see and loot it.
+        this.spawnDrop(mapId, roll.item, roll.rarity, x, y, looterId, new Set([looterId]));
+      });
+    }
   }
 
   private setsEqual(a: Set<number> | null, b: Set<number> | null): boolean {
-    if (a === b) return true;
-    if (!a || !b) return false;
-    if (a.size !== b.size) return false;
+    if (a === b) return true; if (!a || !b) return false; if (a.size !== b.size) return false;
     for (const v of a) if (!b.has(v)) return false;
     return true;
   }
 
-  /**
-   * Drops one card, merging it into a nearby identical card when possible so a
-   * busy field reads as a few stacked cards instead of a carpet of singles.
-   */
-  private spawnDrop(
-    mapId: number,
-    item: number,
-    rarity: number,
-    x: number,
-    y: number,
-    ownerId: number,
-    allowed: Set<number> | null = null
-  ) {
+  private spawnDrop(mapId: number, item: number, rarity: number, x: number, y: number, ownerId: number, allowed: Set<number> | null = null) {
     const world = this.worlds[mapId];
     for (const d of world.drops) {
       if (d.item !== item || d.rarity !== rarity || d.count >= DROP_STACK_MAX) continue;
       if (Math.hypot(d.x - x, d.y - y) > DROP_STACK_RADIUS) continue;
-      // Only merge if loot permissions are identical (prevents leaking loot to non-eligible)
       if (!this.setsEqual(d.allowedPlayerIds, allowed)) continue;
-      d.count++;
-      d.ttl = Math.max(d.ttl, 45);
+      d.count++; d.ttl = Math.max(d.ttl, 45);
       if (d.ownerId !== ownerId) d.ownerId = 0;
       return;
     }
     const nd = new Drop(this.nextId++, mapId, x, y, item, rarity, ownerId);
-    nd.allowedPlayerIds = allowed ? new Set(allowed) : (allowed === null ? null : new Set());
-    // If eligible set is empty (no one met 5%), drop is unlootable and will expire; we still keep it but with empty allowed set to enforce rule.
-    // If eligible is non-empty, only those players can pick; if null (shouldn't happen here), anyone can.
-    // For this implementation, when eligible is empty we store empty set, making it unlootable.
-    // When eligible is from computeEligibleLooters, it may be empty; we store that empty set.
-    if (allowed && allowed.size === 0) {
-        nd.allowedPlayerIds = new Set();
-    }
+    nd.allowedPlayerIds = allowed ? new Set(allowed) : null;
     world.drops.push(nd);
   }
 
   private killPlayer(p: Player) {
-    p.alive = false;
-    p.hp = 0;
-    p.shield = 0;
-    p.statsDirty = true;
+    p.alive = false; p.hp = 0; p.shield = 0; p.statsDirty = true;
     const world = this.worlds[p.mapId];
     world.mobs = world.mobs.filter((m) => m.ownerId !== p.id);
     for (let i = 0; i < SLOT_COUNT; i++) p.pets[i] = [];
@@ -2189,7 +1660,6 @@ export class GameServer {
     if (c) this.pushEvent(c, EVT.DEATH, p.x, p.y, p.level);
   }
 
-  /** Total magnet range from all equipped Magnet petals (stacks additively). */
   private magnetRangeFor(p: Player): number {
     const MAGNET_RARITY_BONUS = [0, 1, 1.2, 2, 2.5, 3, 4.5, 6, 9, 14, 14];
     let total = 0;
@@ -2199,9 +1669,9 @@ export class GameServer {
       const def = ITEMS[cell.item];
       if (!def.magnetRange) continue;
       const st = p.petals[i];
-      if (st && !st.alive) continue; // broken/reloading magnet doesn't pull
-      const rarityBonus = MAGNET_RARITY_BONUS[Math.min(cell.rarity, MAGNET_RARITY_BONUS.length - 1)] ?? 0;
-      total += Math.round(def.magnetRange + rarityBonus * 150);
+      if (st && !st.alive) continue;
+      const bonus = MAGNET_RARITY_BONUS[Math.min(cell.rarity, MAGNET_RARITY_BONUS.length - 1)] ?? 0;
+      total += Math.round(def.magnetRange + bonus * 150);
     }
     return total;
   }
@@ -2210,40 +1680,23 @@ export class GameServer {
     if (!p.alive) return;
     const world = this.worlds[p.mapId];
     const magnetRange = this.magnetRangeFor(p);
-    let lootedThisTick = 0;
+    let looted = 0;
     for (let i = world.drops.length - 1; i >= 0; i--) {
       const d = world.drops[i];
-      // Enforce 5% damage rule (and squad pooled rule). If drop has an allow-list, only those playerIds may loot.
-      // null = legacy / anyone can loot, empty Set = no one (fails threshold, will expire)
-      if (d.allowedPlayerIds !== null && d.allowedPlayerIds !== undefined) {
-        if (!d.allowedPlayerIds.has(p.id)) continue;
-      }
+      // Per-player filtering: if the drop has an allow-list, only that player
+      // can see and loot it. null = legacy/anyone (shouldn't happen in new code).
+      if (d.allowedPlayerIds !== null && d.allowedPlayerIds !== undefined && !d.allowedPlayerIds.has(p.id)) continue;
       const dist = Math.hypot(d.x - p.x, d.y - p.y);
-      // Magnet attraction: pull drops toward the player within magnet range.
       if (magnetRange > 0 && dist < magnetRange && dist > 46) {
-        // Pull speed doubled (60 -> 120). Clamped to the remaining gap so the
-        // faster step can never overshoot the player and jitter the card.
         const pull = Math.min(Math.min(1, 8 / dist) * 120, dist - 46);
         d.x += ((p.x - d.x) / dist) * pull;
         d.y += ((p.y - d.y) / dist) * pull;
       }
       if (dist < 46) {
-        // A stacked card hands over every merged copy at once.
         if (this.addItem(p, d.item, d.rarity, d.count)) {
           world.drops.splice(i, 1);
           const c = this.clientOf(p.id);
-          // Spread the loot floaters out a little so a mob that dropped 2-3
-          // items reads as 2-3 pickups instead of one overlapping label.
-          if (c)
-            this.pushEvent(
-              c,
-              EVT.LOOT,
-              d.x,
-              d.y - (lootedThisTick++ % 3) * 18,
-              0,
-              d.item,
-              d.rarity
-            );
+          if (c) this.pushEvent(c, EVT.LOOT, d.x, d.y - (looted++ % 3) * 18, 0, d.item, d.rarity);
         }
       }
     }
@@ -2261,119 +1714,72 @@ export class GameServer {
     const viewY = 950;
     const inView = (x: number, y: number) => Math.abs(x - p.x) < viewX && Math.abs(y - p.y) < viewY;
     const body = new Writer(4096);
-    // players
     for (const other of this.clients.values()) {
       const op = other.player;
       if (!op || op.mapId !== p.mapId || !op.alive) continue;
       if (op !== p && !inView(op.x, op.y)) continue;
-      body
-        .u8(ENT.PLAYER)
-        .u16(op.id)
-        .u8(op.flags)
-        .u8(op === p ? TEAM.SELF : TEAM.FRIENDLY)
-        .i16(Math.round(op.x))
-        .i16(Math.round(op.y))
+      body.u8(ENT.PLAYER).u16(op.id).u8(op.flags).u8(op === p ? TEAM.SELF : TEAM.FRIENDLY)
+        .i16(Math.round(op.x)).i16(Math.round(op.y))
         .u16(Math.round(((op.baseAngle % (Math.PI * 2)) / (Math.PI * 2)) * 65535))
-        .u8(Math.round(PLAYER_RADIUS))
-        .u8(Math.round((op.hp / op.maxHp) * 255))
-        .str(op.name);
+        .u8(Math.round(PLAYER_RADIUS)).u8(Math.round((op.hp / op.maxHp) * 255)).str(op.name);
       count++;
-      // petals belonging to this player (summons orbit as petals too, and are
-      // simply absent from the snapshot while reloading)
       for (let i = 0; i < SLOT_COUNT; i++) {
         const cell = op.slots[i];
         const st = op.petals[i];
         if (!cell || !st || !st.alive) continue;
         if (!orbitsAsPetal(ITEMS[cell.item].kind)) continue;
-        body
-          .u8(ENT.PETAL)
-          .u16(st.id)
-          .u8(cell.item)
-          .u8(cell.rarity)
-          .i16(Math.round(st.x))
-          .i16(Math.round(st.y))
-          .u16(0)
+        body.u8(ENT.PETAL).u16(st.id).u8(cell.item).u8(cell.rarity)
+          .i16(Math.round(st.x)).i16(Math.round(st.y)).u16(0)
           .u8(Math.round(ITEMS[cell.item].radius * (1 + cell.rarity * 0.06)))
           .u8(Math.round((st.hp / st.maxHp) * 255));
         count++;
       }
     }
-    // mobs
     for (const mob of world.mobs) {
       if (!inView(mob.x, mob.y)) continue;
-      body
-        .u8(ENT.MOB)
-        .u16(mob.id)
-        .u8(mob.type)
+      body.u8(ENT.MOB).u16(mob.id).u8(mob.type)
         .u8(mob.friendly ? (mob.ownerId === p.id ? TEAM.SELF : TEAM.FRIENDLY) : TEAM.HOSTILE)
-        .i16(Math.round(mob.x))
-        .i16(Math.round(mob.y))
+        .i16(Math.round(mob.x)).i16(Math.round(mob.y))
         .u16(Math.round((((mob.angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) / (Math.PI * 2)) * 65535))
-        // High-rarity mobs can be larger than 255px (e.g. a 28px Eternal
-        // Sandstorm is 280px), so mob radius uses u16 instead of truncating.
         .u16(Math.min(65535, Math.round(mob.radius)))
-        .u8(Math.max(0, Math.round((mob.hp / mob.maxHp) * 255)))
-        .u8(mob.rarity);
+        .u8(Math.max(0, Math.round((mob.hp / mob.maxHp) * 255))).u8(mob.rarity);
       count++;
     }
-    // drops
+    // Drops: only send those the player is allowed to see/loot.
     for (const d of world.drops) {
       if (!inView(d.x, d.y)) continue;
-      // The drop entity has no health, so its hp byte carries the stack count.
-      body
-        .u8(ENT.DROP)
-        .u16(d.id)
-        .u8(d.item)
-        .u8(d.rarity)
-        .i16(Math.round(d.x))
-        .i16(Math.round(d.y))
-        .u16(0)
-        .u8(12)
-        .u8(Math.min(255, d.count));
+      // Per-player drops: skip this drop if the player is not in its allow-list.
+      if (d.allowedPlayerIds !== null && d.allowedPlayerIds !== undefined && !d.allowedPlayerIds.has(p.id)) continue;
+      body.u8(ENT.DROP).u16(d.id).u8(d.item).u8(d.rarity)
+        .i16(Math.round(d.x)).i16(Math.round(d.y)).u16(0).u8(12).u8(Math.min(255, d.count));
       count++;
     }
-    // Per-slot reload progress (0..255, 255 = ready) trails the entity list so
-    // the hotbar can draw a live reload sweep on every petal and summon.
     for (let i = 0; i < SLOT_COUNT; i++) {
       const cell = p.slots[i];
       const st = p.petals[i];
       const def = cell ? ITEMS[cell.item] : null;
-      if (!cell || !st || !def || !orbitsAsPetal(def.kind) || st.alive) {
-        body.u8(255);
-        continue;
-      }
+      if (!cell || !st || !def || !orbitsAsPetal(def.kind) || st.alive) { body.u8(255); continue; }
       const total = def.reload > 0 ? def.reload : 1;
-      const progress = 1 - Math.max(0, Math.min(1, st.timer / total));
-      body.u8(Math.round(progress * 255));
+      body.u8(Math.round((1 - Math.max(0, Math.min(1, st.timer / total))) * 255));
     }
-    // Per-slot health/damage (0..255, 255 = full health)
     for (let i = 0; i < SLOT_COUNT; i++) {
       const cell = p.slots[i];
       const st = p.petals[i];
-      if (!cell || !st || !st.alive) {
-        body.u8(255);
-        continue;
-      }
-      const maxHp = st.maxHp > 0 ? st.maxHp : 1;
-      body.u8(Math.max(0, Math.min(255, Math.round((st.hp / maxHp) * 255))));
+      if (!cell || !st || !st.alive) { body.u8(255); continue; }
+      body.u8(Math.max(0, Math.min(255, Math.round((st.hp / Math.max(1, st.maxHp)) * 255))));
     }
     w.u16(count);
-    const head = w.bytes();
-    const tail = body.bytes();
+    const head = w.bytes(), tail = body.bytes();
     const packet = new Uint8Array(head.length + tail.length);
-    packet.set(head, 0);
-    packet.set(tail, head.length);
+    packet.set(head, 0); packet.set(tail, head.length);
     c.send(packet);
     if (p.dirty) {
       p.dirty = false;
       const iw = new Writer(256);
       iw.u8(S2C.INVENTORY).u8(SLOT_COUNT);
       for (const cell of p.slots) writeCell(iw, cell);
-      // Secondary row rides along right after the main row.
       iw.u8(SECONDARY_SLOT_COUNT);
       for (let i = 0; i < SECONDARY_SLOT_COUNT; i++) writeCell(iw, p.secondary[i] ?? null);
-      // The bag can grow past BAG_COUNT, so its length is sent as u16. Trailing
-      // empty cells are trimmed (never below BAG_COUNT) to keep the packet small.
       let bagLen = p.bag.length;
       while (bagLen > BAG_COUNT && !p.bag[bagLen - 1]) bagLen--;
       iw.u16(bagLen);
@@ -2386,27 +1792,13 @@ export class GameServer {
       const oracleSecLeft = Math.max(0, Math.ceil((p.nextOracleAt - now) / 1000));
       const tradeSecLeft = Math.max(0, Math.ceil((p.nextTradeAt - now) / 1000));
       const sw = new Writer(28);
-      sw
-        .u8(S2C.STATS)
-        .u32(p.xp)
-        .u16(p.level)
-        .u16(Math.max(0, Math.round(p.hp)))
-        .u16(Math.round(p.maxHp))
-        .u8(p.mapId)
-        .u8(p.alive ? 1 : 0)
-        .u32(oracleSecLeft)
-        .u32(tradeSecLeft)
-        .u16(Math.max(0, Math.round(p.shield)));
+      sw.u8(S2C.STATS).u32(p.xp).u16(p.level).u16(Math.max(0, Math.round(p.hp))).u16(Math.round(p.maxHp))
+        .u8(p.mapId).u8(p.alive ? 1 : 0).u32(oracleSecLeft).u32(tradeSecLeft).u16(Math.max(0, Math.round(p.shield)));
       c.send(sw.bytes());
     }
-    // Debug-overlay telemetry (collision checks + live entity count). Sent
-    // roughly once a second (every 20 ticks @ 20 TPS) — a diagnostic number,
-    // not something that needs the full 20 Hz snapshot cadence.
     if (this.tickCount % 20 === 0) {
       const dw = new Writer(8);
-      dw.u8(S2C.DEBUG)
-        .u32(this.collisionCounter.n)
-        .u16(Math.min(65535, this.entityCount()));
+      dw.u8(S2C.DEBUG).u32(this.collisionCounter.n).u16(Math.min(65535, this.entityCount()));
       c.send(dw.bytes());
     }
     for (const e of c.events) c.send(e);
