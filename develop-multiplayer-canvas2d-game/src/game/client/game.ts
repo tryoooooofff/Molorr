@@ -3791,18 +3791,6 @@ export class GameClient {
     // Keep mouse buttons as well for usability: left click = spread, right click = contract
     if ((this.mouseDown && !uiBusy) || isSpaceDown) flags |= 1;
     if (this.rightDown || isShiftDown) flags |= 2;
-    // Magnets and all egg-type (summon) items should never spread.
-    if ((flags & 1) !== 0) {
-      for (const slot of this.slots) {
-        if (!slot) continue;
-        const def = ITEMS[slot.item];
-        if (!def) continue;
-        if (def.kind === "summon" || (def.name ?? "").toLowerCase().includes("magnet")) {
-          flags &= ~1;
-          break;
-        }
-      }
-    }
     const w = new Writer(8);
     w.u8(C2S.INPUT).i8(dx * 100).i8(dy * 100).u8(flags);
     this.net.send(w.bytes());
@@ -4794,14 +4782,14 @@ private bagLayout() {
           this.mobileSpreadActive = true;
           this.mobileSpreadPointerId = e.pointerId;
           this.lastTouchTime = performance.now();
-          try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
+          if (e.cancelable) e.preventDefault();
           return;
         }
         if (this.mobileContractRect && hit(this.mobileContractRect, p.x, p.y)) {
           this.mobileContractActive = true;
           this.mobileContractPointerId = e.pointerId;
           this.lastTouchTime = performance.now();
-          try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
+          if (e.cancelable) e.preventDefault();
           return;
         }
         if (this.mobileJoystickRect && hit(this.mobileJoystickRect, p.x, p.y)) {
