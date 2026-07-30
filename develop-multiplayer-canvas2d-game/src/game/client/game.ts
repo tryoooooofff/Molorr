@@ -227,6 +227,11 @@ class SettingsSystem {
     // UI状态
     panelOpen: boolean = false;
     panelRect: [number, number, number, number] | null = null;
+    /** Design-space scale factor (design coords → screen coords). */
+    panelScale: number = 1;
+    /** Screen-space origin (top-left) of the scaled panel. */
+    panelOriginX: number = 0;
+    panelOriginY: number = 0;
     onChange: (() => void) | null = null;
 
     // 滚动相关
@@ -325,7 +330,10 @@ class SettingsSystem {
                 if (e.cancelable) e.preventDefault();
                 e.stopPropagation();
 
-                const deltaY = e.touches[0].clientY - touchStartY;
+                // scrollOffset is in design pixels; convert the screen-space
+                // drag delta to design space by dividing by the panel scale.
+                const scale = this.panelScale || 1;
+                const deltaY = (e.touches[0].clientY - touchStartY) / scale;
 
                 this.scrollOffset = Math.max(0, Math.min(
                     this.maxScrollOffset,
@@ -533,11 +541,26 @@ class SettingsSystem {
         const viewH = y * 2;
         // Mobile: narrower + shorter panel so it doesn't cover the whole screen.
         const isMobileView = viewW < 640;
-        const panelW = Math.min(isMobileView ? 280 : 320, Math.max(isMobileView ? 200 : 240, viewW - 24));
-        const panelX = Math.min(118, Math.max(12, viewW - panelW - 12));
+        // Design dimensions (desktop baseline). Everything inside is laid out
+        // against this coordinate space, then scaled down uniformly so the
+        // panel AND all of its contents (text, checkboxes, sliders, buttons)
+        // shrink together on small screens.
+        const DESIGN_W = 320;
+        const DESIGN_H = 480;
+        const maxW = Math.min(isMobileView ? 280 : 320, Math.max(isMobileView ? 200 : 240, viewW - 24));
+        const maxH = Math.max(140, Math.min(isMobileView ? 380 : 480, viewH - (viewH <= 600 ? 16 : 32)));
+        const scale = Math.min(maxW / DESIGN_W, maxH / DESIGN_H);
+        const actualW = DESIGN_W * scale;
+        const actualH = DESIGN_H * scale;
+        const panelX = Math.min(118, Math.max(12, viewW - actualW - 12));
         const panelY = viewH <= 600 ? 8 : 16;
-        const panelH = Math.max(140, Math.min(isMobileView ? 380 : 480, viewH - panelY * 2));
-        this.panelRect = [panelX, panelY, panelW, panelH];
+        // Draw in design coordinates — the scale transform handles shrinking.
+        const panelW = DESIGN_W;
+        const panelH = DESIGN_H;
+        this.panelRect = [panelX, panelY, actualW, actualH];
+        this.panelScale = scale;
+        this.panelOriginX = panelX;
+        this.panelOriginY = panelY;
 
         const totalContentHeight = 880;
         const contentY = panelY + 70;
@@ -546,6 +569,13 @@ class SettingsSystem {
 
         ctx.save();
         ctx.lineJoin = "round";
+        // Scale the entire panel + contents uniformly around the panel's
+        // top-left corner. We translate to the corner, scale, then translate
+        // back so all existing drawing code (which uses panelX/panelY) keeps
+        // working — every point is just scaled toward (panelX, panelY).
+        ctx.translate(panelX, panelY);
+        ctx.scale(scale, scale);
+        ctx.translate(-panelX, -panelY);
 
         // 背景
         ctx.fillStyle = 'rgba(180, 180, 180, 0.95)';
@@ -819,11 +849,22 @@ class SettingsSystem {
     handleClick(x: number, y: number) {
         if (!this.panelOpen || !this.panelRect) return false;
 
-        const [px, py, pw, ph] = this.panelRect;
+        // The panel is drawn in a scaled design coordinate space (see draw()).
+        // Convert the incoming screen coords back to design coords so all the
+        // stored rects (which are in design space) can be tested directly.
+        const scale = this.panelScale || 1;
+        const ox = this.panelOriginX;
+        const oy = this.panelOriginY;
+        const dx = ox + (x - ox) / scale;
+        const dy = oy + (y - oy) / scale;
+        // Design-space panel rect (panelW/panelH are the unscaled 320×480).
+        const [px, py] = this.panelRect;
+        const pw = (this.panelRect[2] || 0) / scale;
+        const ph = (this.panelRect[3] || 0) / scale;
 
         // 1. 关闭按钮
         const closeX = px + pw - 35, closeY = py + 10, closeSize = 25;
-        if (x >= closeX && x <= closeX + closeSize && y >= closeY && y <= closeY + closeSize) {
+        if (dx >= closeX && dx <= closeX + closeSize && dy >= closeY && dy <= closeY + closeSize) {
             this.panelOpen = false;
             this._forceRedraw();
             return true;
@@ -833,9 +874,9 @@ class SettingsSystem {
         // the thumb sits inside the track rectangle.
         if (this._scrollThumbRect) {
             const [tx, ty, tw, th] = this._scrollThumbRect;
-            if (x >= tx && x <= tx + tw && y >= ty && y <= ty + th) {
+            if (dx >= tx && dx <= tx + tw && dy >= ty && dy <= ty + th) {
                 this.isDraggingScroll = true;
-                this.dragStartY = y;
+                this.dragStartY = dy;
                 this.dragStartOffset = this.scrollOffset;
                 return true;
             }
@@ -844,8 +885,8 @@ class SettingsSystem {
         // 3. 滚动条点击
         if (this._scrollBarRect) {
             const [sx, sy, sw, sh] = this._scrollBarRect;
-            if (x >= sx && x <= sx + sw && y >= sy && y <= sy + sh) {
-                const relativeY = y - sy;
+            if (dx >= sx && dx <= sx + sw && dy >= sy && dy <= sy + sh) {
+                const relativeY = dy - sy;
                 const ratio = relativeY / sh;
                 this.scrollOffset = Math.max(0, Math.min(this.maxScrollOffset, ratio * this.maxScrollOffset));
                 this._forceRedraw();
@@ -873,7 +914,7 @@ class SettingsSystem {
             const hitW = checkSize + 16;
             const hitH = itemH + 8;
 
-            const isHit = x >= hitX && x <= hitX + hitW && y >= hitY && y <= hitY + hitH;
+            const isHit = dx >= hitX && dx <= hitX + hitW && dy >= hitY && dy <= hitY + hitH;
 
             if (isHit) {
                 this.toggle(items[i]);
@@ -885,7 +926,7 @@ class SettingsSystem {
         // 5. 减号按钮
         if (this._minusRect) {
             const [rx, ry, rw, rh] = this._minusRect;
-            if (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh) {
+            if (dx >= rx && dx <= rx + rw && dy >= ry && dy <= ry + rh) {
                 this.setMaxMagicAnts(this.maxMagicAnts - 5);
                 return true;
             }
@@ -894,7 +935,7 @@ class SettingsSystem {
         // 6. 加号按钮
         if (this._plusRect) {
             const [rx, ry, rw, rh] = this._plusRect;
-            if (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh) {
+            if (dx >= rx && dx <= rx + rw && dy >= ry && dy <= ry + rh) {
                 this.setMaxMagicAnts(this.maxMagicAnts + 5);
                 return true;
             }
@@ -903,8 +944,8 @@ class SettingsSystem {
         // 7. Magic Ants 滑块
         if (this._sliderRect) {
             const [rx, ry, rw, rh] = this._sliderRect;
-            if (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh) {
-                const percent = (x - rx) / rw;
+            if (dx >= rx && dx <= rx + rw && dy >= ry && dy <= ry + rh) {
+                const percent = (dx - rx) / rw;
                 this.setMaxMagicAnts(Math.floor(1 + percent * 99));
                 return true;
             }
@@ -913,8 +954,8 @@ class SettingsSystem {
         // 8. Particles 滑块
         if (this._particleSliderRect) {
             const [rx, ry, rw, rh] = this._particleSliderRect;
-            if (x >= rx && x <= rx + rw && y >= ry && y <= ry + rh) {
-                const percent = (x - rx) / rw;
+            if (dx >= rx && dx <= rx + rw && dy >= ry && dy <= ry + rh) {
+                const percent = (dx - rx) / rw;
                 this.setMaxParticles(Math.floor(50 + percent * 450));
                 return true;
             }
@@ -926,10 +967,14 @@ class SettingsSystem {
     handleMouseMove(x: number, y: number) {
         if (!this.panelOpen) return;
         if (this.isDraggingScroll && this._scrollThumbRect && this._scrollBarRect) {
+            // Convert screen coords to design coords (same as handleClick).
+            const scale = this.panelScale || 1;
+            const ox = this.panelOriginX;
+            const oy = this.panelOriginY;
+            const dy = oy + (y - oy) / scale - this.dragStartY;
+
             const th = this._scrollThumbRect[3];
             const scrollBarH = this._scrollBarRect[3];
-            const dy = y - this.dragStartY;
-
             const maxTrack = scrollBarH - th;
             if (maxTrack > 0) {
                 const ratio = dy / maxTrack;
@@ -2974,10 +3019,11 @@ export class GameClient {
       h: (joyRadius + 16) * 2,
     };
     // Action buttons bottom-right (Spread = Space, Contract = Shift)
-    // Spread +25%, Contract +10%, both circular
+    // Spread +25%, Contract +10%, both circular — then +20% radius on both
+    // so the two right-hand action circles are easier to hit on mobile.
     const btnSize = shortLandscape ? 54 : Math.min(70, Math.max(54, this.w * 0.15));
-    const spreadBtnSize = Math.round(btnSize * 1.25);
-    const contractBtnSize = Math.round(btnSize * 1.10);
+    const spreadBtnSize = Math.round(btnSize * 1.25 * 1.2);
+    const contractBtnSize = Math.round(btnSize * 1.10 * 1.2);
     const gap = shortLandscape ? 8 : 12;
     const rightX = this.w - spreadBtnSize - (shortLandscape ? 12 : 18);
     const baseY = this.h - hotbarH - spreadBtnSize - gap - contractBtnSize - (shortLandscape ? 10 : 22);
@@ -3757,28 +3803,30 @@ export class GameClient {
   /** Geometry for the scrollable item grid + header widgets inside the bag panel. */
   private bagLayout() {
     const p = this.bagPanelRect();
+    const scale = Math.min(1, p.w / 380);
     const cols = 5;
-    const gap = 10;
-    const pad = 15;
-    const slotSize = Math.max(28, Math.floor((p.w - pad * 2 - gap * (cols - 1)) / cols));
+    const gap = 10 * scale;
+    const pad = 15 * scale;
+    const slotSize = Math.max(28 * scale, Math.floor((p.w - pad * 2 - gap * (cols - 1)) / cols));
     const itemHeight = slotSize + gap;
-    const headerH = 44;
+    const headerH = 44 * scale;
     const barY = p.y + headerH;
-    const barH = 28;
+    const barH = 28 * scale;
     const dropW = Math.min(120, p.w * 0.3);
-    const barGap = 6;
+    const barGap = 6 * scale;
     const barW = p.w - dropW - barGap - pad * 2;
     const barX = p.x + pad;
     const dropX = barX + barW + barGap;
-    const statsH = 92;
-    const gridTop = barY + barH + 12;
-    const gridBottom = p.y + p.h - statsH - 6;
+    const statsH = 92 * scale;
+    const gridTop = barY + barH + 12 * scale;
+    const gridBottom = p.y + p.h - statsH - 6 * scale;
     const gridH = Math.max(1, gridBottom - gridTop);
     const maxVisibleRows = Math.max(1, Math.floor(gridH / itemHeight));
     const scrollTrack: Rect = { x: p.x + p.w - pad + 2, y: gridTop, w: 6, h: gridH };
     return {
       panel: p,
       compact: false,
+      scale,
       cols,
       gap,
       pad,
@@ -3795,7 +3843,7 @@ export class GameClient {
       gridH,
       maxVisibleRows,
       statsH,
-      closeRect: { x: p.x + p.w - 34, y: p.y + 10, w: 24, h: 24 } as Rect,
+      closeRect: { x: p.x + p.w - 34 * scale, y: p.y + 10 * scale, w: 24 * scale, h: 24 * scale } as Rect,
       scrollTrack,
     };
   }
@@ -3956,6 +4004,7 @@ export class GameClient {
     return {
       panel: p,
       compact: false,
+      scale,
       cols,
       gap: gapSmall,
       pad,
@@ -4669,6 +4718,17 @@ export class GameClient {
         this.vk.numMode = false;
         return;
       }
+    }
+
+    // Death screen buttons (Respawn / Main menu) outrank the mobile joystick
+    // and action buttons. The joystick's "start from any bottom-left touch"
+    // fallback would otherwise swallow taps that land on the Respawn button
+    // when it overlaps the joystick region, leaving the player unable to
+    // respawn. Route the press straight to gameClick so the buttons win.
+    if (this.scene === "game" && !this.alive) {
+      if (e.button === 2) return;
+      this.gameClick(p.x, p.y, e.shiftKey);
+      return;
     }
 
     // Mobile controls: spread (Space) / contract (Shift) / joystick
@@ -7072,10 +7132,10 @@ export class GameClient {
     ctx.strokeStyle = "#3f7dc2";
     ctx.stroke();
 
-    text(ctx, "Inventory", p.x + p.w / 2, p.y + (layout.compact ? 18 : 24), layout.compact ? 17 : 20, "#ffffff");
+    text(ctx, "Inventory", p.x + p.w / 2, p.y + 24 * layout.scale, 20 * layout.scale, "#ffffff");
 
     // close button
-    button(ctx, layout.closeRect, "x", "#e53232", hit(layout.closeRect, this.mx, this.my), 15);
+    button(ctx, layout.closeRect, "x", "#e53232", hit(layout.closeRect, this.mx, this.my), 15 * layout.scale);
 
     // search bar + biome dropdown
     const barRect: Rect = { x: layout.barX, y: layout.barY, w: layout.barW, h: layout.barH };
@@ -7149,8 +7209,9 @@ export class GameClient {
 
   private drawBagRarityStats(ctx: CanvasRenderingContext2D, layout: ReturnType<GameClient["bagLayout"]>) {
     const p = layout.panel;
+    const sc = layout.scale;
     const panelH = layout.statsH;
-    const panelY = p.y + p.h - panelH - 4;
+    const panelY = p.y + p.h - panelH - 4 * sc;
     const panelX = p.x + layout.pad;
     const panelW = p.w - layout.pad * 2;
 
@@ -7161,33 +7222,33 @@ export class GameClient {
     ctx.fill();
 
     const stats = this.bagRarityStats();
-    const total = stats.reduce((sum, s) => sum + s.count, 0);
-    text(ctx, `Summary: ${this.formatBagNumber(total)}`, panelX + 12, panelY + (layout.compact ? 12 : 16), layout.compact ? 10 : 12, "#ffffff", "left");
+    const total = stats.reduce((sum, st) => sum + st.count, 0);
+    text(ctx, `Summary: ${this.formatBagNumber(total)}`, panelX + 12 * sc, panelY + 16 * sc, 12 * sc, "#ffffff", "left");
 
-    const visible = stats.filter((s) => s.count > 0).reverse();
+    const visible = stats.filter((st) => st.count > 0).reverse();
     if (visible.length === 0) {
-      text(ctx, "Empty", panelX + panelW / 2, panelY + panelH / 2 + 8, 13, "rgba(255,255,255,0.8)");
+      text(ctx, "Empty", panelX + panelW / 2, panelY + panelH / 2 + 8 * sc, 13 * sc, "rgba(255,255,255,0.8)");
       ctx.restore();
       return;
     }
 
-    const cols = layout.compact ? 4 : 3;
-    const colWidth = (panelW - 16) / cols;
-    const rowHeight = layout.compact ? 14 : 18;
-    const startX = panelX + 10;
-    const startY = panelY + (layout.compact ? 30 : 40);
-    const fontSize = layout.compact ? 9 : 10;
-    visible.forEach((s, i) => {
+    const cols = 3;
+    const colWidth = (panelW - 16 * sc) / cols;
+    const rowHeight = 18 * sc;
+    const startX = panelX + 10 * sc;
+    const startY = panelY + 40 * sc;
+    const fontSize = 10 * sc;
+    visible.forEach((st, i) => {
       const col = i % cols;
       const row = Math.floor(i / cols);
       const x = startX + col * colWidth;
       const y = startY + row * rowHeight;
-      const maxName = layout.compact ? 5 : 10;
-      const label = s.name.length > maxName ? s.name.slice(0, layout.compact ? 3 : 4) + ".." : s.name;
+      const maxName = 10;
+      const label = st.name.length > maxName ? st.name.slice(0, 4) + ".." : st.name;
       text(ctx, label, x, y, fontSize, "#ffffff", "left");
       ctx.font = `${fontSize}px sans-serif`;
       const tw = ctx.measureText(label).width;
-      text(ctx, this.formatBagNumber(s.count), x + tw + 4, y, fontSize, s.color, "left");
+      text(ctx, this.formatBagNumber(st.count), x + tw + 4 * sc, y, fontSize, st.color, "left");
     });
     ctx.restore();
   }
@@ -7229,25 +7290,25 @@ export class GameClient {
     ctx.strokeStyle = panelBorder;
     ctx.stroke();
 
-    text(ctx, this.craftMode === "normal" ? "Craft" : this.craftMode === "oracle" ? "Oracle" : "Trade", p.x + p.w * 0.38, p.y + 24, 22, "#ffffff");
-    button(ctx, layout.closeRect, "x", "#e53232", hit(layout.closeRect, this.mx, this.my), 14);
+    text(ctx, this.craftMode === "normal" ? "Craft" : this.craftMode === "oracle" ? "Oracle" : "Trade", p.x + p.w * 0.38, p.y + 24 * layout.scale, 22 * layout.scale, "#ffffff");
+    button(ctx, layout.closeRect, "x", "#e53232", hit(layout.closeRect, this.mx, this.my), 14 * layout.scale);
 
     // Action button centered beside the pentagon.
     const btn = layout.actionRect;
     const label = this.craftActionLabel();
-    button(ctx, btn, label.text, accent, hit(btn, this.mx, this.my), 15, label.enabled);
+    button(ctx, btn, label.text, accent, hit(btn, this.mx, this.my), 15 * layout.scale, label.enabled);
     // small cooldown hint next to button if Oracle/Trade
     if (this.craftMode !== "normal") {
       const cd = this.craftCooldownLeft(this.craftMode as "oracle" | "trade");
       if (cd > 0) {
-        text(ctx, this.formatCooldown(cd), btn.x + btn.w / 2, btn.y + btn.h + 12, 11, "#ffd54a");
+        text(ctx, this.formatCooldown(cd), btn.x + btn.w / 2, btn.y + btn.h + 12 * layout.scale, 11 * layout.scale, "#ffd54a");
       }
     }
 
     // Compact Cr / Or / Tr selectors in the top-right row.
     for (const { mode, rect, label: lab, color } of this.craftModeRects()) {
       const active = this.craftMode === mode;
-      button(ctx, rect, lab, active ? color : "#3f7dc2", hit(rect, this.mx, this.my), 12);
+      button(ctx, rect, lab, active ? color : "#3f7dc2", hit(rect, this.mx, this.my), 12 * layout.scale);
     }
 
     // Biome and search filters directly above the matrix.
@@ -7276,7 +7337,7 @@ export class GameClient {
       ctx.save();
       ctx.globalAlpha = Math.min(1, this.craftMsgLife);
       const bad = /fail|cooldown|need|cannot|refused|nothing|first|max/i.test(this.craftMsg);
-      text(ctx, this.craftMsg, p.x + p.w * 0.38, layout.infoY + 14, 12, bad ? "#ffbcbc" : "#c9ffd6");
+      text(ctx, this.craftMsg, p.x + p.w * 0.38, layout.infoY + 14 * layout.scale, 12 * layout.scale, bad ? "#ffbcbc" : "#c9ffd6");
       ctx.restore();
     }
 
@@ -7296,14 +7357,15 @@ export class GameClient {
   /** Compact craft log panel at top-left (mirrors StarCraftUI.drawCraftLog) */
   private drawCraftLogPanel(ctx: CanvasRenderingContext2D, layout: ReturnType<GameClient["craftLayout"]>) {
     const r = layout.logRect;
+    const sc = layout.scale;
     ctx.save();
-    roundRect(ctx, r.x, r.y, r.w, r.h, 6);
+    roundRect(ctx, r.x, r.y, r.w, r.h, 6 * sc);
     ctx.fillStyle = "rgba(0,0,0,0.18)";
     ctx.fill();
     ctx.strokeStyle = "rgba(255,255,255,0.12)";
     ctx.lineWidth = 1;
     ctx.stroke();
-    text(ctx, "Craft Log", r.x + 8, r.y + (layout.compact ? 10 : 12), layout.compact ? 9 : 11, "#ffffff", "left");
+    text(ctx, "Craft Log", r.x + 8 * sc, r.y + 12 * sc, 11 * sc, "#ffffff", "left");
     const logs = [
       { t: `Used: ${this.craftLogPetals}`, c: "#00E5FF" },
       { t: `Crafted: ${this.craftLogCrafted}`, c: "#FF5555" },
@@ -7312,7 +7374,7 @@ export class GameClient {
       { t: `${this.craftLogLast.slice(0, 18)}`, c: "#7db3ff" },
     ];
     logs.forEach((log, i) => {
-      text(ctx, log.t, r.x + 8, r.y + (layout.compact ? 21 : 26) + i * (layout.compact ? 10 : 12), layout.compact ? 8 : 10, log.c, "left");
+      text(ctx, log.t, r.x + 8 * sc, r.y + 26 * sc + i * 12 * sc, 10 * sc, log.c, "left");
     });
     ctx.restore();
   }
@@ -7443,7 +7505,7 @@ export class GameClient {
     for (let col = 0; col < layout.cols; col++) {
       const x = layout.gridStartX + col * (layout.slotSize + layout.gap) + layout.slotSize / 2;
       const rarityName = RARITIES[col]?.name ?? "";
-      text(ctx, layout.compact ? rarityName.slice(0, 3) : rarityName, x, layout.gridTop - (layout.compact ? 7 : 10), layout.compact ? 7 : 9, RARITIES[col]?.color ?? "rgba(255,255,255,0.6)");
+      text(ctx, rarityName, x, layout.gridTop - 10 * layout.scale, 9 * layout.scale, RARITIES[col]?.color ?? "rgba(255,255,255,0.6)");
     }
 
     if (rows.length === 0) {
@@ -7452,7 +7514,7 @@ export class GameClient {
         this.craftSearchText || this.craftBiome !== "All" ? "No cards match filter" : "Bag empty",
         p.x + p.w / 2,
         layout.gridTop + layout.gridH / 2,
-        12,
+        12 * layout.scale,
         "rgba(255,255,255,0.70)",
       );
     }
@@ -7472,10 +7534,8 @@ export class GameClient {
     const submitting = this.craftPhase === "rotating" || this.craftPhase === "waiting";
     const spin = this.craftSpin > 0 ? ease.inOutCubic(1 - this.craftSpin / 0.8) * Math.PI * 2 : 0;
 
-    if (!layout.compact) {
-      text(ctx, "Combine cards to upgrade rarity", p.x + p.w * 0.38, layout.craftBottom - 46, 11, "rgba(255,255,255,0.85)");
-      text(ctx, "Click: load 5 cards · Shift+click: load all (unlimited)", p.x + p.w * 0.38, layout.craftBottom - 34, 9, "rgba(255,255,255,0.55)");
-    }
+    text(ctx, "Combine cards to upgrade rarity", p.x + p.w * 0.38, layout.craftBottom - 46 * layout.scale, 11 * layout.scale, "rgba(255,255,255,0.85)");
+    text(ctx, "Click: load 5 cards · Shift+click: load all (unlimited)", p.x + p.w * 0.38, layout.craftBottom - 34 * layout.scale, 9 * layout.scale, "rgba(255,255,255,0.55)");
 
     // Draw animated slots (pentagon with rotation/contraction)
     layout.bigSlots.forEach((baseRect, i) => {
@@ -7524,13 +7584,14 @@ export class GameClient {
 
     // Info lines below pentagon, above grid — not overlapping
     const y = layout.infoY;
+    const sc = layout.scale;
     if (!sel) {
-      text(ctx, "Pick a card from inventory below", layout.cx, y + 10, 12, "rgba(255,255,255,0.75)");
+      text(ctx, "Pick a card from inventory below", layout.cx, y + 10 * sc, 12 * sc, "rgba(255,255,255,0.75)");
       return;
     }
     const def = ITEMS[sel.item];
     const chance = craftChanceFor(sel.rarity);
-    text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, layout.cx, y, 14, RARITIES[sel.rarity].color);
+    text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, layout.cx, y, 14 * sc, RARITIES[sel.rarity].color);
     const loaded = this.craftTotalLoaded();
     const ready = loaded > 0;
     const status = submitting
@@ -7542,15 +7603,15 @@ export class GameClient {
       ctx,
       status,
       layout.cx,
-      y + 16,
-      11,
+      y + 16 * sc,
+      11 * sc,
       submitting || ready ? "#c9ffd6" : "#ffbcbc",
     );
     if (sel.rarity < MAX_CRAFT_RARITY && chance !== undefined) {
       const next = sel.rarity + 1;
-      text(ctx, `→ ${RARITIES[next].name} ${(chance * 100).toFixed(1)}%`, layout.cx, y + 28, 11, RARITIES[next].color);
+      text(ctx, `→ ${RARITIES[next].name} ${(chance * 100).toFixed(1)}%`, layout.cx, y + 28 * sc, 11 * sc, RARITIES[next].color);
     } else {
-      text(ctx, "Max rarity", layout.cx, y + 28, 11, "rgba(255,255,255,0.65)");
+      text(ctx, "Max rarity", layout.cx, y + 28 * sc, 11 * sc, "rgba(255,255,255,0.65)");
     }
   }
 
@@ -7561,6 +7622,7 @@ export class GameClient {
     mode: "oracle" | "trade",
   ) {
     const p = layout.panel;
+    const sc = layout.scale;
     const isOracle = mode === "oracle";
     const sel = this.craftSel;
     const avail = sel ? this.countOf(sel.item, sel.rarity) : 0;
@@ -7570,14 +7632,14 @@ export class GameClient {
       ctx,
       isOracle ? "Upgrade 1 rarity — guaranteed" : "Exchange for Coins",
       layout.cx,
-      r.y - 18,
-      11,
+      r.y - 18 * sc,
+      11 * sc,
       "rgba(255,255,255,0.85)",
     );
 
     // background
     ctx.save();
-    roundRect(ctx, r.x, r.y, r.w, r.h, 8);
+    roundRect(ctx, r.x, r.y, r.w, r.h, 8 * sc);
     ctx.fillStyle = isOracle ? "#1E3C78" : "#1E6432";
     ctx.fill();
     ctx.restore();
@@ -7602,29 +7664,29 @@ export class GameClient {
       drawCard(ctx, r, { item: sel.item, rarity: sel.rarity, count: avail });
       ctx.restore();
     } else {
-      text(ctx, "+", r.x + r.w / 2, r.y + r.h / 2, 22, "rgba(255,255,255,0.35)");
+      text(ctx, "+", r.x + r.w / 2, r.y + r.h / 2, 22 * sc, "rgba(255,255,255,0.35)");
     }
 
     const y = layout.infoY;
     if (sel) {
       const def = ITEMS[sel.item];
-      text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, layout.cx, y, 13, RARITIES[sel.rarity].color);
+      text(ctx, `${RARITIES[sel.rarity].name} ${def.name}`, layout.cx, y, 13 * sc, RARITIES[sel.rarity].color);
       if (isOracle) {
         const required = oracleRequiredCount(sel.rarity);
         if (required === undefined) {
-          text(ctx, "Cannot Oracle this rarity", layout.cx, y + 16, 11, "#ffbcbc");
+          text(ctx, "Cannot Oracle this rarity", layout.cx, y + 16 * sc, 11 * sc, "#ffbcbc");
         } else {
-          text(ctx, `Need ${required} — have ${avail}`, layout.cx, y + 16, 11, avail >= required ? "#c9ffd6" : "#ffbcbc");
+          text(ctx, `Need ${required} — have ${avail}`, layout.cx, y + 16 * sc, 11 * sc, avail >= required ? "#c9ffd6" : "#ffbcbc");
           const target = sel.rarity + ORACLE_SKIP;
           if (target < RARITIES.length) {
-            text(ctx, `→ ${RARITIES[target].name}`, layout.cx, y + 28, 11, RARITIES[target].color);
+            text(ctx, `→ ${RARITIES[target].name}`, layout.cx, y + 28 * sc, 11 * sc, RARITIES[target].color);
           }
         }
       } else {
-        text(ctx, `${avail} → ${avail} Coin${avail === 1 ? "" : "s"}`, layout.cx, y + 16, 11, "#ffd54a");
+        text(ctx, `${avail} → ${avail} Coin${avail === 1 ? "" : "s"}`, layout.cx, y + 16 * sc, 11 * sc, "#ffd54a");
       }
     } else {
-      text(ctx, "Pick a card below", layout.cx, y + 10, 11, "rgba(255,255,255,0.7)");
+      text(ctx, "Pick a card below", layout.cx, y + 10 * sc, 11 * sc, "rgba(255,255,255,0.7)");
     }
 
     const cooldownMs = this.craftCooldownLeft(mode);
@@ -7633,8 +7695,8 @@ export class GameClient {
       ctx,
       `${isOracle ? "Oracle" : "Trade"}: ${ready ? "Ready" : this.formatCooldown(cooldownMs)}`,
       layout.cx,
-      y + 42,
-      10,
+      y + 42 * sc,
+      10 * sc,
       ready ? "#c9ffd6" : "#ffd54a",
     );
   }
