@@ -539,16 +539,18 @@ class SettingsSystem {
 
         const viewW = x * 2;
         const viewH = y * 2;
-        // Mobile: narrower + shorter panel so it doesn't cover the whole screen.
+        // Mobile: narrower panel so it doesn't cover the whole screen.
         const isMobileView = viewW < 640;
-        // Design dimensions (desktop baseline). Everything inside is laid out
-        // against this coordinate space, then scaled down uniformly so the
-        // panel AND all of its contents (text, checkboxes, sliders, buttons)
-        // shrink together on small screens.
+        // Portrait screens (tall & narrow) get a taller design height so the
+        // panel doesn't shrink too aggressively — the width-limited scale
+        // factor (280/320 ≈ 0.88) still applies, but a larger DESIGN_H means
+        // the actual rendered height = DESIGN_H × scale is comfortably tall.
+        const isPortrait = viewH >= viewW;
         const DESIGN_W = 320;
-        const DESIGN_H = 480;
+        const DESIGN_H = isPortrait ? 540 : 480;
         const maxW = Math.min(isMobileView ? 280 : 320, Math.max(isMobileView ? 200 : 240, viewW - 24));
-        const maxH = Math.max(140, Math.min(isMobileView ? 380 : 480, viewH - (viewH <= 600 ? 16 : 32)));
+        const maxH_cap = isPortrait ? 540 : 480;
+        const maxH = Math.max(140, Math.min(maxH_cap, viewH - (viewH <= 600 ? 8 : 24)));
         const scale = Math.min(maxW / DESIGN_W, maxH / DESIGN_H);
         const actualW = DESIGN_W * scale;
         const actualH = DESIGN_H * scale;
@@ -3741,12 +3743,24 @@ export class GameClient {
         dx = Math.cos(angle) * norm;
         dy = Math.sin(angle) * norm;
       }
+    } else if (this.isMobile) {
+      // On mobile, when the joystick is NOT active the player should stand
+      // still. Do NOT fall back to mouse-position movement — the last touch
+      // point (often the joystick area on the left) would otherwise keep
+      // driving the player leftward. Only physical keys (rare on phones)
+      // can still move the player here.
+      if (!uiBusy) {
+        if (this.keys.has("KeyA") || this.keys.has("ArrowLeft")) dx -= 1;
+        if (this.keys.has("KeyD") || this.keys.has("ArrowRight")) dx += 1;
+        if (this.keys.has("KeyW") || this.keys.has("ArrowUp")) dy -= 1;
+        if (this.keys.has("KeyS") || this.keys.has("ArrowDown")) dy += 1;
+      }
     } else {
-      // Mouse movement is measured from the camera/screen centre (where the
-      // player is rendered). The server remains authoritative for acceleration,
-      // wall collision, and map bounds; this is only the desired direction.
-      // Close to the player, reduce the input so it eases to a stop instead of
-      // continuously overshooting the cursor.
+      // Desktop: mouse movement is measured from the camera/screen centre
+      // (where the player is rendered). The server remains authoritative for
+      // acceleration, wall collision, and map bounds; this is only the desired
+      // direction. Close to the player, reduce the input so it eases to a stop
+      // instead of continuously overshooting the cursor.
       const mouseDx = this.mx - this.w / 2;
       const mouseDy = this.my - this.h / 2;
       const mouseDistance = Math.hypot(mouseDx, mouseDy);
@@ -3785,15 +3799,20 @@ export class GameClient {
   }
 
   private bagPanelRect(): Rect {
-    // Same layout for all screens — mobile just gets proportionally smaller (50%)
+    // Landscape phones get a much bigger bag: width +50% and height ×2 so the
+    // inventory isn't cramped into a tiny corner. Portrait phones and desktop
+    // keep the original proportional sizing.
     const isMobile = this.isMobile || this.w < 640;
+    const isLandscape = this.w > this.h;
     const mobileScale = isMobile ? 0.5 : 1;
-    const w = Math.min(380, this.w * 0.92) * mobileScale;
+    const widthMult = isMobile && isLandscape ? 1.5 : 1;   // +50% width
+    const heightMult = isMobile && isLandscape ? 2 : 1;    // ×2 height
+    const w = Math.min(380, this.w * 0.92) * mobileScale * widthMult;
     const reservedHotbar = this.scene === "game" ? this.hotbarHeight() : 0;
     const topGap = 18 * mobileScale;
     const bottomGap = 26 * mobileScale;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
-    const h = Math.min(610, availableH) * mobileScale;
+    const h = Math.min(610, availableH) * mobileScale * heightMult;
     const hidden = this.h + 20;
     const shown = topGap;
     const t = ease.outCubic(this.bagAnim);
@@ -3916,15 +3935,20 @@ export class GameClient {
   }
 
   private craftPanelRect(): Rect {
-    // Same layout for all screens — mobile just gets proportionally smaller (50%)
+    // Landscape phones get a bigger craft panel: width +25% and height ×2 so
+    // the pentagon + grid aren't squished. Portrait phones and desktop keep
+    // the original proportional sizing.
     const isMobile = this.isMobile || this.w < 640;
+    const isLandscape = this.w > this.h;
     const mobileScale = isMobile ? 0.5 : 1;
-    const w = Math.min(800, Math.floor(this.w * 0.92)) * mobileScale;
+    const widthMult = isMobile && isLandscape ? 1.25 : 1;  // +25% width
+    const heightMult = isMobile && isLandscape ? 2 : 1;    // ×2 height
+    const w = Math.min(800, Math.floor(this.w * 0.92)) * mobileScale * widthMult;
     const reservedHotbar = this.scene === "game" ? this.hotbarHeight() : 0;
     const topGap = 12 * mobileScale;
     const bottomGap = 18 * mobileScale;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
-    const h = Math.min(560, availableH) * mobileScale;
+    const h = Math.min(560, availableH) * mobileScale * heightMult;
     const t = ease.outCubic(this.craftAnim);
     const hidden = this.w + 20;
     const shown = this.w - w - 16;
@@ -4644,8 +4668,11 @@ export class GameClient {
     this.my = p.y;
     // Account panel hover tracking (only when open).
     if (this.accountSystem.panelOpen) this.accountSystem.handleMouseMove(p.x, p.y);
-    // Mobile joystick handling: if active, clamp current point to radius
-    if (this.isMobile && this.mobileJoystick.active) {
+    // Mobile joystick handling: if active, clamp current point to radius.
+    // Only follow the pointer that originally started the joystick — other
+    // touches (e.g. dragging the Spread/Contract buttons on the right) must
+    // not move the joystick knob.
+    if (this.isMobile && this.mobileJoystick.active && this.mobileJoystick.pointerId === e.pointerId) {
       const dx = p.x - this.mobileJoystick.centerX;
       const dy = p.y - this.mobileJoystick.centerY;
       const dist = Math.hypot(dx, dy);
