@@ -81,7 +81,7 @@ interface Squad {
 }
 
 /** Maximum level gap between squad members */
-const SQUAD_LEVEL_GAP_MAX = 20;
+const SQUAD_LEVEL_GAP_MAX = 30;
 
 /** Maximum members per squad */
 const SQUAD_MAX_MEMBERS = 4;
