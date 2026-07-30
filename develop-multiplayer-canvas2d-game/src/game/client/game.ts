@@ -1446,9 +1446,9 @@ class VirtualKeyboard {
   numMode = false;
 
   private readonly keysNormal = [
-    ['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
-    ['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'],
-    ['Z', 'X', 'C', 'V', 'B', 'N', 'M'],
+    ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p'],
+    ['a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', '_'],
+    ['z', 'x', 'c', 'v', 'b', 'n', 'm', '/', '(', ')'],
   ];
   private readonly keysNum = [
     ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'],
@@ -3816,8 +3816,8 @@ export class GameClient {
     const bottomGap = 26 * mobileScale;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
     let h = Math.min(610, availableH) * mobileScale * heightMult;
-    // Inventory is 40% taller in the game scene so players can see more items.
-    if (this.scene === "game") h *= 1.4;
+    // Inventory is 20% taller on mobile in-game so items aren't cramped.
+    if (this.scene === "game" && this.isMobile) h *= 1.2;
     const hidden = this.h + 20;
     const shown = topGap;
     const t = ease.outCubic(this.bagAnim);
