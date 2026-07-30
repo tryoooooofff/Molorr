@@ -2974,12 +2974,15 @@ export class GameClient {
       h: (joyRadius + 16) * 2,
     };
     // Action buttons bottom-right (Spread = Space, Contract = Shift)
+    // Spread +25%, Contract +10%, both circular
     const btnSize = shortLandscape ? 54 : Math.min(70, Math.max(54, this.w * 0.15));
+    const spreadBtnSize = Math.round(btnSize * 1.25);
+    const contractBtnSize = Math.round(btnSize * 1.10);
     const gap = shortLandscape ? 8 : 12;
-    const rightX = this.w - btnSize - (shortLandscape ? 12 : 18);
-    const baseY = this.h - hotbarH - btnSize * 2 - gap - (shortLandscape ? 10 : 22);
-    this.mobileSpreadRect = { x: rightX, y: baseY, w: btnSize, h: btnSize };
-    this.mobileContractRect = { x: rightX, y: baseY + btnSize + gap, w: btnSize, h: btnSize };
+    const rightX = this.w - spreadBtnSize - (shortLandscape ? 12 : 18);
+    const baseY = this.h - hotbarH - spreadBtnSize - gap - contractBtnSize - (shortLandscape ? 10 : 22);
+    this.mobileSpreadRect = { x: rightX, y: baseY, w: spreadBtnSize, h: spreadBtnSize };
+    this.mobileContractRect = { x: rightX + (spreadBtnSize - contractBtnSize) / 2, y: baseY + spreadBtnSize + gap, w: contractBtnSize, h: contractBtnSize };
   }
 
   private tryEnterFullscreen() {
@@ -3736,13 +3739,15 @@ export class GameClient {
   }
 
   private bagPanelRect(): Rect {
-    // Same layout for all screens — mobile just gets proportionally smaller
-    const w = Math.min(380, this.w * 0.92);
+    // Same layout for all screens — mobile just gets proportionally smaller (50%)
+    const isMobile = this.isMobile || this.w < 640;
+    const mobileScale = isMobile ? 0.5 : 1;
+    const w = Math.min(380, this.w * 0.92) * mobileScale;
     const reservedHotbar = this.scene === "game" ? this.hotbarHeight() : 0;
-    const topGap = 18;
-    const bottomGap = 26;
+    const topGap = 18 * mobileScale;
+    const bottomGap = 26 * mobileScale;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
-    const h = Math.min(610, availableH);
+    const h = Math.min(610, availableH) * mobileScale;
     const hidden = this.h + 20;
     const shown = topGap;
     const t = ease.outCubic(this.bagAnim);
@@ -3863,13 +3868,15 @@ export class GameClient {
   }
 
   private craftPanelRect(): Rect {
-    // Same layout for all screens — mobile just gets proportionally smaller
-    const w = Math.min(800, Math.floor(this.w * 0.92));
+    // Same layout for all screens — mobile just gets proportionally smaller (50%)
+    const isMobile = this.isMobile || this.w < 640;
+    const mobileScale = isMobile ? 0.5 : 1;
+    const w = Math.min(800, Math.floor(this.w * 0.92)) * mobileScale;
     const reservedHotbar = this.scene === "game" ? this.hotbarHeight() : 0;
-    const topGap = 12;
-    const bottomGap = 18;
+    const topGap = 12 * mobileScale;
+    const bottomGap = 18 * mobileScale;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
-    const h = Math.min(560, availableH);
+    const h = Math.min(560, availableH) * mobileScale;
     const t = ease.outCubic(this.craftAnim);
     const hidden = this.w + 20;
     const shown = this.w - w - 16;
@@ -4649,6 +4656,21 @@ export class GameClient {
       this.gameClick(p.x, p.y, e.shiftKey);
       return;
     }
+    // Mobile: clicking the chatbox triggers the keyboard (check BEFORE joystick)
+    if (this.isMobile && this.scene === "game" && this.bagAnim < 0.2 && this.craftAnim < 0.2) {
+      const chatW = Math.min(400, this.w * 0.35);
+      const chatY = this.h - this.hotbarHeight() - 17;
+      const chatRect: Rect = { x: 15, y: chatY, w: chatW, h: 65 };
+      if (hit(chatRect, p.x, p.y)) {
+        this.chat.inputActive = true;
+        this.chat.inputText = "";
+        this.vk.active = true;
+        this.vk.target = 'chat';
+        this.vk.numMode = false;
+        return;
+      }
+    }
+
     // Mobile controls: spread (Space) / contract (Shift) / joystick
     if (this.isMobile) {
       if (this.scene === "menu" && this.mobileFullscreenBtn && hit(this.mobileFullscreenBtn, p.x, p.y)) {
@@ -6999,18 +7021,22 @@ export class GameClient {
       ctx.stroke();
       ctx.restore();
 
-      // Spread / Contract buttons (Space / Shift)
+      // Spread / Contract buttons (Space / Shift) — circular
       const drawMobileAction = (rect: Rect | null, label: string, active: boolean, sub: string) => {
         if (!rect) return;
+        const cx = rect.x + rect.w / 2;
+        const cy = rect.y + rect.h / 2;
+        const r = Math.min(rect.w, rect.h) / 2;
         ctx.save();
-        roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 14);
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
         ctx.fillStyle = active ? (label === "SPREAD" ? "#3fae60" : "#c9762b") : "rgba(18,24,32,0.72)";
         ctx.fill();
         ctx.lineWidth = active ? 3 : 2;
         ctx.strokeStyle = active ? "#ffffff" : "rgba(255,255,255,0.25)";
         ctx.stroke();
-        text(ctx, label, rect.x + rect.w / 2, rect.y + rect.h / 2 - 6, Math.max(11, rect.w * 0.18), "#ffffff");
-        text(ctx, sub, rect.x + rect.w / 2, rect.y + rect.h / 2 + 12, Math.max(9, rect.w * 0.12), active ? "#ffffff" : "rgba(255,255,255,0.6)");
+        text(ctx, label, cx, cy - 6, Math.max(11, r * 0.28), "#ffffff");
+        text(ctx, sub, cx, cy + 12, Math.max(9, r * 0.2), active ? "#ffffff" : "rgba(255,255,255,0.6)");
         ctx.restore();
       };
       drawMobileAction(this.mobileSpreadRect, "SPREAD", this.mobileSpreadActive, "[SPACE]");
