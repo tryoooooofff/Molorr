@@ -4787,13 +4787,15 @@ private bagLayout() {
       }
       if (this.scene === "game" && this.bagAnim < 0.2 && this.craftAnim < 0.2) {
         if (this.mobileSpreadRect && hit(this.mobileSpreadRect, p.x, p.y)) {
-          this.mobileSpreadActive = true;
+          this.mobileSpreadActive = !this.mobileSpreadActive;
+          if (this.mobileSpreadActive) this.mobileContractActive = false;
           this.lastTouchTime = performance.now();
           try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
           return;
         }
         if (this.mobileContractRect && hit(this.mobileContractRect, p.x, p.y)) {
-          this.mobileContractActive = true;
+          this.mobileContractActive = !this.mobileContractActive;
+          if (this.mobileContractActive) this.mobileSpreadActive = false;
           this.lastTouchTime = performance.now();
           try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
           return;
@@ -4851,8 +4853,8 @@ private bagLayout() {
     if (this.accountSystem.panelOpen) this.accountSystem.handleMouseUp();
     // Release mobile touch buttons
     if (this.isMobile) {
-      this.mobileSpreadActive = false;
-      this.mobileContractActive = false;
+      // Spread/Contract are toggle buttons — onPointerUp must NOT clear them.
+      // Only the tab-blur handler (releaseGameplayInput) resets them.
       if (this.mobileJoystick.active && (this.mobileJoystick.pointerId === null || this.mobileJoystick.pointerId === e.pointerId)) {
         this.mobileJoystick.active = false;
         this.mobileJoystick.currX = this.mobileJoystick.centerX;
