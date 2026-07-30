@@ -963,7 +963,10 @@ class SettingsSystem {
             }
         }
 
-        return false;
+        // Consume the click: any press inside the settings panel (even on its
+        // background) must NOT fall through to UI below. The only way out is
+        // the close button (handled above) or pressing the toggle key again.
+        return true;
     }
 
     handleMouseMove(x: number, y: number) {
@@ -3936,13 +3939,19 @@ export class GameClient {
 
   private craftPanelRect(): Rect {
     // Landscape phones get a bigger craft panel: width +25% and height ×2 so
-    // the pentagon + grid aren't squished. Portrait phones and desktop keep
-    // the original proportional sizing.
+    // the pentagon + grid aren't squished. All mobile gets an extra +10%
+    // width / +15% height bump so the craft UI is comfortably large.
+    // Portrait phones and desktop keep the original proportional sizing
+    // (desktop gets no mobile bump).
     const isMobile = this.isMobile || this.w < 640;
     const isLandscape = this.w > this.h;
     const mobileScale = isMobile ? 0.5 : 1;
-    const widthMult = isMobile && isLandscape ? 1.25 : 1;  // +25% width
-    const heightMult = isMobile && isLandscape ? 2 : 1;    // ×2 height
+    const landscapeW = isMobile && isLandscape ? 1.25 : 1;  // +25% width (landscape)
+    const landscapeH = isMobile && isLandscape ? 2 : 1;     // ×2 height (landscape)
+    const mobileBumpW = isMobile ? 1.10 : 1;                // +10% width (all mobile)
+    const mobileBumpH = isMobile ? 1.15 : 1;                // +15% height (all mobile)
+    const widthMult = landscapeW * mobileBumpW;
+    const heightMult = landscapeH * mobileBumpH;
     const w = Math.min(800, Math.floor(this.w * 0.92)) * mobileScale * widthMult;
     const reservedHotbar = this.scene === "game" ? this.hotbarHeight() : 0;
     const topGap = 12 * mobileScale;
@@ -5636,7 +5645,10 @@ export class GameClient {
     }
 
     this.bagSearchActive = false;
-    return false;
+    // Consume the click: any press that lands inside the bag panel (even on
+    // its background) must NOT fall through to HUD buttons, hotbar cells, or
+    // the world below. Returning true tells the caller the click was handled.
+    return true;
   }
 
   private bagScrollThumbRect(layout: ReturnType<GameClient["bagLayout"]>): Rect {
