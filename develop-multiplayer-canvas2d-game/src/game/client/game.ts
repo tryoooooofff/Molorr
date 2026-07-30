@@ -1512,8 +1512,12 @@ class VirtualKeyboard {
     for (const kr of this.keyRects) {
       if (hit(kr.rect, mx, my)) {
         if (kr.action === 'done') {
+          // Chat mode: Done = Enter (send message)
+          if (this.target === 'chat') {
+            return { handled: true, key: 'Enter' };
+          }
           this.active = false;
-          return { handled: true, key: 'Enter' };
+          return { handled: true };
         }
         if (kr.action === 'toggle') {
           this.numMode = !this.numMode;
@@ -3676,7 +3680,7 @@ export class GameClient {
     let dy = 0;
     const uiBusy = this.drag !== null || this.bagAnim > 0.4 || this.craftAnim > 0.4 || this.chat.inputActive;
 
-    if (!uiBusy && this.isMobile && this.mobileJoystick.active && !this.vk.active) {
+    if (!uiBusy && this.isMobile && this.mobileJoystick.active) {
       // Joystick overrides mouse movement on phone
       const jdx = this.mobileJoystick.currX - this.mobileJoystick.centerX;
       const jdy = this.mobileJoystick.currY - this.mobileJoystick.centerY;
@@ -3732,13 +3736,13 @@ export class GameClient {
   }
 
   private bagPanelRect(): Rect {
+    // Same layout for all screens — mobile just gets proportionally smaller
     const w = Math.min(380, this.w * 0.92);
     const reservedHotbar = this.scene === "game" ? this.hotbarHeight() : 0;
     const topGap = 18;
     const bottomGap = 26;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
-    const idealH = 610;
-    const h = Math.min(idealH, availableH);
+    const h = Math.min(610, availableH);
     const hidden = this.h + 20;
     const shown = topGap;
     const t = ease.outCubic(this.bagAnim);
@@ -3859,6 +3863,7 @@ export class GameClient {
   }
 
   private craftPanelRect(): Rect {
+    // Same layout for all screens — mobile just gets proportionally smaller
     const w = Math.min(800, Math.floor(this.w * 0.92));
     const reservedHotbar = this.scene === "game" ? this.hotbarHeight() : 0;
     const topGap = 12;
@@ -3880,23 +3885,25 @@ export class GameClient {
    */
   private craftLayout() {
     const p = this.craftPanelRect();
-    const pad = 14;
-    const headerH = 42;
-    const tabsH = 32;
-    const barH = 26;
+    // Scale factor: shrink everything proportionally on smaller panels
+    const scale = Math.min(1, p.w / 800);
+    const pad = 14 * scale;
+    const headerH = 42 * scale;
+    const tabsH = 32 * scale;
+    const barH = 26 * scale;
 
     const logRect: Rect = {
       x: p.x + pad,
-      y: p.y + 10,
-      w: 150,
-      h: 82,
+      y: p.y + 10 * scale,
+      w: Math.min(150, p.w * 0.18),
+      h: 82 * scale,
     };
-    const tabsY = p.y + 10;
+    const tabsY = p.y + 10 * scale;
 
-    const bigSize = 70;
-    const radius = 80;
+    const bigSize = Math.max(34, Math.min(70, p.h * 0.13));
+    const radius = Math.max(38, Math.min(80, p.h * 0.14));
     const cx = p.x + p.w * 0.38;
-    const cy = p.y + 148;
+    const cy = p.y + Math.max(82, Math.min(148, p.h * 0.29));
 
     const bigSlots: Rect[] = [];
     for (let i = 0; i < CRAFT_CARD_COUNT; i++) {
@@ -3907,27 +3914,27 @@ export class GameClient {
     }
     const singleSlot: Rect = { x: cx - bigSize / 2, y: cy - bigSize / 2, w: bigSize, h: bigSize };
 
-    const resultSize = 88;
+    const resultSize = Math.min(66, Math.max(bigSize * 1.25, 54));
     const resultRect: Rect = { x: cx - resultSize / 2, y: cy - resultSize / 2, w: resultSize, h: resultSize };
 
-    const actionW = 110;
-    const actionH = 36;
+    const actionW = Math.min(110, p.w * 0.18);
+    const actionH = Math.min(36, p.h * 0.07);
     const actionRect: Rect = { x: p.x + p.w - actionW - 14, y: cy - actionH / 2, w: actionW, h: actionH };
-    const closeRect: Rect = { x: p.x + p.w - 34, y: p.y + 10, w: 24, h: 24 };
+    const closeRect: Rect = { x: p.x + p.w - 34, y: p.y + 10 * scale, w: 24, h: 24 };
 
-    const craftBottom = cy + radius + bigSize / 2 + 24;
-    const barGap = 8;
-    const dropW = 110;
+    const craftBottom = cy + radius + bigSize / 2 + 24 * scale;
+    const barGap = 8 * scale;
+    const dropW = Math.min(110, p.w * 0.2);
     const barW = Math.min(210, p.w * 0.34);
     const dropX = p.x + pad;
-    const barY = craftBottom + 4;
+    const barY = craftBottom + 4 * scale;
     const barX = dropX + dropW + barGap;
-    const infoY = barY + barH + 10;
-    const gridTop = infoY + 38;
-    const gridBottom = p.y + p.h - 10;
+    const infoY = barY + barH + 10 * scale;
+    const gridTop = infoY + 38 * scale;
+    const gridBottom = p.y + p.h - 10 * scale;
 
     const cols = RARITIES.length;
-    const gapSmall = 6;
+    const gapSmall = 6 * scale;
     const maxGridWidth = p.w - pad * 2 - 18;
     const widthLimitedSlot = Math.floor((maxGridWidth - gapSmall * (cols - 1)) / cols);
     const availableGridH = Math.max(1, gridBottom - gridTop);
@@ -4648,10 +4655,29 @@ export class GameClient {
         this.tryEnterFullscreen();
         return;
       }
-      if (this.scene === "game" && this.bagAnim < 0.2 && this.craftAnim < 0.2 && !this.vk.active) {
+      if (this.scene === "game" && this.bagAnim < 0.2 && this.craftAnim < 0.2) {
+        if (this.mobileSpreadRect && hit(this.mobileSpreadRect, p.x, p.y)) {
+          this.mobileSpreadActive = true;
+          this.lastTouchTime = performance.now();
+          try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
+          return;
+        }
+        if (this.mobileContractRect && hit(this.mobileContractRect, p.x, p.y)) {
+          this.mobileContractActive = true;
+          this.lastTouchTime = performance.now();
+          try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
+          return;
+        }
+        if (this.mobileJoystickRect && hit(this.mobileJoystickRect, p.x, p.y)) {
+          this.mobileJoystick.active = true;
+          this.mobileJoystick.pointerId = e.pointerId;
+          this.mobileJoystick.currX = p.x;
+          this.mobileJoystick.currY = p.y;
+          this.lastTouchTime = performance.now();
+          try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
+          return;
+        }
         // Check if the touch hits any HUD button or Map button first!
-        // This must happen before joystick/action checks so buttons like Chat
-        // (which may overlap the joystick area) are handled by gameClick instead.
         let hitHud = false;
         for (const b of this.hudButtons()) {
           if (hit(b.rect, p.x, p.y)) {
@@ -4659,36 +4685,13 @@ export class GameClient {
             break;
           }
         }
-        if (!hitHud) {
-          for (const b of this.mapButtons()) {
-            if (hit(b.rect, p.x, p.y)) {
-              hitHud = true;
-              break;
-            }
+        for (const b of this.mapButtons()) {
+          if (hit(b.rect, p.x, p.y)) {
+            hitHud = true;
+            break;
           }
         }
         if (!hitHud) {
-          if (this.mobileSpreadRect && hit(this.mobileSpreadRect, p.x, p.y)) {
-            this.mobileSpreadActive = true;
-            this.lastTouchTime = performance.now();
-            try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
-            return;
-          }
-          if (this.mobileContractRect && hit(this.mobileContractRect, p.x, p.y)) {
-            this.mobileContractActive = true;
-            this.lastTouchTime = performance.now();
-            try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
-            return;
-          }
-          if (this.mobileJoystickRect && hit(this.mobileJoystickRect, p.x, p.y)) {
-            this.mobileJoystick.active = true;
-            this.mobileJoystick.pointerId = e.pointerId;
-            this.mobileJoystick.currX = p.x;
-            this.mobileJoystick.currY = p.y;
-            this.lastTouchTime = performance.now();
-            try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
-            return;
-          }
           // Allow starting joystick from any left-bottom touch as fallback
           if (p.x < this.w * 0.45 && p.y > this.h * 0.35) {
             this.mobileJoystick.active = true;
@@ -5133,7 +5136,6 @@ export class GameClient {
       if (!hit(b.rect, mx, my)) continue;
       if (b.id === "bag") this.toggleBag();
       if (b.id === "craft") this.toggleCraft();
-
       if (b.id === "menu") this.gotoMenu();
       return;
     }
@@ -5147,6 +5149,21 @@ export class GameClient {
         this.net?.send(w.bytes());
       }
       return;
+    }
+
+    // Mobile: clicking the chatbox triggers the keyboard
+    if (this.isMobile) {
+      const chatW = Math.min(400, this.w * 0.35);
+      const chatY = this.h - this.hotbarHeight() - 17;
+      const chatRect: Rect = { x: 15, y: chatY, w: chatW, h: 65 };
+      if (hit(chatRect, mx, my)) {
+        this.chat.inputActive = true;
+        this.chat.inputText = "";
+        this.vk.active = true;
+        this.vk.target = 'chat';
+        this.vk.numMode = false;
+        return;
+      }
     }
 
     if (this.craftAnim > 0.4 && this.handleCraftClick(mx, my, shiftKey)) return;
@@ -5165,19 +5182,6 @@ export class GameClient {
         this.dragY = my;
       }
       return;
-    }
-
-    // Mobile: tap chat box to open keyboard
-    if (this.isMobile && !this.vk.active) {
-      const chatScreenH = this.h - this.hotbarHeight() + 50;
-      const chatPanelY = chatScreenH - this.chat.height - 2;
-      if (mx >= 15 && mx <= 15 + this.chat.width && my >= chatPanelY && my <= chatPanelY + this.chat.height) {
-        this.chat.inputActive = true;
-        this.vk.active = true;
-        this.vk.target = 'chat';
-        this.vk.numMode = false;
-        return;
-      }
     }
   }
 
