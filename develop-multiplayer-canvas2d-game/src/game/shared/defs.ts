@@ -357,6 +357,22 @@ export const ITEMS: ItemDef[] = [
   // ── Cactus drops (desert) ────────────────────────────────────────────────
   { id: 41, name: "Cactus", kind: "petal", color: "#4caf50", outline: "#357a38", shape: "circle", radius: 10, damage: 8, health: 22, reload: 1.2, healthBonus: 100, dropFactor: 0.7, desc: "Toughens your flower, raising maximum health while equipped." },
   { id: 42, name: "Cactus Egg", kind: "summon", color: "#a5d6a7", outline: "#357a38", shape: "egg", radius: 10, damage: 5, health: 26, reload: 4.0, petMob: 4, dropFactor: 0.55, desc: "Plants a friendly cactus. It never moves." },
+  // ── Hornet drops (garden) ──────────────────────────────────────────────
+  { id: 43, name: "Soil", kind: "petal", color: "#6a4824", outline: "#3f2a12", shape: "square", radius: 10, damage: 6, health: 80, reload: 2.0, healthBonus: 60, dropFactor: 0.7, desc: "A clump of earth. Very sturdy but weak." },
+  { id: 44, name: "Fang", kind: "petal", color: "#7d2014", outline: "#5a1410", shape: "triangle", radius: 7, damage: 30, health: 6, reload: 1.4, dropFactor: 0.6, desc: "A sharp venomous fang. High damage, fragile." },
+  { id: 45, name: "Orange", kind: "petal", color: "#f5c35f", outline: "#c9983c", shape: "circle", radius: 9, damage: 5, health: 10, reload: 2.0, heal: 40, dropFactor: 0.65, desc: "A juicy orange that heals you on contact." },
+  { id: 46, name: "Faster", kind: "petal", color: "#ffffff", outline: "#cccccc", shape: "circle", radius: 7, damage: 4, health: 8, reload: 1.0, speed: 12, dropFactor: 0.65, desc: "A glowing white orb. Makes you move faster." },
+  { id: 47, name: "Antennae", kind: "petal", color: "#333333", outline: "#111111", shape: "stick", radius: 8, damage: 3, health: 10, reload: 1.0, dropFactor: 0.5, desc: "Sensitive antennae that increase your view range." },
+  { id: 48, name: "Third Eye", kind: "petal", color: "#9b59b6", outline: "#6c3483", shape: "circle", radius: 8, damage: 6, health: 14, reload: 1.2, dropFactor: 0.5, desc: "An awakened third eye that expands your petal orbit range." },
+  { id: 49, name: "Hornet Egg", kind: "summon", color: "#ffd363", outline: "#d3ad46", shape: "egg", radius: 10, damage: 8, health: 24, reload: 3.5, petMob: 16, dropFactor: 0.55, desc: "Hatches a friendly hornet." },
+  // ── Spider drops (garden) ───────────────────────────────────────────────
+  { id: 50, name: "Web", kind: "petal", color: "#e8e8e8", outline: "#999999", shape: "circle", radius: 9, damage: 4, health: 18, reload: 1.8, dropFactor: 0.65, desc: "A sticky web that slows enemies on hit." },
+  { id: 51, name: "Spider Egg", kind: "summon", color: "#4f402e", outline: "#2e251a", shape: "egg", radius: 10, damage: 7, health: 28, reload: 3.8, petMob: 17, dropFactor: 0.55, desc: "Hatches a friendly spider." },
+  // ── Leech drops (garden) ───────────────────────────────────────────────
+  { id: 52, name: "Leech Egg", kind: "summon", color: "#353535", outline: "#000000", shape: "egg", radius: 10, damage: 6, health: 30, reload: 3.5, petMob: 18, dropFactor: 0.55, desc: "Hatches a friendly leech." },
+  // ── Ant Hole Egg: spawns 8 soldier ants at once ─────────────────────────
+  { id: 53, name: "Ant Hole Egg", kind: "summon", color: "#4a3520", outline: "#2e1f10", shape: "egg", radius: 10, damage: 4, health: 20, reload: 5.0, petMob: 3, noDowngrade: true, dropFactor: 0.5, desc: "Summons a swarm of 8 soldier ants." },
+  { id: 54, name: "Missile", kind: "petal", color: "#c0392b", outline: "#922b1f", shape: "triangle", radius: 7, damage: 25, health: 5, reload: 1.8, dropFactor: 0.6, desc: "A fast projectile petal that deals burst damage." },
 ];
 
 /** Item ids that Oracle/Trade may hand back — never dropped by mobs, never craftable by combining. */
@@ -397,7 +413,7 @@ export interface MobDef {
   name: string;
   color: string;
   outline: string;
-  shape: "bug" | "rock" | "cactus" | "jelly" | "crab" | "star" | "ant" | "wasp";
+  shape: "bug" | "rock" | "cactus" | "jelly" | "crab" | "star" | "ant" | "wasp" | "hornet" | "spider" | "leech";
   radius: number;
   health: number;
   damage: number;
@@ -436,7 +452,7 @@ export const MOBS: MobDef[] = [
   // ── Spawner mobs (nests) ──────────────────────────────────────────────────
   // Garden nest: spawns 1 Worker Ant + 1 Soldier Ant at each threshold.
   { id: 13, name: "Ant Hole", color: "#4a3520", outline: "#2e1f10", shape: "rock", radius: 30, health: 300, damage: 0, speed: 0, xp: 30,
-    drops: [{ item: 11, chance: 0.55 }, { item: 12, chance: 0.05 }, { item: 13, chance: 0.55 }, { item: 14, chance: 0.05 }],
+    drops: [{ item: 39, chance: 0.55 }, { item: 53, chance: 0.05 }, { item: 43, chance: 0.55 }],
     spawner: spawner([0.85, 0.60, 0.35, 0.10], 10, 3) },
   // Ocean nest: spawns 2 Crabs at each threshold.
   { id: 14, name: "Crab Cave", color: "#6b3a1f", outline: "#4a2510", shape: "rock", radius: 30, health: 350, damage: 0, speed: 0, xp: 35,
@@ -446,6 +462,16 @@ export const MOBS: MobDef[] = [
   { id: 15, name: "Hive", color: "#d4a017", outline: "#9a7010", shape: "cactus", radius: 28, health: 280, damage: 0, speed: 0, xp: 28,
     drops: [{ item: 2, chance: 0.55 }, { item: 18, chance: 0.55 }, { item: 19, chance: 0.55 }, { item: 20, chance: 0.05 }],
     spawner: spawner([0.85, 0.60, 0.35, 0.10], 1, 1) },
+  // ── New garden mobs ──────────────────────────────────────────────────────
+  // Hornet: a fast flying mob that drops Missile, Orange, Antennae, Hornet Egg.
+  { id: 16, name: "Hornet", color: "#ffd363", outline: "#d3ad46", shape: "hornet", radius: 22, health: 90, damage: 14, speed: 165, xp: 22,
+    drops: [{ item: 54, chance: 0.7 }, { item: 45, chance: 0.7 }, { item: 47, chance: 0.07 }, { item: 49, chance: 0.07 }] },
+  // Spider: a medium-speed ground mob that drops Web, Faster, Third Eye, Spider Egg.
+  { id: 17, name: "Spider", color: "#4f402e", outline: "#2e251a", shape: "spider", radius: 26, health: 130, damage: 18, speed: 120, xp: 30,
+    drops: [{ item: 50, chance: 0.7 }, { item: 46, chance: 0.7 }, { item: 48, chance: 0.07 }, { item: 51, chance: 0.07 }] },
+  // Leech: a slow segmented mob that drops Fang, Leech Egg, Faster.
+  { id: 18, name: "Leech", color: "#353535", outline: "#000000", shape: "leech", radius: 24, health: 110, damage: 12, speed: 95, xp: 26,
+    drops: [{ item: 44, chance: 0.7 }, { item: 52, chance: 0.07 }, { item: 46, chance: 0.7 }] },
 ];
 
 export interface Wall {
@@ -478,7 +504,7 @@ export const MAPS: MapDef[] = [
     accent: "#ffe27a",
     width: 8000,
     height: 8000,
-    mobs: [0, 1, 2, 3, 10, 13, 15],
+    mobs: [0, 1, 2, 3, 10, 13, 15, 16, 17],
     mobCap: 85,
     rarityBias: 0,
     walls: [
@@ -1096,6 +1122,74 @@ export function rarityMult(r: number): number {
   return RARITIES[Math.max(0, Math.min(MAX_RARITY, r))].mult;
 }
 
+// =====================================================================
+// Antennae & Third Eye — passive petal effect tables
+// =====================================================================
+/** Item id for the Antennae petal (increases view range). */
+export const ANTENNAE_ITEM = 47;
+/** Item id for the Third Eye petal (increases petal orbit range). */
+export const THIRD_EYE_ITEM = 48;
+
+/**
+ * Antennae view-scale bonus by rarity. This is subtracted from the camera
+ * zoom, so a larger bonus zooms the camera further out (the player sees more
+ * of the world). Stacks across multiple Antennae petals.
+ */
+export const ANTENNAE_VIEW_BONUS: readonly number[] = [
+  0.06, // Common
+  0.08, // Unusual
+  0.10, // Rare
+  0.12, // Epic
+  0.15, // Legendary
+  0.18, // Mythic
+  0.22, // Ultra
+  0.28, // Super
+  0.35, // Omega
+  0.50, // Eternal
+  0.50, // Unique (uses Eternal cap)
+];
+
+/**
+ * Third Eye orbit-range bonus by rarity. This is added to the player's base
+ * orbit radius (62px), so petals spread out further from the flower. Stacks
+ * across multiple Third Eye petals.
+ */
+export const THIRD_EYE_ORBIT_BONUS: readonly number[] = [
+  50,   // Common
+  60,   // Unusual
+  70,   // Rare
+  80,   // Epic
+  90,   // Legendary
+  120,  // Mythic
+  140,  // Ultra
+  180,  // Super
+  250,  // Omega
+  400,  // Eternal
+  400,  // Unique (uses Eternal cap)
+];
+
+/** Returns the total Antennae view-scale bonus from all equipped Antennae petals. */
+export function antennaeViewBonus(slots: ({ item: number; rarity: number } | null)[]): number {
+  let total = 0;
+  for (const cell of slots) {
+    if (!cell || cell.item !== ANTENNAE_ITEM) continue;
+    const tier = Math.max(0, Math.min(MAX_RARITY, cell.rarity));
+    total += ANTENNAE_VIEW_BONUS[tier] ?? 0;
+  }
+  return total;
+}
+
+/** Returns the total Third Eye orbit-range bonus from all equipped Third Eye petals. */
+export function thirdEyeOrbitBonus(slots: ({ item: number; rarity: number } | null)[]): number {
+  let total = 0;
+  for (const cell of slots) {
+    if (!cell || cell.item !== THIRD_EYE_ITEM) continue;
+    const tier = Math.max(0, Math.min(MAX_RARITY, cell.rarity));
+    total += THIRD_EYE_ORBIT_BONUS[tier] ?? 0;
+  }
+  return total;
+}
+
 export const ENEMY_HEALTH_MULTIPLIERS = {
   "Common": 1,
   "Unusual": 3.75,
@@ -1366,6 +1460,10 @@ export const SUMMON_CFG: Record<number, SummonCfg> = {
   37: { maxCount: 2 },                                  // Scorpion Egg
   40: { maxCount: 2 },                                  // Shell Egg
   42: { maxCount: 1, spawnProtection: 1.5 },            // Cactus Egg — one rooted cactus
+  49: { maxCount: 1 },                                  // Hornet Egg
+  51: { maxCount: 1 },                                  // Spider Egg
+  52: { maxCount: 1 },                                  // Leech Egg
+  53: { maxCount: 8, spawnCount: 8, spawnProtection: 1.5 }, // Ant Hole Egg — 8 soldier ants at once
 };
 
 /** Default seconds of post-spawn invulnerability for a freshly hatched pet. */
