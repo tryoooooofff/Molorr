@@ -1639,7 +1639,7 @@ const drawCrab = () => {
     const limbColor = friendly ? [180, 140, 0] : [40, 40, 40];
     const legWidthMult = 0.65;
     const clawSizeMult = 0.4;
-    const scale = (radius * 2) / 90;
+    const scale = (radius * 3) / 90;
 
     ctx.save();
     ctx.translate(x, y);
