@@ -1640,23 +1640,23 @@ const drawCrab = () => {
     const legWidthMult = 0.65;
     const clawSizeMult = 0.4;
     const scale = (radius * 2) / 90;
-    
+
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(angle + Math.PI / 2);
-    
+
     const anim = t * 3;
-    
-    const drawLeg = (baseX, baseY, dirX, dirY, phase) => {
+
+    const drawLeg = (baseX: number, baseY: number, dirX: number, dirY: number, phase: number) => {
         const swing = Math.sin(anim * 2.6 + phase) * 0.25;
-        
+
         const cosThigh = Math.cos(swing);
         const sinThigh = Math.sin(swing);
         const lenThigh = 1.2;
-        
+
         const kneeX = baseX + (dirX * cosThigh - dirY * sinThigh) * lenThigh;
         const kneeY = baseY + (dirX * sinThigh + dirY * cosThigh) * lenThigh;
-        
+
         ctx.beginPath();
         ctx.moveTo(baseX * scale, baseY * scale);
         ctx.lineTo(kneeX * scale, kneeY * scale);
@@ -1664,31 +1664,31 @@ const drawCrab = () => {
         ctx.lineWidth = 6 * scale * legWidthMult;
         ctx.lineCap = "round";
         ctx.stroke();
-        
+
         const kneeBend = Math.abs(Math.sin(anim * 2.6 + phase)) * 0.05;
         const legAngle = swing + (kneeBend * dirX);
-        
+
         const cosCalf = Math.cos(legAngle);
         const sinCalf = Math.sin(legAngle);
         const lenCalf = 1;
-        
+
         const footX = kneeX + (dirX * cosCalf - dirY * sinCalf) * lenCalf;
         const footY = kneeY + (dirX * sinCalf + dirY * cosCalf) * lenCalf;
-        
+
         ctx.beginPath();
         ctx.moveTo(kneeX * scale, kneeY * scale);
         ctx.lineTo(footX * scale, footY * scale);
         ctx.lineWidth = 6 * scale * legWidthMult;
         ctx.stroke();
     };
-    
+
     [-1, 4, 8, 14].forEach((ly, i) => {
         const len = [7, 6, 6, 5][i];
         drawLeg(22, ly, len, (i - 1.5) * 3, i * 0.7);
         drawLeg(-22, ly, -len, (i - 1.5) * 3, i * 0.7);
     });
-    
-    const drawClaw = (ox, oy, flip, clawAngle) => {
+
+    const drawClaw = (ox: number, oy: number, flip: number, clawAngle: number) => {
         ctx.save();
         ctx.translate(ox * scale, oy * scale);
         ctx.scale(flip, 1);
@@ -1710,12 +1710,12 @@ const drawCrab = () => {
         ctx.stroke();
         ctx.restore();
     };
-    
+
     const visualScale = Math.pow(scale, 0.01);
     const clawAngle = Math.sin(anim * 2.5) * 0.2;
     drawClaw(-visualScale * 25, -10, 1, clawAngle);
     drawClaw(visualScale * 25, -10, -1, clawAngle);
-    
+
     const wFront = 160 * scale / 3;
     const wBack = 132 * scale / 3;
     const H = 95 * scale / 3;
@@ -1723,7 +1723,7 @@ const drawCrab = () => {
     const arc = 24 * scale / 3;
     const xFL = -wFront / 2, xFR = wFront / 2, xBL = -wBack / 2, xBR = wBack / 2;
     const yF = -H / 2, yB = H / 2;
-    
+
     ctx.fillStyle = css(bodyColor);
     ctx.strokeStyle = css(bodyStrokeColor);
     ctx.lineWidth = 8 * scale / 2;
@@ -1740,7 +1740,7 @@ const drawCrab = () => {
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
-    
+
     ctx.strokeStyle = "rgba(0,0,0,0.2)";
     ctx.lineWidth = 8 * scale / 2;
     [[-15, -20, -11, 8, -13, 22], [15, -20, 11, 8, 13, 22]].forEach(([ax, ay, bx, by, ex, ey]) => {
@@ -1750,7 +1750,7 @@ const drawCrab = () => {
         ctx.bezierCurveTo(bx * s, (by / 2) * s, bx * s, by * s, ex * s, ey * s);
         ctx.stroke();
     });
-    
+
     ctx.restore();
 };
   const drawWorkerAnt = () => {
@@ -2300,7 +2300,7 @@ const drawCrab = () => {
   };
 
   const drawCrabCaveBody = () => {
-    const r = radius * 0.5;
+    const r = radius;
     if (r <= 0) return;
     for (const { mult, color } of [
       { mult: 1.0, color: [64, 49, 4] },
