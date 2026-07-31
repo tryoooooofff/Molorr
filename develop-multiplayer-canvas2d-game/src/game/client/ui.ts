@@ -1315,7 +1315,7 @@ export function drawBee(
     context.stroke();
 
     context.beginPath();
-    context.arc(ex, ey, antennaTip, 0, Math.PI * 2); // 绝对居中
+    context.arc(ex, ey, antennaTip, 0, Math.PI * 2);
     context.fillStyle = "#333333";
     context.fill();
   };
@@ -1464,8 +1464,7 @@ export function drawMob(
       const baseAngle = (i / 10) * Math.PI * 2;
       const wave = Math.sin(t * 2 + i * 0.8) * 12 * scale;
       const bx = Math.cos(baseAngle) * R;
-      const by = Math.sin(baseAngle) * R;
-      const ex = Math.cos(baseAngle) * (R + 55 * scale) + Math.sin(baseAngle) * wave;
+      const by = Math.sin(baseAngle) * R;const ex = Math.cos(baseAngle) * (R + 55 * scale) + Math.sin(baseAngle) * wave;
       const ey = Math.sin(baseAngle) * (R + 55 * scale) - Math.cos(baseAngle) * wave;
       const cpx = Math.cos(baseAngle) * (R + 28 * scale) + Math.sin(baseAngle) * wave * 0.5;
       const cpy = Math.sin(baseAngle) * (R + 28 * scale) - Math.cos(baseAngle) * wave * 0.5;
@@ -1639,9 +1638,6 @@ export function drawMob(
     const bodyColor = friendly ? [255, 215, 0] : [230, 120, 80];
     const bodyStrokeColor = friendly ? [200, 160, 0] : [180, 80, 50];
     const limbColor = friendly ? [180, 140, 0] : [40, 40, 40];
-    // `radius` already carries the authoritative rarity size multiplier.
-    // Do not apply an extra per-rarity enlargement here or crabs would grow
-    // beyond the shared mob-size ladder.
     const legWidthMult = 0.65;
     const clawSizeMult = 0.4;
     const scale = (radius * 2) / 90;
@@ -1739,30 +1735,12 @@ export function drawMob(
 
     ctx.save();
     ctx.translate(x, y);
-    // Simulation angle is atan2(target.y - y, target.x - x), so local +X is
-    // the target direction. Rotating once here keeps the entire ant, including
-    // its redesigned antennae, facing the target.
     ctx.rotate(angle);
-    // Antennae belong behind the head/body. Drawing them first hides their
-    // attachment points under the head rather than laying the feelers across
-    // the ant's face (applies to both Soldier and Worker Ant render paths).
-    // Local +X already points at the target (see the rotate() above), so the
-    // antennae use angleToPlayer = 0 and start on the head's rim.
     const antennaScale = headRadius / 16;
     drawAntAntenna(
-      headX,
-      0,
-      0,
-      antennaScale,
-      t,
-      antennaColor,
-      20,
-      2,
-      0.2,
-      10,
-      0.9,
-      headRadius * 0.9 / antennaScale,
-      -4,
+      headX, 0, 0, antennaScale, t,
+      antennaColor, 20, 2, 0.2, 10, 0.9,
+      headRadius * 0.9 / antennaScale, -4,
     );
     drawCircle(-bodyRadius * 0.8, 0, bodyRadius, bodyColor);
     drawCircle(-bodyRadius * 0.8, 0, bodyRadius * 0.7, innerBodyColor);
@@ -2159,7 +2137,6 @@ export function drawMob(
   };
 
   const drawStarfish = () => {
-    // `radius` is already scaled once on the server for every mob shape.
     const baseScale = radius * 2.2;
     const lightColor = friendly ? "rgb(255, 235, 120)" : "rgb(255, 150, 80)";
     const darkColor = friendly ? "rgb(255, 215, 0)" : "rgb(200, 90, 40)";
@@ -2222,6 +2199,93 @@ export function drawMob(
     ctx.restore();
   };
 
+  // ── Spawner nest drawing helpers ──────────────────────────────────
+  const hexPts = (cx: number, cy: number, rad: number) => {
+    const pts: { x: number; y: number }[] = [];
+    for (let i = 0; i < 6; i++) {
+      const a = (60 * i - 30) * Math.PI / 180;
+      pts.push({ x: cx + rad * Math.cos(a), y: cy + rad * Math.sin(a) });
+    }
+    return pts;
+  };
+
+  const fillRHex = (
+    ctx: CanvasRenderingContext2D,
+    pts: { x: number; y: number }[],
+    color: string,
+    cr: number,
+  ) => {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 0; i < 6; i++) {
+      const cur = pts[i], nxt = pts[(i + 1) % 6];
+      const dx = nxt.x - cur.x, dy = nxt.y - cur.y;
+      const d = Math.hypot(dx, dy);
+      const r = Math.min(cr, d / 2);
+      const t1x = cur.x + (dx / d) * r, t1y = cur.y + (dy / d) * r;
+      if (i === 0) {
+        const last = pts[5];
+        const ldx = cur.x - last.x, ldy = cur.y - last.y;
+        const ld = Math.hypot(ldx, ldy);
+        ctx.lineTo(cur.x - (ldx / ld) * r, cur.y - (ldy / ld) * r);
+        ctx.quadraticCurveTo(cur.x, cur.y, t1x, t1y);
+      } else {
+        const prev = pts[i - 1];
+        const pdx = cur.x - prev.x, pdy = cur.y - prev.y;
+        const pd = Math.hypot(pdx, pdy);
+        ctx.lineTo(cur.x - (pdx / pd) * r, cur.y - (pdy / pd) * r);
+        ctx.quadraticCurveTo(cur.x, cur.y, t1x, t1y);
+      }
+    }
+    ctx.closePath();
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.restore();
+  };
+
+  const drawHiveBody = () => {
+    const s = radius * 2;
+    if (s <= 0) return;
+    const baseR = s * 0.5, cr = s * 0.05;
+    fillRHex(ctx, hexPts(x, y, baseR), '#fdda40', cr);
+    fillRHex(ctx, hexPts(x, y, baseR * 0.8), '#fbb257', cr * 0.8);
+    fillRHex(ctx, hexPts(x, y, baseR * 0.6), '#fdda40', cr * 0.6);
+    fillRHex(ctx, hexPts(x, y, baseR * 0.4), '#fbb257', cr * 0.4);
+  };
+
+  const drawAntHole = () => {
+    const r = radius;
+    if (r <= 0) return;
+    for (const { mult, color } of [
+      { mult: 1.0, color: '#9E5F00' },
+      { mult: 0.75, color: '#774800' },
+      { mult: 0.5, color: '#613A00' },
+      { mult: 0.25, color: '#432800' },
+    ]) {
+      ctx.beginPath();
+      ctx.arc(x, y, r * mult, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+    }
+  };
+
+  const drawCrabCaveBody = () => {
+    const r = radius * 0.5;
+    if (r <= 0) return;
+    for (const { mult, color } of [
+      { mult: 1.0, color: [64, 49, 4] },
+      { mult: 0.75, color: [82, 57, 7] },
+      { mult: 0.5, color: [64, 49, 4] },
+      { mult: 0.4, color: [40, 30, 2] },
+    ]) {
+      ctx.beginPath();
+      ctx.arc(x, y, r * mult, 0, Math.PI * 2);
+      ctx.fillStyle = Array.isArray(color) ? `rgb(${color[0]},${color[1]},${color[2]})` : color;
+      ctx.fill();
+    }
+  };
+
   switch (type) {
     case 0: drawLadybug(); break;
     case 1: drawBee(ctx, x, y, radius * 2, t, angle, level, 1.0, { isFriendly: friendly }); break;
@@ -2238,6 +2302,10 @@ export function drawMob(
     case 10: drawWorkerAnt(); break; // Worker Ant — same ant shape as Soldier Ant
     case 11: drawSandstorm(); break;    // Sandstorm — procedural heptagons
     case 12: drawShell(); break;        // Shell — fan-shaped seashell
+    // Spawner nests (stationary; drawHiveBody/drawAntHole/drawCrabCaveBody ignore angle and time).
+    case 13: drawAntHole(); break;
+    case 14: drawCrabCaveBody(); break;
+    case 15: drawHiveBody(); break;
     default: drawRock(); break;
   }
 
