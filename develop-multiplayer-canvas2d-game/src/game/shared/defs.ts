@@ -362,6 +362,36 @@ export const ITEMS: ItemDef[] = [
 /** Item ids that Oracle/Trade may hand back — never dropped by mobs, never craftable by combining. */
 export const TRINKET_ITEM = 10;
 
+// =====================================================================
+// Spawner mobs — stationary "nest" mobs that release minions at HP thresholds.
+// The factory pattern keeps the data compact and easy to extend.
+// =====================================================================
+
+/** Spawn configuration for a mob that releases minions when its HP drops below
+ *  certain fractions. The thresholds are checked from highest to lowest, each
+ *  triggering exactly once (the server tracks which have already fired). */
+export interface SpawnerDef {
+  /** HP fraction thresholds at which minions spawn, in descending order
+   *  (e.g. [0.85, 0.60, 0.35, 0.10] fires at 85% HP, then 60%, …). */
+  thresholds: number[];
+  /** Returns the list of mob ids to spawn, given the spawner's current rarity.
+   *  The same function is called for every threshold so the composition stays
+   *  consistent — rarity only matters if the minion rarity should scale. */
+  spawnMobs: (rarity: number) => number[];
+}
+
+/**
+ * Convenience factory. Creates a SpawnerDef that always returns the same list
+ * of mob ids regardless of rarity. The thresholds are auto-sorted descending so
+ * the 85% interval fires first regardless of the order they're passed in.
+ */
+export function spawner(thresholds: number[], ...mobIds: number[]): SpawnerDef {
+  return {
+    thresholds: [...thresholds].sort((a, b) => b - a),
+    spawnMobs: (_rarity: number) => [...mobIds],
+  };
+}
+
 export interface MobDef {
   id: number;
   name: string;
@@ -379,6 +409,9 @@ export interface MobDef {
    * kept for table compatibility but no longer biases the rarity roll.
    */
   drops: { item: number; chance: number }[];
+  /** When set, this mob is a stationary nest that releases minions at HP
+   *  thresholds. Speed is always 0 and damage is ignored. */
+  spawner?: SpawnerDef;
 }
 
 export const MOBS: MobDef[] = [
@@ -400,6 +433,19 @@ export const MOBS: MobDef[] = [
   { id: 11, name: "Sandstorm", color: "#d4b878", outline: "#8a6a3c", shape: "cactus", radius: 28, health: 150, damage: 22, speed: 24, xp: 22, drops: [{ item: 9, chance: 0.18 }, { item: 4, chance: 0.7 }, { item: 32, chance: 0.7 }] },
   // Shell: a slow ocean mob that drops Shell, Magnet, Pearl, and Shell Egg.
   { id: 12, name: "Shell", color: "#f2d96e", outline: "#c8a030", shape: "rock", radius: 22, health: 100, damage: 14, speed: 18, xp: 16, drops: [{ item: 38, chance: 0.7 }, { item: 39, chance: 0.7 }, { item: 6, chance: 0.7 }, { item: 40, chance: 0.07 }] },
+  // ── Spawner mobs (nests) ──────────────────────────────────────────────────
+  // Garden nest: spawns 1 Worker Ant + 1 Soldier Ant at each threshold.
+  { id: 13, name: "Ant Hole", color: "#4a3520", outline: "#2e1f10", shape: "rock", radius: 30, health: 300, damage: 0, speed: 0, xp: 30,
+    drops: [{ item: 11, chance: 0.55 }, { item: 12, chance: 0.05 }, { item: 13, chance: 0.55 }, { item: 14, chance: 0.05 }],
+    spawner: spawner([0.85, 0.60, 0.35, 0.10], 10, 3) },
+  // Ocean nest: spawns 2 Crabs at each threshold.
+  { id: 14, name: "Crab Cave", color: "#6b3a1f", outline: "#4a2510", shape: "rock", radius: 30, health: 350, damage: 0, speed: 0, xp: 35,
+    drops: [{ item: 27, chance: 0.55 }, { item: 28, chance: 0.55 }, { item: 29, chance: 0.05 }, { item: 4, chance: 0.55 }],
+    spawner: spawner([0.85, 0.60, 0.35, 0.10], 8, 8) },
+  // Garden nest: spawns 2 Bees at each threshold.
+  { id: 15, name: "Hive", color: "#d4a017", outline: "#9a7010", shape: "cactus", radius: 28, health: 280, damage: 0, speed: 0, xp: 28,
+    drops: [{ item: 2, chance: 0.55 }, { item: 18, chance: 0.55 }, { item: 19, chance: 0.55 }, { item: 20, chance: 0.05 }],
+    spawner: spawner([0.85, 0.60, 0.35, 0.10], 1, 1) },
 ];
 
 export interface Wall {
@@ -432,8 +478,8 @@ export const MAPS: MapDef[] = [
     accent: "#ffe27a",
     width: 8000,
     height: 8000,
-    mobs: [0, 1, 2, 3, 10],
-    mobCap: 75,
+    mobs: [0, 1, 2, 3, 10, 13, 15],
+    mobCap: 85,
     rarityBias: 0,
     walls: [
       { x: 0, y: 0, w: 8000, h: 400 },
@@ -668,8 +714,8 @@ export const MAPS: MapDef[] = [
     accent: "#9fe6ff",
     width: 8000,
     height: 8000,
-    mobs: [7, 8, 9, 12],
-    mobCap: 75,
+    mobs: [7, 8, 9, 12, 14],
+    mobCap: 85,
     rarityBias: 0.22,
     walls: [
       { x: 0, y: 0, w: 8000, h: 400 },
