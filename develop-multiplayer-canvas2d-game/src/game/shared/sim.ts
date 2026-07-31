@@ -199,6 +199,8 @@ export class Mob {
   lastHitBy = 0;
   /** Seconds of post-spawn invulnerability. Freshly hatched pets get a moment to get clear. */
   spawnProtection = 0;
+  /** HP-fraction thresholds that have already released their minions (spawner mobs only). */
+  spawnedThresholds: Set<number> = new Set();
   /** Accumulated damage dealt by each player (petal + friendly mob damage). */
   damageByPlayer: Map<number, number> = new Map();
 
@@ -1527,6 +1529,32 @@ export class GameServer {
           }
         }
       }
+
+      // Spawner nest mobs: release minions each time HP drops below a threshold.
+      if (!mob.friendly) {
+        const mobDef = MOBS[mob.type];
+        if (mobDef.spawner) {
+          const hpPct = mob.hp / mob.maxHp;
+          for (const threshold of mobDef.spawner.thresholds) {
+            if (hpPct <= threshold && !mob.spawnedThresholds.has(threshold)) {
+              mob.spawnedThresholds.add(threshold);
+              for (const spawnId of mobDef.spawner.spawnMobs(mob.rarity)) {
+                const spawnDef = MOBS[spawnId];
+                if (!spawnDef) continue;
+                const angle = Math.random() * Math.PI * 2;
+                const dist = mob.radius + spawnDef.radius + 12 + Math.random() * 28;
+                let sx = mob.x + Math.cos(angle) * dist;
+                let sy = mob.y + Math.sin(angle) * dist;
+                sx = clamp(sx, spawnDef.radius + 4, map.width - spawnDef.radius - 4);
+                sy = clamp(sy, spawnDef.radius + 4, map.height - spawnDef.radius - 4);
+                const [rx, ry] = collideWalls(wallGrid, sx, sy, spawnDef.radius + 4);
+                world.mobs.push(new Mob(this.nextId++, spawnId, mapId, rx, ry, mob.rarity));
+              }
+            }
+          }
+        }
+      }
+
       if (mob.hp <= 0) {
         world.mobs.splice(i, 1);
         if (mob.friendly) {
