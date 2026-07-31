@@ -59,6 +59,7 @@ import {
   rarityMult,
   rollZoneRarity,
   findSpawnTiles,
+  thirdEyeOrbitBonus,
 } from "./defs";
 import { C2S, ENT, EVT, Reader, S2C, SWAP_ROW_ALL, TEAM, Writer } from "./protocol";
 
@@ -203,6 +204,10 @@ export class Mob {
   spawnedThresholds: Set<number> = new Set();
   /** Accumulated damage dealt by each player (petal + friendly mob damage). */
   damageByPlayer: Map<number, number> = new Map();
+  /** Position history for segmented mobs (Leech). Stores recent head positions. */
+  positionHistory: { x: number; y: number }[] = [];
+  /** Segment colliders for segmented mobs (Leech). Updated each tick from positionHistory. */
+  segmentColliders: { physicsBody: { position: { x: number; y: number }; radius: number } }[] = [];
 
   constructor(
     id: number,
@@ -236,6 +241,64 @@ export class Mob {
   addDamage(playerId: number, amount: number) {
     if (!playerId || amount <= 0) return;
     this.damageByPlayer.set(playerId, (this.damageByPlayer.get(playerId) || 0) + amount);
+  }
+
+  /**
+   * Update segmented body for Leech-type mobs. Records the head position into
+   * a history buffer, then builds segment colliders spaced evenly along that
+   * trail. Called once per tick from updateWorld.
+   */
+  updateSegments(dt: number) {
+    const def = MOBS[this.type];
+    if (!def || def.shape !== "leech") return;
+    const segRadius = this.radius * 0.55;
+    const segCount = 6;
+    const spacing = segRadius * 1.1;
+
+    // Record current head position
+    this.positionHistory.unshift({ x: this.x, y: this.y });
+    // Keep enough history to space all segments
+    const maxHistory = Math.ceil(segCount * spacing / Math.max(1, this.speed * dt + 1)) + segCount * 4;
+    if (this.positionHistory.length > maxHistory) this.positionHistory.length = maxHistory;
+
+    // Build segment colliders by sampling the trail at fixed distances
+    const segments: { physicsBody: { position: { x: number; y: number }; radius: number } }[] = [];
+    // Head segment is always at current position
+    segments.push({
+      physicsBody: { position: { x: this.x, y: this.y }, radius: segRadius },
+    });
+    // Walk along the trail picking points at `spacing` distance apart
+    let lastX = this.x, lastY = this.y;
+    let needed = spacing;
+    for (let i = 1; i < segCount; i++) {
+      let placed = false;
+      for (let j = 0; j < this.positionHistory.length; j++) {
+        const p = this.positionHistory[j];
+        const d = Math.hypot(p.x - lastX, p.y - lastY);
+        if (d >= needed) {
+          const t = needed / d;
+          const sx = lastX + (p.x - lastX) * t;
+          const sy = lastY + (p.y - lastY) * t;
+          segments.push({
+            physicsBody: { position: { x: sx, y: sy }, radius: segRadius },
+          });
+          lastX = sx; lastY = sy;
+          needed = spacing;
+          placed = true;
+          break;
+        } else {
+          needed -= d;
+          lastX = p.x; lastY = p.y;
+        }
+      }
+      if (!placed) {
+        // Ran out of history — just duplicate the last known point
+        segments.push({
+          physicsBody: { position: { x: lastX, y: lastY }, radius: segRadius },
+        });
+      }
+    }
+    this.segmentColliders = segments;
   }
 }
 
@@ -1275,7 +1338,10 @@ export class GameServer {
     p.hurtCd = Math.max(0, p.hurtCd - dt);
     const attack = (p.flags & 1) !== 0;
     const defend = (p.flags & 2) !== 0;
-    const targetOrbit = attack ? 118 : defend ? 34 : 62;
+    // Third Eye petals expand the orbit range. The bonus is added to the base
+    // target so the smooth interpolation still works with spread/defend modes.
+    const eyeBonus = thirdEyeOrbitBonus(p.slots);
+    const targetOrbit = (attack ? 118 : defend ? 34 : 62) + eyeBonus;
     p.orbit += (targetOrbit - p.orbit) * Math.min(1, dt * 6);
     p.baseAngle += dt * (attack ? 3.4 : 2.2);
     this.applyLevel(p);
@@ -1471,6 +1537,8 @@ export class GameServer {
       const mob = world.mobs[i];
       mob.hitCd = Math.max(0, mob.hitCd - dt);
       mob.spawnProtection = Math.max(0, mob.spawnProtection - dt);
+      // Update segmented body for Leech-type mobs (records trail, builds segment colliders)
+      mob.updateSegments(dt);
       let target: { x: number; y: number; id: number } | null = null;
       let best = Infinity;
       if (mob.friendly) {
