@@ -3230,7 +3230,7 @@ export class GameClient {
       this.connected = true;
       this.sendJoin();
     };
-    net.onClose = (code) => {
+    net.onClose = (code: number) => {
       this.connected = false;
       // Distinguish an AFK kick from a normal drop so the overlay can say why
       // the session ended instead of showing "connecting to server...".
@@ -3239,7 +3239,7 @@ export class GameClient {
         this.afkPending = false;
       }
     };
-    net.onMessage = (data) => this.handlePacket(new Uint8Array(data));
+    net.onMessage = (data: ArrayBuffer) => this.handlePacket(new Uint8Array(data));
   }
 
   /** Sends a ping timestamp; the reply latency drives the debug overlay's ping readout. */
@@ -8272,8 +8272,10 @@ function drawLeech(
   animationTimer: number, angleToPlayer: number, level: number,
   viewScale = 1.0, enemyObj: any = null,
 ) {
+  // Segment collider type — matches the shape used by Mob.segmentColliders.
+  type SegCollider = { physicsBody: { position: { x: number; y: number }; radius: number } };
   // Ensure segments exist — fall back to a straight line if none provided.
-  let segments = enemyObj?.segmentColliders;
+  let segments: SegCollider[] = enemyObj?.segmentColliders;
   if (!segments || segments.length === 0) {
     segments = [];
     const segRadius = size / 3;
