@@ -37,6 +37,10 @@ import {
   mapRarityToSummonRarity,
   oracleRequiredCount,
   xpForLevel,
+  antennaeViewBonus,
+  thirdEyeOrbitBonus,
+  ANTENNAE_ITEM,
+  THIRD_EYE_ITEM,
 } from "../shared/defs";
 import { C2S, ENT, EVT, Reader, S2C, SWAP_ROW_ALL, TEAM, Writer } from "../shared/protocol";
 import type { Cell } from "../shared/sim";
@@ -98,6 +102,10 @@ interface Ent {
   maxHealth?: number;
   spreadAnim?: number;
   contractAnim?: number;
+  /** Segment colliders for segmented mobs (Leech). Built client-side from position history. */
+  segmentColliders?: { physicsBody: { position: { x: number; y: number }; radius: number } }[];
+  /** Position history for segmented mobs (Leech). Stores recent world-space positions. */
+  positionHistory?: { x: number; y: number }[];
 }
 
 interface Floater {
@@ -6205,7 +6213,10 @@ private bagLayout() {
     }
 
     const zoom = Math.min(1.15, Math.max(0.72, Math.min(this.w / 1280, this.h / 800) * 1.05));
-    this.viewZoom = zoom;
+    // Antennae petals zoom the camera out (smaller zoom = see more world).
+    // The bonus is subtracted from zoom, clamped to a minimum of 0.35.
+    const antBonus = antennaeViewBonus(this.slots);
+    this.viewZoom = Math.max(0.35, zoom - antBonus);
 
     // Draw background
     const groundColor = BIOME_BACKGROUNDS[this.currentBiome]?.ground_color || [30, 174, 99];
@@ -6217,11 +6228,11 @@ private bagLayout() {
 
     ctx.save();
     ctx.translate(this.w / 2, this.h / 2);
-    ctx.scale(zoom, zoom);
+    ctx.scale(this.viewZoom, this.viewZoom);
     ctx.translate(-this.camX, -this.camY);
 
-    const viewW = this.w / zoom;
-    const viewH = this.h / zoom;
+    const viewW = this.w / this.viewZoom;
+    const viewH = this.h / this.viewZoom;
 
     // out-of-bounds shading
     ctx.fillStyle = "rgba(0,0,0,0.28)";
@@ -7026,6 +7037,9 @@ private bagLayout() {
       { item: e.type, rarity: e.team, count: stack },
       { dim: 0.94 },
     );
+    // Overlay custom item icon on top of the generic card icon so new items
+    // (Soil, Fang, Orange, Faster, Antennae, Third Eye) show their custom art.
+    drawCustomItemIcon(this.ctx, e.type, e.x, e.y + bob, size * 0.4, this.time * 3 + e.id, e.team);
   }
 
   private drawPetalEnt(e: Ent) {
@@ -7034,14 +7048,96 @@ private bagLayout() {
     // so orbiting petals must pass it through. Without it every petal rendered
     // at rarity 0 and rarity-scaled artwork (Stinger's extra triangles, Light's
     // extra blobs) never appeared in the world, only on the card.
-    drawItemIcon(ctx, e.type, e.x, e.y, e.radius, this.time * 3 + e.id, e.team);
+    // New custom-drawn items are routed to their dedicated renderers.
+    if (!drawCustomItemIcon(ctx, e.type, e.x, e.y, e.radius, this.time * 3 + e.id, e.team)) {
+      drawItemIcon(ctx, e.type, e.x, e.y, e.radius, this.time * 3 + e.id, e.team);
+    }
+  }
+
+  /**
+   * Build client-side segment colliders for a Leech entity from its position
+   * history. The server maintains the authoritative segment positions, but
+   * we don't sync them over the wire — instead the client reconstructs the
+   * trail from the entity's interpolated world position each frame.
+   */
+  private updateLeechSegments(e: Ent) {
+    const segRadius = e.radius * 0.55;
+    const segCount = 6;
+    const spacing = segRadius * 1.1;
+
+    // Record current position into history
+    if (!e.positionHistory) e.positionHistory = [];
+    e.positionHistory.unshift({ x: e.x, y: e.y });
+    const maxHistory = 120;
+    if (e.positionHistory.length > maxHistory) e.positionHistory.length = maxHistory;
+
+    // Build segments by sampling the trail at fixed distances
+    const segments: { physicsBody: { position: { x: number; y: number }; radius: number } }[] = [];
+    segments.push({
+      physicsBody: { position: { x: e.x, y: e.y }, radius: segRadius },
+    });
+    let lastX = e.x, lastY = e.y;
+    let needed = spacing;
+    for (let i = 1; i < segCount; i++) {
+      let placed = false;
+      for (let j = 0; j < e.positionHistory.length; j++) {
+        const p = e.positionHistory[j];
+        const d = Math.hypot(p.x - lastX, p.y - lastY);
+        if (d >= needed) {
+          const t = needed / d;
+          const sx = lastX + (p.x - lastX) * t;
+          const sy = lastY + (p.y - lastY) * t;
+          segments.push({
+            physicsBody: { position: { x: sx, y: sy }, radius: segRadius },
+          });
+          lastX = sx; lastY = sy;
+          needed = spacing;
+          placed = true;
+          break;
+        } else {
+          needed -= d;
+          lastX = p.x; lastY = p.y;
+        }
+      }
+      if (!placed) {
+        segments.push({
+          physicsBody: { position: { x: lastX, y: lastY }, radius: segRadius },
+        });
+      }
+    }
+    e.segmentColliders = segments;
   }
 
   private drawMobEnt(e: Ent) {
     const ctx = this.ctx;
     const def = MOBS[e.type];
     if (!def) return;
-    drawMob(ctx, e.type, e.x, e.y, e.radius, e.angle, this.time, e.team !== TEAM.HOSTILE, e.rarity, this.level);
+    // Route custom-drawn mobs to their dedicated renderers; fall back to the
+    // generic drawMob for everything else.
+    const isFriendly = e.team !== TEAM.HOSTILE;
+    // Build a wrapper object with the properties the custom renderers expect:
+    // isFriendly (boolean), rarity (lowercase string), facingAngle, and
+    // segmentColliders (for Leech). We spread `e` so the renderer also has
+    // access to x/y/radius/angle if needed.
+    const enemyObj = {
+      ...e,
+      isFriendly,
+      rarity: RARITIES[Math.max(0, Math.min(10, e.rarity))]?.name?.toLowerCase() || 'common',
+      facingAngle: e.angle,
+    };
+    if (def.shape === "hornet") {
+      drawHornet(ctx, e.x, e.y, e.radius, this.time, e.angle, this.level, this.viewZoom, enemyObj);
+    } else if (def.shape === "spider") {
+      drawSpider(ctx, e.x, e.y, e.radius, this.time, e.angle, this.level, this.viewZoom, enemyObj);
+    } else if (def.shape === "leech") {
+      // Build client-side segment colliders from position history so the
+      // leech body trails behind the head as it moves.
+      this.updateLeechSegments(e);
+      enemyObj.segmentColliders = e.segmentColliders;
+      drawLeech(ctx, e.x, e.y, e.radius, this.time, e.angle, this.level, this.viewZoom, enemyObj);
+    } else {
+      drawMob(ctx, e.type, e.x, e.y, e.radius, e.angle, this.time, isFriendly, e.rarity, this.level);
+    }
     if (e.hurt > 0) {
       ctx.save();
       ctx.globalAlpha = e.hurt * 3;
@@ -7058,7 +7154,7 @@ private bagLayout() {
       hpPct: e.hp,
       displayHpPct: e.displayHp ?? e.hp,
       rarity: e.rarity,
-      friendly: e.team !== TEAM.HOSTILE,
+      friendly: isFriendly,
     });
   }
 
@@ -7076,9 +7172,10 @@ private bagLayout() {
       // New mapping: Space = spread, Shift = contract (plus mouse for usability)
       spreadMode = (this.mouseDown && !uiBusy) || isSpaceDown;
       contractMode = this.rightDown || isShiftDown;
-      const zoom = Math.min(1.15, Math.max(0.72, Math.min(this.w / 1280, this.h / 800) * 1.05));
-      const worldMouseX = (this.mx - this.w / 2) / zoom + this.camX;
-      const worldMouseY = (this.my - this.h / 2) / zoom + this.camY;
+      // Use this.viewZoom (which includes the Antennae bonus) so the mouse
+      // position maps correctly to world space at the zoomed-out view.
+      const worldMouseX = (this.mx - this.w / 2) / this.viewZoom + this.camX;
+      const worldMouseY = (this.my - this.h / 2) / this.viewZoom + this.camY;
       mousePos = { x: worldMouseX, y: worldMouseY };
     } else {
       spreadMode = (e.type & 1) !== 0;
@@ -7096,6 +7193,20 @@ private bagLayout() {
     e.maxHealth = isSelf ? this.maxHp : 100;
 
     drawDefaultSkin(ctx, e.x, e.y, e.radius, e);
+    // Draw Antennae and Third Eye on the player body (not rotating with the
+    // flower). These are passive body accessories drawn after the skin.
+    if (isSelf) {
+      // Find the best (highest-rarity) Antennae and Third Eye in the hotbar.
+      let bestAnt = -1, bestEye = -1;
+      for (let i = 0; i < this.slots.length; i++) {
+        const cell = this.slots[i];
+        if (!cell) continue;
+        if (cell.item === ANTENNAE_ITEM && cell.rarity > bestAnt) bestAnt = cell.rarity;
+        if (cell.item === THIRD_EYE_ITEM && cell.rarity > bestEye) bestEye = cell.rarity;
+      }
+      if (bestAnt >= 0) drawPlayerAntennae(ctx, e.x, e.y, e.radius, bestAnt, this.time);
+      if (bestEye >= 0) drawPlayerThirdEye(ctx, e.x, e.y, e.radius, bestEye, this.time);
+    }
     text(ctx, e.name || "flower", e.x, e.y - e.radius - 16, 14, "#ffffff");
     healthBar(ctx, e.x - 32, e.y + e.radius + 8, 64, 9, e.hp);
   }
@@ -7958,4 +8069,592 @@ private bagLayout() {
     button(ctx, r2, "Main menu", "#41505f", hit(r2, this.mx, this.my), 20);
     ctx.restore();
   }
+}
+
+// =============================================================================
+// Custom mob renderers — Hornet, Spider, Leech
+// These are drawn instead of the generic drawMob() when the mob's shape matches.
+// =============================================================================
+
+/** Hornet: a striped flying insect with a stinger and antennae. */
+function drawHornet(
+  context: CanvasRenderingContext2D,
+  x: number, y: number, size: number,
+  animationTimer: number, angleToPlayer: number, level: number,
+  viewScale = 1.0, enemyObj: any = null,
+) {
+  const scaledSize = size;
+  if (scaledSize <= 0) return;
+  const isFriendly = enemyObj && enemyObj.isFriendly === true;
+  const scale = scaledSize / 110;
+  const facingAngle = enemyObj?.facingAngle !== undefined ? enemyObj.facingAngle : angleToPlayer;
+  let colors: { body: string; stroke: string; dark: string; stingerColor: string };
+  if (isFriendly) {
+    colors = { body: '#ffe667', stroke: '#d1bb54', dark: '#333333', stingerColor: '#333333' };
+  } else {
+    colors = { body: '#ffd363', stroke: '#d3ad46', dark: '#333333', stingerColor: '#333333' };
+  }
+  context.save();
+  context.translate(x, y);
+  context.rotate(facingAngle + Math.PI / 2);
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+
+  const bodyW = 55 * scale;
+  const bodyH = 75 * scale;
+  const strokeWidth = 12 * scale;
+
+  // Stinger (triangle pointing down)
+  context.beginPath();
+  context.moveTo(-20 * scale, 50 * scale);
+  context.lineTo(0, 120 * scale);
+  context.lineTo(20 * scale, 50 * scale);
+  context.closePath();
+  context.fillStyle = colors.stingerColor;
+  context.strokeStyle = colors.stingerColor;
+  context.lineWidth = strokeWidth;
+  context.fill();
+  context.stroke();
+
+  // Body ellipse
+  context.beginPath();
+  context.ellipse(0, 0, bodyW, bodyH, 0, 0, Math.PI * 2);
+  context.fillStyle = colors.body;
+  context.fill();
+
+  // Stripes (clipped to body)
+  context.save();
+  context.beginPath();
+  context.ellipse(0, 0, bodyW, bodyH, 0, 0, Math.PI * 2);
+  context.clip();
+  context.fillStyle = colors.dark;
+  const stripeWidth = 26 * scale;
+  context.fillRect(-bodyW * 1.5, -45 * scale, bodyW * 3, stripeWidth);
+  context.fillRect(-bodyW * 1.5, 5 * scale, bodyW * 3, stripeWidth);
+  context.fillRect(-bodyW * 1.5, 55 * scale, bodyW * 3, stripeWidth);
+  context.restore();
+
+  // Body outline
+  context.beginPath();
+  context.ellipse(0, 0, bodyW, bodyH, 0, 0, Math.PI * 2);
+  context.strokeStyle = colors.stroke;
+  context.lineWidth = strokeWidth;
+  context.stroke();
+
+  // Antennae
+  const drawAntenna = (isLeft: boolean) => {
+    context.save();
+    const side = isLeft ? -1 : 1;
+    context.translate(14 * scale * side, -62 * scale);
+    context.rotate((Math.PI / 6) * side);
+    context.beginPath();
+    context.moveTo(0, 0);
+    context.quadraticCurveTo(-8 * scale, -30 * scale, 0, -70 * scale);
+    context.quadraticCurveTo(8 * scale, -30 * scale, 0, 0);
+    context.fillStyle = colors.dark;
+    context.fill();
+    context.strokeStyle = colors.dark;
+    context.lineWidth = 5 * scale;
+    context.lineJoin = 'round';
+    context.stroke();
+    context.restore();
+  };
+  drawAntenna(true);
+  drawAntenna(false);
+
+  context.restore();
+}
+
+/** Spider: a round-bodied arachnid with 8 animated legs. */
+function drawSpider(
+  context: CanvasRenderingContext2D,
+  x: number, y: number, size: number,
+  animationTimer: number, angleToPlayer: number, level: number,
+  viewScale = 1.0, enemyObj: any = null,
+) {
+  const scaledSize = size;
+  if (scaledSize <= 0) return;
+  const isFriendly = enemyObj && enemyObj.isFriendly === true;
+  const WAVE_MULTIPLIERS: Record<string, number> = { 'common': 1.0, 'unusual': 1.1, 'rare': 1.3, 'epic': 1.5, 'legendary': 1.8, 'mythic': 2.2, 'ultra': 2.7, 'super': 4.1, 'omega': 5.3, 'eternal': 5.5 };
+  const rarity: string = enemyObj?.rarity?.toLowerCase?.() || 'default';
+  const waveMult = WAVE_MULTIPLIERS[rarity] || 1.0;
+  const legColor: [number, number, number] = isFriendly ? [255, 215, 0] : [50, 48, 50];
+  const bodyColor: [number, number, number] = isFriendly ? [200, 160, 0] : [79, 64, 46];
+  const bodyEdgeColor: [number, number, number] = isFriendly ? [180, 140, 0] : [70, 55, 45];
+  const bodyRadius = scaledSize / 2;
+  const legLength = bodyRadius * 2.2;
+  const baseLegWidth = 3.5;
+  const baseBodyStroke = 3.5;
+  const legWidth = baseLegWidth * scaledSize / 35;
+  const bodyStrokeWidth = baseBodyStroke * scaledSize / 40;
+  const waveAmp1 = 7 * waveMult;
+  const waveAmp2 = 4 * waveMult;
+
+  context.save();
+  context.translate(x, y);
+  context.rotate(angleToPlayer + Math.PI / 2);
+
+  // Left legs (4)
+  for (let i = 0; i < 4; i++) {
+    const angleOffset = -1.0 + i * 0.50;
+    const baseAngle = Math.PI + angleOffset;
+    const startX = Math.cos(baseAngle) * bodyRadius * 0.85;
+    const startY = Math.sin(baseAngle) * bodyRadius * 0.85;
+    const midAngle = baseAngle + 0.3;
+    const midDist = bodyRadius + legLength * 0.3;
+    const ctrlX = Math.cos(midAngle) * midDist;
+    const ctrlY = Math.sin(midAngle) * midDist;
+    const endX = Math.cos(baseAngle) * legLength;
+    const endY = Math.sin(baseAngle) * legLength;
+    const freq1 = 8 + i * 0.7;
+    const freq2 = 12 + i * 1.1;
+    const phase1 = i * 1.3;
+    const phase2 = i * 0.8 + 2.1;
+    const wave1 = Math.sin(animationTimer * freq1 + phase1) * waveAmp1;
+    const wave2 = Math.sin(animationTimer * freq2 + phase2) * waveAmp2;
+    const wave = wave1 + wave2;
+    const perpX = -Math.sin(baseAngle);
+    const perpY = Math.cos(baseAngle);
+    context.beginPath();
+    context.moveTo(startX, startY);
+    context.quadraticCurveTo(ctrlX + perpX * wave, ctrlY + perpY * wave, endX + perpX * wave * 0.7, endY + perpY * wave * 0.7);
+    context.strokeStyle = `rgb(${legColor[0]}, ${legColor[1]}, ${legColor[2]})`;
+    context.lineWidth = legWidth;
+    context.lineCap = 'round';
+    context.stroke();
+  }
+  // Right legs (4)
+  for (let i = 0; i < 4; i++) {
+    const angleOffset = 1.0 - i * 0.50;
+    const baseAngle = angleOffset;
+    const startX = Math.cos(baseAngle) * bodyRadius * 0.85;
+    const startY = Math.sin(baseAngle) * bodyRadius * 0.85;
+    const midAngle = baseAngle - 0.3;
+    const midDist = bodyRadius + legLength * 0.3;
+    const ctrlX = Math.cos(midAngle) * midDist;
+    const ctrlY = Math.sin(midAngle) * midDist;
+    const endX = Math.cos(baseAngle) * legLength;
+    const endY = Math.sin(baseAngle) * legLength;
+    const freq1 = 9 + i * 0.9;
+    const freq2 = 13 + i * 1.3;
+    const phase1 = i * 1.5 + 1.2;
+    const phase2 = i * 0.9 + 3.7;
+    const wave1 = Math.sin(animationTimer * freq1 + phase1) * waveAmp1;
+    const wave2 = Math.sin(animationTimer * freq2 + phase2) * waveAmp2;
+    const wave = wave1 + wave2;
+    const perpX = -Math.sin(baseAngle);
+    const perpY = Math.cos(baseAngle);
+    context.beginPath();
+    context.moveTo(startX, startY);
+    context.quadraticCurveTo(ctrlX + perpX * wave, ctrlY + perpY * wave, endX + perpX * wave * 0.7, endY + perpY * wave * 0.7);
+    context.strokeStyle = `rgb(${legColor[0]}, ${legColor[1]}, ${legColor[2]})`;
+    context.lineWidth = legWidth;
+    context.lineCap = 'round';
+    context.stroke();
+  }
+
+  // Body
+  context.beginPath();
+  context.arc(0, 0, bodyRadius, 0, Math.PI * 2);
+  context.fillStyle = `rgb(${bodyColor[0]}, ${bodyColor[1]}, ${bodyColor[2]})`;
+  context.fill();
+  context.strokeStyle = `rgb(${bodyEdgeColor[0]}, ${bodyEdgeColor[1]}, ${bodyEdgeColor[2]})`;
+  context.lineWidth = bodyStrokeWidth;
+  context.stroke();
+
+  context.restore();
+}
+
+/** Leech: a segmented body with a gaping mouth, drawn from segment colliders. */
+function drawLeech(
+  context: CanvasRenderingContext2D,
+  x: number, y: number, size: number,
+  animationTimer: number, angleToPlayer: number, level: number,
+  viewScale = 1.0, enemyObj: any = null,
+) {
+  // Ensure segments exist — fall back to a straight line if none provided.
+  let segments = enemyObj?.segmentColliders;
+  if (!segments || segments.length === 0) {
+    segments = [];
+    const segRadius = size / 3;
+    for (let i = 0; i < 6; i++) {
+      segments.push({
+        physicsBody: {
+          position: { x: x - i * segRadius * 1.1, y: y },
+          radius: segRadius,
+        },
+      });
+    }
+  }
+  if (!segments || segments.length < 2) return;
+
+  const headPhysX = segments[0].physicsBody.position.x;
+  const headPhysY = segments[0].physicsBody.position.y;
+  const screenPoints = segments.map(seg => {
+    const px = seg.physicsBody.position.x;
+    const py = seg.physicsBody.position.y;
+    return { x: x + (px - headPhysX), y: y + (py - headPhysY), radius: seg.physicsBody.radius };
+  });
+  if (screenPoints.length < 2) return;
+
+  const isFriendly = enemyObj?.isFriendly === true;
+  const bodyColor = isFriendly ? '#FFD700' : '#353535';
+  const outlineColor = isFriendly ? '#B8860B' : '#000000';
+  const segmentWidth = screenPoints[0].radius * 2;
+
+  context.save();
+
+  // Mouth (two curved mandibles at the head)
+  if (screenPoints.length >= 2) {
+    const headPoint = screenPoints[0];
+    const nextPoint = screenPoints[1] || headPoint;
+    const baseAngle = Math.atan2(nextPoint.y - headPoint.y, nextPoint.x - headPoint.x);
+    const rotationAngle = 3.0;
+    const swingAmount = Math.sin(animationTimer * 5) * 0.1;
+    const mouthLength = segmentWidth * 0.9;
+    const forwardOffset = segmentWidth * 0.1;
+    const startSeparation = segmentWidth * 0.3;
+    const endSeparation = segmentWidth * 0.4;
+    const mouthWidth = segmentWidth * 0.15;
+    const bendFactor = 1.2;
+
+    for (let side = -1; side <= 1; side += 2) {
+      const mouthAngle = baseAngle + rotationAngle + swingAmount * side;
+      const perpX = Math.cos(mouthAngle + Math.PI / 2);
+      const perpY = Math.sin(mouthAngle + Math.PI / 2);
+      const startX = headPoint.x + Math.cos(mouthAngle) * forwardOffset + perpX * startSeparation * side;
+      const startY = headPoint.y + Math.sin(mouthAngle) * forwardOffset + perpY * startSeparation * side;
+      const cp1X = headPoint.x + Math.cos(mouthAngle) * (forwardOffset + mouthLength * 0.2) + perpX * (startSeparation + (endSeparation - startSeparation) * 0.2) * side * bendFactor;
+      const cp1Y = headPoint.y + Math.sin(mouthAngle) * (forwardOffset + mouthLength * 0.2) + perpY * (startSeparation + (endSeparation - startSeparation) * 0.2) * side * bendFactor;
+      const cp2X = headPoint.x + Math.cos(mouthAngle) * (forwardOffset + mouthLength * 0.5) + perpX * (startSeparation + (endSeparation - startSeparation) * 0.5) * side * bendFactor;
+      const cp2Y = headPoint.y + Math.sin(mouthAngle) * (forwardOffset + mouthLength * 0.5) + perpY * (startSeparation + (endSeparation - startSeparation) * 0.5) * side * bendFactor;
+      const endX = headPoint.x + Math.cos(mouthAngle) * (forwardOffset + mouthLength) + perpX * endSeparation * side;
+      const endY = headPoint.y + Math.sin(mouthAngle) * (forwardOffset + mouthLength) + perpY * endSeparation * side;
+
+      context.beginPath();
+      context.moveTo(startX, startY);
+      context.bezierCurveTo(cp1X, cp1Y, cp2X, cp2Y, endX, endY);
+      context.strokeStyle = outlineColor;
+      context.lineWidth = mouthWidth;
+      context.stroke();
+    }
+  }
+
+  // Body: smooth curve through all segment centers, drawn as a thick stroke
+  context.beginPath();
+  context.moveTo(screenPoints[0].x, screenPoints[0].y);
+  for (let i = 0; i < screenPoints.length - 1; i++) {
+    const p0 = screenPoints[i];
+    const p1 = screenPoints[i + 1];
+    const xc = (p0.x + p1.x) / 2;
+    const yc = (p0.y + p1.y) / 2;
+    context.quadraticCurveTo(p0.x, p0.y, xc, yc);
+  }
+  context.lineTo(screenPoints[screenPoints.length - 1].x, screenPoints[screenPoints.length - 1].y);
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+  // Outline (slightly wider, dark)
+  context.strokeStyle = outlineColor;
+  context.lineWidth = segmentWidth * 1.2;
+  context.stroke();
+  // Fill (inner, colored)
+  context.strokeStyle = bodyColor;
+  context.lineWidth = segmentWidth;
+  context.stroke();
+
+  context.restore();
+}
+
+// =============================================================================
+// Custom item renderers — Soil, Fang, Orange, Faster, Antennae, Third Eye
+// =============================================================================
+
+/**
+ * Routes new custom-drawn items to their dedicated renderers.
+ * Returns true if the item was drawn (so the caller skips the generic
+ * drawItemIcon); false to fall through to the default renderer.
+ */
+function drawCustomItemIcon(
+  ctx: CanvasRenderingContext2D,
+  itemType: number,
+  x: number, y: number, radius: number,
+  animTimer: number, rarity: number,
+): boolean {
+  // Item IDs: 43=Soil, 44=Fang, 45=Orange, 46=Faster, 47=Antennae, 48=Third Eye
+  switch (itemType) {
+    case 43: drawSoil(ctx, x, y, radius, animTimer); return true;
+    case 44: drawFang(ctx, x, y, radius, animTimer); return true;
+    case 45: drawOrange(ctx, x, y, radius, animTimer); return true;
+    case 46: drawFaster(ctx, x, y, radius, animTimer); return true;
+    case 47: drawAntennaeIcon(ctx, x, y, radius, animTimer); return true;
+    case 48: drawThirdEyeIcon(ctx, x, y, radius, animTimer); return true;
+    default: return false;
+  }
+}
+
+/** Soil: an irregular brown clump. */
+function drawSoil(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, animTimer: number) {
+  const s = radius / 50;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s, s);
+  const fillColor = '#6a4824';
+  const strokeColor = '#3f2a12';
+  ctx.beginPath();
+  ctx.moveTo(75 - 100, 30 - 75);
+  ctx.lineTo(125 - 100, 30 - 75);
+  ctx.lineTo(145 - 100, 42 - 75);
+  ctx.lineTo(155 - 100, 70 - 75);
+  ctx.lineTo(155 - 100, 90 - 75);
+  ctx.lineTo(140 - 100, 115 - 75);
+  ctx.lineTo(110 - 100, 125 - 75);
+  ctx.lineTo(90 - 100, 125 - 75);
+  ctx.lineTo(60 - 100, 115 - 75);
+  ctx.lineTo(45 - 100, 90 - 75);
+  ctx.lineTo(45 - 100, 70 - 75);
+  ctx.lineTo(55 - 100, 42 - 75);
+  ctx.closePath();
+  ctx.fillStyle = fillColor;
+  ctx.fill();
+  ctx.lineWidth = 10;
+  ctx.strokeStyle = strokeColor;
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** Fang: a curved red tooth. */
+function drawFang(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, animTimer: number) {
+  const s = radius / 50;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s, s);
+  ctx.beginPath();
+  ctx.moveTo(100 - 100, 30 - 75);
+  ctx.quadraticCurveTo(140 - 100, 80 - 75, 100 - 100, 135 - 75);
+  ctx.quadraticCurveTo(60 - 100, 80 - 75, 100 - 100, 30 - 75);
+  ctx.closePath();
+  ctx.fillStyle = '#7d2014';
+  ctx.fill();
+  ctx.lineWidth = 10;
+  ctx.strokeStyle = '#5a1410';
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** Orange: a round orange fruit with a green leaf. */
+function drawOrange(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, animTimer: number) {
+  const s = radius / 50;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s, s);
+  const R = 42;
+  const drawOrangeWithLeaf = (ox: number, oy: number, rotation: number) => {
+    ctx.beginPath();
+    ctx.arc(ox - 100, oy - 75, R, 0, Math.PI * 2);
+    ctx.fillStyle = '#f5c35f';
+    ctx.fill();
+    ctx.lineWidth = 10;
+    ctx.strokeStyle = '#c9983c';
+    ctx.stroke();
+    ctx.save();
+    ctx.translate(ox - 100, oy - 75);
+    ctx.rotate(rotation);
+    const leafX = -4, leafY = -R + 10;
+    ctx.beginPath();
+    ctx.moveTo(leafX, leafY);
+    ctx.quadraticCurveTo(leafX + 16, leafY - 20, leafX + 30, leafY - 6);
+    ctx.quadraticCurveTo(leafX + 20, leafY + 10, leafX, leafY);
+    ctx.closePath();
+    ctx.fillStyle = '#4b8b33';
+    ctx.fill();
+    ctx.lineWidth = 5;
+    ctx.strokeStyle = '#2c6214';
+    ctx.stroke();
+    ctx.restore();
+  };
+  drawOrangeWithLeaf(75, 115, -2.09);
+  drawOrangeWithLeaf(125, 115, 2.09);
+  drawOrangeWithLeaf(100, 65, 0);
+  ctx.restore();
+}
+
+/** Faster: a small glowing white ball (like an iris but white). */
+function drawFaster(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, animTimer: number) {
+  const r = radius * 0.7;
+  ctx.save();
+  ctx.translate(x, y);
+  // Outer glow
+  const glow = ctx.createRadialGradient(0, 0, r * 0.5, 0, 0, r * 1.8);
+  glow.addColorStop(0, 'rgba(255,255,255,0.6)');
+  glow.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 1.8, 0, Math.PI * 2);
+  ctx.fill();
+  // White ball
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#cccccc';
+  ctx.stroke();
+  // Inner shine
+  ctx.beginPath();
+  ctx.arc(-r * 0.3, -r * 0.3, r * 0.35, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  ctx.fill();
+  ctx.restore();
+}
+
+/** Antennae icon (for cards/inventory): two curved feelers. */
+function drawAntennaeIcon(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, animTimer: number) {
+  const s = radius / 50;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s, s);
+  const drawAntenna = (isLeft: boolean) => {
+    const side = isLeft ? -1 : 1;
+    ctx.save();
+    ctx.translate(14 * side, 20);
+    ctx.rotate((Math.PI / 6) * side);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(-8, -30, 0, -70);
+    ctx.quadraticCurveTo(8, -30, 0, 0);
+    ctx.fillStyle = '#333333';
+    ctx.fill();
+    ctx.strokeStyle = '#111111';
+    ctx.lineWidth = 5;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+    // Tip dot
+    ctx.beginPath();
+    ctx.arc(0, -70, 6, 0, Math.PI * 2);
+    ctx.fillStyle = '#555555';
+    ctx.fill();
+    ctx.restore();
+  };
+  drawAntenna(true);
+  drawAntenna(false);
+  ctx.restore();
+}
+
+/** Third Eye icon (for cards/inventory): a single eye with iris. */
+function drawThirdEyeIcon(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, animTimer: number) {
+  const r = radius * 0.8;
+  ctx.save();
+  ctx.translate(x, y);
+  // Eye outline (almond shape)
+  ctx.beginPath();
+  ctx.ellipse(0, 0, r, r * 0.6, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#6c3483';
+  ctx.stroke();
+  // Iris
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 0.45, 0, Math.PI * 2);
+  ctx.fillStyle = '#9b59b6';
+  ctx.fill();
+  // Pupil
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 0.2, 0, Math.PI * 2);
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fill();
+  // Shine
+  ctx.beginPath();
+  ctx.arc(-r * 0.15, -r * 0.15, r * 0.1, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.restore();
+}
+
+// =============================================================================
+// Player body accessories — Antennae & Third Eye (drawn on body, not rotating)
+// =============================================================================
+
+/**
+ * Draws Antennae on the player body. These do NOT rotate with the flower —
+ * they stay fixed relative to the world, sticking up from the top of the head.
+ */
+function drawPlayerAntennae(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, radius: number,
+  rarity: number, time: number,
+) {
+  const sway = Math.sin(time * 2) * 0.08;
+  const antLength = radius * 1.4;
+  const baseY = y - radius * 0.5;
+  ctx.save();
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  for (let side = -1; side <= 1; side += 2) {
+    ctx.save();
+    ctx.translate(x + side * radius * 0.35, baseY);
+    ctx.rotate(side * (Math.PI / 5) + sway * side);
+    // Antenna stalk
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(-4, -antLength * 0.5, 0, -antLength);
+    ctx.quadraticCurveTo(4, -antLength * 0.5, 0, 0);
+    ctx.fillStyle = '#333333';
+    ctx.fill();
+    ctx.strokeStyle = '#111111';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    // Tip ball — colored by rarity
+    ctx.beginPath();
+    ctx.arc(0, -antLength, radius * 0.18, 0, Math.PI * 2);
+    ctx.fillStyle = RARITIES[Math.max(0, Math.min(10, rarity))]?.color || '#ffffff';
+    ctx.fill();
+    ctx.strokeStyle = '#111111';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+/**
+ * Draws a Third Eye on the player's forehead. It does NOT rotate with the
+ * flower — it stays fixed on the body, looking toward the camera.
+ */
+function drawPlayerThirdEye(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, radius: number,
+  rarity: number, time: number,
+) {
+  const eyeR = radius * 0.32;
+  const eyeX = x;
+  const eyeY = y - radius * 0.35;
+  const blink = Math.sin(time * 0.7) > 0.95 ? 0.3 : 1.0; // occasional blink
+  ctx.save();
+  // Eye outline (almond shape)
+  ctx.beginPath();
+  ctx.ellipse(eyeX, eyeY, eyeR, eyeR * 0.6 * blink, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#6c3483';
+  ctx.stroke();
+  if (blink > 0.5) {
+    // Iris — colored by rarity
+    ctx.beginPath();
+    ctx.arc(eyeX, eyeY, eyeR * 0.45, 0, Math.PI * 2);
+    ctx.fillStyle = RARITIES[Math.max(0, Math.min(10, rarity))]?.color || '#9b59b6';
+    ctx.fill();
+    // Pupil
+    ctx.beginPath();
+    ctx.arc(eyeX, eyeY, eyeR * 0.2, 0, Math.PI * 2);
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fill();
+    // Shine
+    ctx.beginPath();
+    ctx.arc(eyeX - eyeR * 0.15, eyeY - eyeR * 0.15, eyeR * 0.1, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+  }
+  ctx.restore();
 }
