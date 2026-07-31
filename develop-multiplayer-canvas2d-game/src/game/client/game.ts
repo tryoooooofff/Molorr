@@ -2860,6 +2860,11 @@ export class GameClient {
   private my = 0;
   private mouseDown = false;
   private rightDown = false;
+  /** Pointer id that owns `mouseDown`.  On multi-touch screens several fingers
+   *  can be down at once; we must only clear `mouseDown` when the SAME finger
+   *  that originally pressed the game-world lifts — otherwise lifting the
+   *  joystick finger would cancel a still-held game-world press. */
+  private mouseDownPointerId: number | null = null;
   private keys = new Set<string>();
   private saveTimer = 0;
   private saveDirty = false;
@@ -2966,6 +2971,11 @@ export class GameClient {
     this.canvas.addEventListener("pointerdown", this.onPointerDown);
     window.addEventListener("pointermove", this.onPointerMove);
     window.addEventListener("pointerup", this.onPointerUp);
+    // pointercancel fires when the browser aborts a touch mid-stream (e.g.
+    // system gesture, too many fingers, tab switch).  Without this, a
+    // cancelled spread finger would leave `mobileSpreadActive` stuck on,
+    // and a cancelled joystick finger would leave the knob frozen.
+    window.addEventListener("pointercancel", this.onPointerCancel);
     this.canvas.addEventListener("contextmenu", this.onContext);
     this.canvas.addEventListener("wheel", this.onWheel, { passive: false });
     this.resize();
@@ -2982,6 +2992,7 @@ export class GameClient {
     this.canvas.removeEventListener("pointerdown", this.onPointerDown);
     window.removeEventListener("pointermove", this.onPointerMove);
     window.removeEventListener("pointerup", this.onPointerUp);
+    window.removeEventListener("pointercancel", this.onPointerCancel);
     this.canvas.removeEventListener("contextmenu", this.onContext);
     this.canvas.removeEventListener("wheel", this.onWheel);
     window.removeEventListener("resize", this.resize);
@@ -4532,9 +4543,12 @@ private bagLayout() {
   private releaseGameplayInput(send = true) {
     this.keys.clear();
     this.mouseDown = false;
+    this.mouseDownPointerId = null;
     this.rightDown = false;
     this.mobileSpreadActive = false;
+    this.mobileSpreadPointerId = null;
     this.mobileContractActive = false;
+    this.mobileContractPointerId = null;
     this.mobileJoystick.active = false;
     this.mobileJoystick.pointerId = null;
     this.mobileJoystick.currX = this.mobileJoystick.centerX;
@@ -4798,7 +4812,15 @@ private bagLayout() {
           this.mobileJoystick.currX = p.x;
           this.mobileJoystick.currY = p.y;
           this.lastTouchTime = performance.now();
-          try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
+          // NOTE: do NOT call setPointerCapture here.  On several mobile
+          // browsers capturing one pointer can cause the browser to fire
+          // pointercancel (or even a stray pointerup with the wrong id)
+          // for OTHER active pointers — which would silently release the
+          // Spread/Defend button the player is still holding.  We don't
+          // need capture anyway: pointermove/pointerup are already bound
+          // on `window`, so the joystick keeps tracking the finger even
+          // when it slides off the canvas.
+          if (e.cancelable) e.preventDefault();
           return;
         }
         // Check if the touch hits any HUD button or Map button first!
@@ -4825,7 +4847,8 @@ private bagLayout() {
             this.mobileJoystick.currX = p.x;
             this.mobileJoystick.currY = p.y;
             this.lastTouchTime = performance.now();
-            try { (e.target as Element)?.setPointerCapture?.(e.pointerId); } catch {}
+            // No setPointerCapture — see comment in the rect-hit branch above.
+            if (e.cancelable) e.preventDefault();
             return;
           }
         }
@@ -4836,42 +4859,81 @@ private bagLayout() {
       return;
     }
     this.mouseDown = true;
+    this.mouseDownPointerId = e.pointerId;
     if (this.scene === "menu") this.menuClick(p.x, p.y);
     else this.gameClick(p.x, p.y, e.shiftKey);
   };
 
+  /**
+   * Shared cleanup for one pointer lifting or being cancelled.
+   *
+   * Each mobile control (spread, contract, joystick) is only released by the
+   * SAME pointer id that originally pressed it — a different finger lifting
+   * must never cancel a still-held button.  `mouseDown` is likewise only
+   * cleared by its owning pointer.  This is the core rule that keeps the
+   * joystick and the Spread/Defend buttons fully independent on multi-touch
+   * screens.
+   */
+  private releaseMobilePointer(e: PointerEvent) {
+    if (this.mobileSpreadPointerId !== null && this.mobileSpreadPointerId === e.pointerId) {
+      this.mobileSpreadActive = false;
+      this.mobileSpreadPointerId = null;
+    }
+    if (this.mobileContractPointerId !== null && this.mobileContractPointerId === e.pointerId) {
+      this.mobileContractActive = false;
+      this.mobileContractPointerId = null;
+    }
+    if (
+      this.mobileJoystick.active &&
+      (this.mobileJoystick.pointerId === null || this.mobileJoystick.pointerId === e.pointerId)
+    ) {
+      this.mobileJoystick.active = false;
+      this.mobileJoystick.currX = this.mobileJoystick.centerX;
+      this.mobileJoystick.currY = this.mobileJoystick.centerY;
+      this.mobileJoystick.pointerId = null;
+    }
+    // Only clear mouseDown for the finger that owns it.  Without this guard,
+    // lifting the joystick finger would also clear a game-world press held
+    // by a different finger.
+    if (this.mouseDownPointerId !== null && this.mouseDownPointerId === e.pointerId) {
+      this.mouseDown = false;
+      this.mouseDownPointerId = null;
+    }
+  }
+
   private onPointerUp = (e: PointerEvent) => {
     // Account panel: release any scrollbar drag.
     if (this.accountSystem.panelOpen) this.accountSystem.handleMouseUp();
-    // Release mobile touch buttons
-    if (this.isMobile) {
-      // Release spread/contract only when the finger that pressed them lifts.
-      // A different finger (joystick, bag) must never cancel the other.
-      if (this.mobileSpreadPointerId !== null && this.mobileSpreadPointerId === e.pointerId) {
-        this.mobileSpreadActive = false;
-        this.mobileSpreadPointerId = null;
-      }
-      if (this.mobileContractPointerId !== null && this.mobileContractPointerId === e.pointerId) {
-        this.mobileContractActive = false;
-        this.mobileContractPointerId = null;
-      }
-      if (this.mobileJoystick.active && (this.mobileJoystick.pointerId === null || this.mobileJoystick.pointerId === e.pointerId)) {
-        this.mobileJoystick.active = false;
-        this.mobileJoystick.currX = this.mobileJoystick.centerX;
-        this.mobileJoystick.currY = this.mobileJoystick.centerY;
-        this.mobileJoystick.pointerId = null;
-      }
-    }
+    // Release mobile touch buttons (spread / contract / joystick) — each
+    // only by its own finger.
+    if (this.isMobile) this.releaseMobilePointer(e);
     if (e.button === 2) {
       this.rightDown = false;
       return;
     }
-    this.mouseDown = false;
+    // On desktop (no touch) mouseDown was set by this same pointer, so the
+    // releaseMobilePointer guard above already cleared it.  On touch screens
+    // mouseDown is usually not set for control taps, so this is a no-op
+    // safety net for the desktop path.
+    if (!this.isMobile) {
+      this.mouseDown = false;
+      this.mouseDownPointerId = null;
+    }
     this.bagDraggingThumb = false;
     this.craftDraggingThumb = false;
     this.mobGallery.handleMouseUp();
     if (this.settings.panelOpen) this.settings.handleMouseUp();
     if (this.drag) this.dropDrag(this.mx, this.my);
+  };
+
+  /**
+   * pointercancel handler — the browser fires this (instead of pointerup)
+   * when it aborts a touch mid-stream: system gesture, too many simultaneous
+   * touches, tab switch, etc.  We must run the exact same per-pointer cleanup
+   * so a cancelled finger doesn't leave its control stuck on.
+   */
+  private onPointerCancel = (e: PointerEvent) => {
+    if (this.isMobile) this.releaseMobilePointer(e);
   };
 
   private onWheel = (e: WheelEvent) => {
