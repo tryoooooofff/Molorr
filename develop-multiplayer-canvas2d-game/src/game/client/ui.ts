@@ -1376,8 +1376,8 @@ export function drawMob(
     scale = 1.0,
     animationTimer = 0,
     antennaColor: readonly number[] | string = [50, 50, 50],
-    antennaLen = 20,
-    antennaWidth = 2,
+    antennaLen = 18,
+    antennaWidth = 2.5,
     antennaWaveAmp = 0.2,
     antennaWaveFreq = 10,
     bendFactor = 0.9,
@@ -1633,62 +1633,89 @@ export function drawMob(
     }
     ctx.restore();
   };
-
-  const drawCrab = () => {
+const drawCrab = () => {
     const bodyColor = friendly ? [255, 215, 0] : [230, 120, 80];
     const bodyStrokeColor = friendly ? [200, 160, 0] : [180, 80, 50];
     const limbColor = friendly ? [180, 140, 0] : [40, 40, 40];
     const legWidthMult = 0.65;
     const clawSizeMult = 0.4;
     const scale = (radius * 2) / 90;
+    
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(angle + Math.PI / 2);
+    
     const anim = t * 3;
-    const drawLeg = (baseX: number, baseY: number, dirX: number, dirY: number, phase: number) => {
-      const swing = Math.sin(anim * 2.6 + phase) * 0.25;
-      const cos = Math.cos(swing), sin = Math.sin(swing);
-      const lx = dirX * cos - dirY * sin;
-      const ly = dirX * sin + dirY * cos;
-      ctx.beginPath();
-      ctx.moveTo(baseX * scale, baseY * scale);
-      ctx.lineTo((baseX + lx * 0.7) * scale, (baseY + ly * 0.7) * scale);
-      ctx.strokeStyle = css(limbColor);
-      ctx.lineWidth = 4 * scale * legWidthMult;
-      ctx.lineCap = "round";
-      ctx.stroke();
+    
+    const drawLeg = (baseX, baseY, dirX, dirY, phase) => {
+        const swing = Math.sin(anim * 2.6 + phase) * 0.25;
+        
+        const cosThigh = Math.cos(swing);
+        const sinThigh = Math.sin(swing);
+        const lenThigh = 1.2;
+        
+        const kneeX = baseX + (dirX * cosThigh - dirY * sinThigh) * lenThigh;
+        const kneeY = baseY + (dirX * sinThigh + dirY * cosThigh) * lenThigh;
+        
+        ctx.beginPath();
+        ctx.moveTo(baseX * scale, baseY * scale);
+        ctx.lineTo(kneeX * scale, kneeY * scale);
+        ctx.strokeStyle = css(limbColor);
+        ctx.lineWidth = 6 * scale * legWidthMult;
+        ctx.lineCap = "round";
+        ctx.stroke();
+        
+        const kneeBend = Math.abs(Math.sin(anim * 2.6 + phase)) * 0.05;
+        const legAngle = swing + (kneeBend * dirX);
+        
+        const cosCalf = Math.cos(legAngle);
+        const sinCalf = Math.sin(legAngle);
+        const lenCalf = 1;
+        
+        const footX = kneeX + (dirX * cosCalf - dirY * sinCalf) * lenCalf;
+        const footY = kneeY + (dirX * sinCalf + dirY * cosCalf) * lenCalf;
+        
+        ctx.beginPath();
+        ctx.moveTo(kneeX * scale, kneeY * scale);
+        ctx.lineTo(footX * scale, footY * scale);
+        ctx.lineWidth = 6 * scale * legWidthMult;
+        ctx.stroke();
     };
-    [-1, 3, 7, 12].forEach((ly, i) => {
-      const len = [7, 6, 6, 3][i];
-      drawLeg(26, ly, len, (i - 1.5) * 3, i * 0.7);
-      drawLeg(-26, ly, -len, (i - 1.5) * 3, i * 0.7);
+    
+    [-1, 4, 8, 14].forEach((ly, i) => {
+        const len = [7, 6, 6, 5][i];
+        drawLeg(22, ly, len, (i - 1.5) * 3, i * 0.7);
+        drawLeg(-22, ly, -len, (i - 1.5) * 3, i * 0.7);
     });
-    const drawClaw = (ox: number, oy: number, flip: number, clawAngle: number) => {
-      ctx.save();
-      ctx.translate(ox * scale, oy * scale);
-      ctx.scale(flip, 1);
-      ctx.rotate(clawAngle);
-      const s = scale * clawSizeMult;
-      const offsetX = -32 * s;
-      const offsetY = -50 * s;
-      ctx.fillStyle = "#2a2a2a";
-      ctx.strokeStyle = "#111111";
-      ctx.lineWidth = 3 * s;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      ctx.beginPath();
-      ctx.moveTo(offsetX, offsetY);
-      ctx.quadraticCurveTo(8 * s + offsetX, 25 * s + offsetY, 18 * s + offsetX, offsetY);
-      ctx.quadraticCurveTo(15 * s + offsetX, 22 * s + offsetY, 0, 0);
-      ctx.quadraticCurveTo(-18 * s + offsetX, 35 * s + offsetY, offsetX, offsetY);
-      ctx.fill();
-      ctx.stroke();
-      ctx.restore();
+    
+    const drawClaw = (ox, oy, flip, clawAngle) => {
+        ctx.save();
+        ctx.translate(ox * scale, oy * scale);
+        ctx.scale(flip, 1);
+        ctx.rotate(clawAngle);
+        const s = scale * clawSizeMult;
+        const offsetX = -32 * s;
+        const offsetY = -50 * s;
+        ctx.fillStyle = "#2a2a2a";
+        ctx.strokeStyle = "#222222";
+        ctx.lineWidth = 8 * s;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.beginPath();
+        ctx.moveTo(offsetX, offsetY);
+        ctx.quadraticCurveTo(8 * s + offsetX, 25 * s + offsetY, 18 * s + offsetX, offsetY);
+        ctx.quadraticCurveTo(15 * s + offsetX, 22 * s + offsetY, 0, 0);
+        ctx.quadraticCurveTo(-18 * s + offsetX, 35 * s + offsetY, offsetX, offsetY);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
     };
-    const visualScale = Math.sqrt(scale);
+    
+    const visualScale = Math.pow(scale, 0.01);
     const clawAngle = Math.sin(anim * 2.5) * 0.2;
     drawClaw(-visualScale * 25, -10, 1, clawAngle);
     drawClaw(visualScale * 25, -10, -1, clawAngle);
+    
     const wFront = 160 * scale / 3;
     const wBack = 132 * scale / 3;
     const H = 95 * scale / 3;
@@ -1696,9 +1723,10 @@ export function drawMob(
     const arc = 24 * scale / 3;
     const xFL = -wFront / 2, xFR = wFront / 2, xBL = -wBack / 2, xBR = wBack / 2;
     const yF = -H / 2, yB = H / 2;
+    
     ctx.fillStyle = css(bodyColor);
     ctx.strokeStyle = css(bodyStrokeColor);
-    ctx.lineWidth = 5 * scale / 2;
+    ctx.lineWidth = 8 * scale / 2;
     ctx.beginPath();
     ctx.moveTo(xBL, yB - r);
     ctx.arcTo(xBL, yB, xBL + r, yB, r);
@@ -1712,18 +1740,19 @@ export function drawMob(
     ctx.closePath();
     ctx.fill();
     ctx.stroke();
+    
     ctx.strokeStyle = "rgba(0,0,0,0.2)";
-    ctx.lineWidth = 4 * scale / 3;
+    ctx.lineWidth = 8 * scale / 2;
     [[-15, -20, -11, 8, -13, 22], [15, -20, 11, 8, 13, 22]].forEach(([ax, ay, bx, by, ex, ey]) => {
-      const s = scale / 3;
-      ctx.beginPath();
-      ctx.moveTo(ax * s, ay * s);
-      ctx.bezierCurveTo(bx * s, (by / 2) * s, bx * s, by * s, ex * s, ey * s);
-      ctx.stroke();
+        const s = scale / 3;
+        ctx.beginPath();
+        ctx.moveTo(ax * s, ay * s);
+        ctx.bezierCurveTo(bx * s, (by / 2) * s, bx * s, by * s, ex * s, ey * s);
+        ctx.stroke();
     });
+    
     ctx.restore();
-  };
-
+};
   const drawWorkerAnt = () => {
     const scaledSize = radius * 2;
     const bodyColor = friendly ? [200, 160, 0] : [60, 60, 60];
@@ -2137,7 +2166,7 @@ export function drawMob(
   };
 
   const drawStarfish = () => {
-    const baseScale = radius * 2.2;
+    const baseScale = radius * 2.5;
     const lightColor = friendly ? "rgb(255, 235, 120)" : "rgb(255, 150, 80)";
     const darkColor = friendly ? "rgb(255, 215, 0)" : "rgb(200, 90, 40)";
     ctx.save();
