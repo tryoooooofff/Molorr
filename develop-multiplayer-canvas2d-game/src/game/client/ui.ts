@@ -2846,3 +2846,456 @@ export const ease = {
   inOutCubic: (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2),
   outBack: (t: number) => 1 + 2.7 * Math.pow(t - 1, 3) + 1.7 * Math.pow(t - 1, 2),
 };
+
+// =============================================================================
+// Custom mob renderers — Hornet, Spider, Leech
+// =============================================================================
+
+/** Hornet: a striped flying insect with a stinger and antennae. */
+export function drawHornet(
+  context: CanvasRenderingContext2D,
+  x: number, y: number, size: number,
+  animationTimer: number, angleToPlayer: number, level: number,
+  viewScale = 1.0, enemyObj: any = null,
+) {
+  const scaledSize = size;
+  if (scaledSize <= 0) return;
+  const isFriendly = enemyObj && enemyObj.isFriendly === true;
+  const scale = scaledSize / 110;
+  const facingAngle = enemyObj?.facingAngle !== undefined ? enemyObj.facingAngle : angleToPlayer;
+  let colors: { body: string; stroke: string; dark: string; stingerColor: string };
+  if (isFriendly) {
+    colors = { body: '#ffe667', stroke: '#d1bb54', dark: '#333333', stingerColor: '#333333' };
+  } else {
+    colors = { body: '#ffd363', stroke: '#d3ad46', dark: '#333333', stingerColor: '#333333' };
+  }
+  context.save();
+  context.translate(x, y);
+  context.rotate(facingAngle + Math.PI / 2);
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+
+  const bodyW = 55 * scale;
+  const bodyH = 75 * scale;
+  const strokeWidth = 12 * scale;
+
+  // Stinger
+  context.beginPath();
+  context.moveTo(-20 * scale, 50 * scale);
+  context.lineTo(0, 120 * scale);
+  context.lineTo(20 * scale, 50 * scale);
+  context.closePath();
+  context.fillStyle = colors.stingerColor;
+  context.strokeStyle = colors.stingerColor;
+  context.lineWidth = strokeWidth;
+  context.fill();
+  context.stroke();
+
+  // Body ellipse
+  context.beginPath();
+  context.ellipse(0, 0, bodyW, bodyH, 0, 0, Math.PI * 2);
+  context.fillStyle = colors.body;
+  context.fill();
+
+  // Stripes (clipped)
+  context.save();
+  context.beginPath();
+  context.ellipse(0, 0, bodyW, bodyH, 0, 0, Math.PI * 2);
+  context.clip();
+  context.fillStyle = colors.dark;
+  const stripeWidth = 26 * scale;
+  context.fillRect(-bodyW * 1.5, -45 * scale, bodyW * 3, stripeWidth);
+  context.fillRect(-bodyW * 1.5, 5 * scale, bodyW * 3, stripeWidth);
+  context.fillRect(-bodyW * 1.5, 55 * scale, bodyW * 3, stripeWidth);
+  context.restore();
+
+  // Body outline
+  context.beginPath();
+  context.ellipse(0, 0, bodyW, bodyH, 0, 0, Math.PI * 2);
+  context.strokeStyle = colors.stroke;
+  context.lineWidth = strokeWidth;
+  context.stroke();
+
+  // Antennae
+  const drawAntennaHornet = (isLeft: boolean) => {
+    context.save();
+    const side = isLeft ? -1 : 1;
+    context.translate(14 * scale * side, -62 * scale);
+    context.rotate((Math.PI / 6) * side);
+    context.beginPath();
+    context.moveTo(0, 0);
+    context.quadraticCurveTo(-8 * scale, -30 * scale, 0, -70 * scale);
+    context.quadraticCurveTo(8 * scale, -30 * scale, 0, 0);
+    context.fillStyle = colors.dark;
+    context.fill();
+    context.strokeStyle = colors.dark;
+    context.lineWidth = 5 * scale;
+    context.lineJoin = 'round';
+    context.stroke();
+    context.restore();
+  };
+  drawAntennaHornet(true);
+  drawAntennaHornet(false);
+
+  context.restore();
+}
+
+/** Spider: a round-bodied arachnid with 8 animated legs. */
+export function drawSpider(
+  context: CanvasRenderingContext2D,
+  x: number, y: number, size: number,
+  animationTimer: number, angleToPlayer: number, level: number,
+  viewScale = 1.0, enemyObj: any = null,
+) {
+  const scaledSize = size;
+  if (scaledSize <= 0) return;
+  const isFriendly = enemyObj && enemyObj.isFriendly === true;
+  const WAVE_MULTIPLIERS: Record<string, number> = { 'common': 1.0, 'unusual': 1.1, 'rare': 1.3, 'epic': 1.5, 'legendary': 1.8, 'mythic': 2.2, 'ultra': 2.7, 'super': 4.1, 'omega': 5.3, 'eternal': 5.5 };
+  const rarity: string = enemyObj?.rarity?.toLowerCase?.() || 'default';
+  const waveMult = WAVE_MULTIPLIERS[rarity] || 1.0;
+  const legColor: [number, number, number] = isFriendly ? [255, 215, 0] : [50, 48, 50];
+  const bodyColor: [number, number, number] = isFriendly ? [200, 160, 0] : [79, 64, 46];
+  const bodyEdgeColor: [number, number, number] = isFriendly ? [180, 140, 0] : [70, 55, 45];
+  const bodyRadius = scaledSize / 2;
+  const legLength = bodyRadius * 2.2;
+  const baseLegWidth = 3.5;
+  const baseBodyStroke = 3.5;
+  const legWidth = baseLegWidth * scaledSize / 35;
+  const bodyStrokeWidth = baseBodyStroke * scaledSize / 40;
+  const waveAmp1 = 7 * waveMult;
+  const waveAmp2 = 4 * waveMult;
+
+  context.save();
+  context.translate(x, y);
+  context.rotate(angleToPlayer + Math.PI / 2);
+
+  // Left legs (4)
+  for (let i = 0; i < 4; i++) {
+    const angleOffset = -1.0 + i * 0.50;
+    const baseAngle = Math.PI + angleOffset;
+    const startX = Math.cos(baseAngle) * bodyRadius * 0.85;
+    const startY = Math.sin(baseAngle) * bodyRadius * 0.85;
+    const midAngle = baseAngle + 0.3;
+    const midDist = bodyRadius + legLength * 0.3;
+    const ctrlX = Math.cos(midAngle) * midDist;
+    const ctrlY = Math.sin(midAngle) * midDist;
+    const endX = Math.cos(baseAngle) * legLength;
+    const endY = Math.sin(baseAngle) * legLength;
+    const freq1 = 8 + i * 0.7;
+    const freq2 = 12 + i * 1.1;
+    const phase1 = i * 1.3;
+    const phase2 = i * 0.8 + 2.1;
+    const wave1 = Math.sin(animationTimer * freq1 + phase1) * waveAmp1;
+    const wave2 = Math.sin(animationTimer * freq2 + phase2) * waveAmp2;
+    const wave = wave1 + wave2;
+    const perpX = -Math.sin(baseAngle);
+    const perpY = Math.cos(baseAngle);
+    context.beginPath();
+    context.moveTo(startX, startY);
+    context.quadraticCurveTo(ctrlX + perpX * wave, ctrlY + perpY * wave, endX + perpX * wave * 0.7, endY + perpY * wave * 0.7);
+    context.strokeStyle = `rgb(${legColor[0]}, ${legColor[1]}, ${legColor[2]})`;
+    context.lineWidth = legWidth;
+    context.lineCap = 'round';
+    context.stroke();
+  }
+  // Right legs (4)
+  for (let i = 0; i < 4; i++) {
+    const angleOffset = 1.0 - i * 0.50;
+    const baseAngle = angleOffset;
+    const startX = Math.cos(baseAngle) * bodyRadius * 0.85;
+    const startY = Math.sin(baseAngle) * bodyRadius * 0.85;
+    const midAngle = baseAngle - 0.3;
+    const midDist = bodyRadius + legLength * 0.3;
+    const ctrlX = Math.cos(midAngle) * midDist;
+    const ctrlY = Math.sin(midAngle) * midDist;
+    const endX = Math.cos(baseAngle) * legLength;
+    const endY = Math.sin(baseAngle) * legLength;
+    const freq1 = 9 + i * 0.9;
+    const freq2 = 13 + i * 1.3;
+    const phase1 = i * 1.5 + 1.2;
+    const phase2 = i * 0.9 + 3.7;
+    const wave1 = Math.sin(animationTimer * freq1 + phase1) * waveAmp1;
+    const wave2 = Math.sin(animationTimer * freq2 + phase2) * waveAmp2;
+    const wave = wave1 + wave2;
+    const perpX = -Math.sin(baseAngle);
+    const perpY = Math.cos(baseAngle);
+    context.beginPath();
+    context.moveTo(startX, startY);
+    context.quadraticCurveTo(ctrlX + perpX * wave, ctrlY + perpY * wave, endX + perpX * wave * 0.7, endY + perpY * wave * 0.7);
+    context.strokeStyle = `rgb(${legColor[0]}, ${legColor[1]}, ${legColor[2]})`;
+    context.lineWidth = legWidth;
+    context.lineCap = 'round';
+    context.stroke();
+  }
+
+  // Body
+  context.beginPath();
+  context.arc(0, 0, bodyRadius, 0, Math.PI * 2);
+  context.fillStyle = `rgb(${bodyColor[0]}, ${bodyColor[1]}, ${bodyColor[2]})`;
+  context.fill();
+  context.strokeStyle = `rgb(${bodyEdgeColor[0]}, ${bodyEdgeColor[1]}, ${bodyEdgeColor[2]})`;
+  context.lineWidth = bodyStrokeWidth;
+  context.stroke();
+
+  context.restore();
+}
+
+/** Leech: a segmented body with a gaping mouth, drawn from segment colliders. */
+export function drawLeech(
+  context: CanvasRenderingContext2D,
+  x: number, y: number, size: number,
+  animationTimer: number, angleToPlayer: number, level: number,
+  viewScale = 1.0, enemyObj: any = null,
+) {
+  type SegCollider = { physicsBody: { position: { x: number; y: number }; radius: number } };
+  let segments: SegCollider[] = enemyObj?.segmentColliders;
+  if (!segments || segments.length === 0) {
+    segments = [];
+    const segRadius = size / 3;
+    for (let i = 0; i < 6; i++) {
+      segments.push({
+        physicsBody: {
+          position: { x: x - i * segRadius * 1.1, y },
+          radius: segRadius,
+        },
+      });
+    }
+  }
+  if (!segments || segments.length < 2) return;
+
+  const headPhysX = segments[0].physicsBody.position.x;
+  const headPhysY = segments[0].physicsBody.position.y;
+  const screenPoints = segments.map(seg => {
+    const px = seg.physicsBody.position.x;
+    const py = seg.physicsBody.position.y;
+    return { x: x + (px - headPhysX), y: y + (py - headPhysY), radius: seg.physicsBody.radius };
+  });
+  if (screenPoints.length < 2) return;
+
+  const isFriendly = enemyObj?.isFriendly === true;
+  const bodyColor = isFriendly ? '#FFD700' : '#353535';
+  const outlineColor = isFriendly ? '#B8860B' : '#000000';
+  const segmentWidth = screenPoints[0].radius * 2;
+
+  context.save();
+
+  // Mouth (two curved mandibles at the head)
+  if (screenPoints.length >= 2) {
+    const headPoint = screenPoints[0];
+    const nextPoint = screenPoints[1] || headPoint;
+    const baseAngle = Math.atan2(nextPoint.y - headPoint.y, nextPoint.x - headPoint.x);
+    const rotationAngle = 3.0;
+    const swingAmount = Math.sin(animationTimer * 5) * 0.1;
+    const mouthLength = segmentWidth * 0.9;
+    const forwardOffset = segmentWidth * 0.1;
+    const startSeparation = segmentWidth * 0.3;
+    const endSeparation = segmentWidth * 0.4;
+    const mouthWidth = segmentWidth * 0.15;
+    const bendFactor = 1.2;
+
+    for (let side = -1; side <= 1; side += 2) {
+      const mouthAngle = baseAngle + rotationAngle + swingAmount * side;
+      const perpX = Math.cos(mouthAngle + Math.PI / 2);
+      const perpY = Math.sin(mouthAngle + Math.PI / 2);
+      const startX = headPoint.x + Math.cos(mouthAngle) * forwardOffset + perpX * startSeparation * side;
+      const startY = headPoint.y + Math.sin(mouthAngle) * forwardOffset + perpY * startSeparation * side;
+      const cp1X = headPoint.x + Math.cos(mouthAngle) * (forwardOffset + mouthLength * 0.2) + perpX * (startSeparation + (endSeparation - startSeparation) * 0.2) * side * bendFactor;
+      const cp1Y = headPoint.y + Math.sin(mouthAngle) * (forwardOffset + mouthLength * 0.2) + perpY * (startSeparation + (endSeparation - startSeparation) * 0.2) * side * bendFactor;
+      const cp2X = headPoint.x + Math.cos(mouthAngle) * (forwardOffset + mouthLength * 0.5) + perpX * (startSeparation + (endSeparation - startSeparation) * 0.5) * side * bendFactor;
+      const cp2Y = headPoint.y + Math.sin(mouthAngle) * (forwardOffset + mouthLength * 0.5) + perpY * (startSeparation + (endSeparation - startSeparation) * 0.5) * side * bendFactor;
+      const endX = headPoint.x + Math.cos(mouthAngle) * (forwardOffset + mouthLength) + perpX * endSeparation * side;
+      const endY = headPoint.y + Math.sin(mouthAngle) * (forwardOffset + mouthLength) + perpY * endSeparation * side;
+
+      context.beginPath();
+      context.moveTo(startX, startY);
+      context.bezierCurveTo(cp1X, cp1Y, cp2X, cp2Y, endX, endY);
+      context.strokeStyle = outlineColor;
+      context.lineWidth = mouthWidth;
+      context.stroke();
+    }
+  }
+
+  // Body: smooth curve through all segment centers
+  context.beginPath();
+  context.moveTo(screenPoints[0].x, screenPoints[0].y);
+  for (let i = 0; i < screenPoints.length - 1; i++) {
+    const p0 = screenPoints[i];
+    const p1 = screenPoints[i + 1];
+    const xc = (p0.x + p1.x) / 2;
+    const yc = (p0.y + p1.y) / 2;
+    context.quadraticCurveTo(p0.x, p0.y, xc, yc);
+  }
+  context.lineTo(screenPoints[screenPoints.length - 1].x, screenPoints[screenPoints.length - 1].y);
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+  context.strokeStyle = outlineColor;
+  context.lineWidth = segmentWidth * 1.2;
+  context.stroke();
+  context.strokeStyle = bodyColor;
+  context.lineWidth = segmentWidth;
+  context.stroke();
+
+  context.restore();
+}
+
+// =============================================================================
+// Custom item renderers — world-space draw helpers
+// =============================================================================
+
+/** Faster: a small glowing white ball (like an iris but white). */
+export function drawFaster(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, animTimer: number) {
+  const r = radius * 0.7;
+  ctx.save();
+  ctx.translate(x, y);
+  const glow = ctx.createRadialGradient(0, 0, r * 0.5, 0, 0, r * 1.8);
+  glow.addColorStop(0, 'rgba(255,255,255,0.6)');
+  glow.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 1.8, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(0, 0, r, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#cccccc';
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(-r * 0.3, -r * 0.3, r * 0.35, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  ctx.fill();
+  ctx.restore();
+}
+
+/** Third Eye icon (for cards/inventory): a single eye with iris. */
+export function drawThirdEyeIcon(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, animTimer: number) {
+  const r = radius * 0.8;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.beginPath();
+  ctx.ellipse(0, 0, r, r * 0.6, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#6c3483';
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 0.45, 0, Math.PI * 2);
+  ctx.fillStyle = '#9b59b6';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(0, 0, r * 0.2, 0, Math.PI * 2);
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(-r * 0.15, -r * 0.15, r * 0.1, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.restore();
+}
+
+// =============================================================================
+// Player body accessories — Antennae & Third Eye (drawn on body, not rotating)
+// =============================================================================
+
+/**
+ * Draws Antennae on the player body. These do NOT rotate with the flower —
+ * they stay fixed relative to the world, sticking up from the top of the head.
+ */
+export function drawPlayerAntennae(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, radius: number,
+  rarity: number, time: number,
+) {
+  const scale = radius / 55;
+  const sway = Math.sin(time * 2) * 0.06;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  const drawAntenna = (isLeft: boolean) => {
+    const side = isLeft ? -1 : 1;
+    ctx.save();
+    ctx.translate(14 * scale * side, -62 * scale);
+    ctx.rotate((Math.PI / 6) * side + sway * side);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(-8 * scale, -30 * scale, 0, -70 * scale);
+    ctx.quadraticCurveTo(8 * scale, -30 * scale, 0, 0);
+    ctx.fillStyle = '#333333';
+    ctx.fill();
+    ctx.strokeStyle = '#333333';
+    ctx.lineWidth = 5 * scale;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+    ctx.restore();
+  };
+  drawAntenna(true);
+  drawAntenna(false);
+  ctx.restore();
+}
+
+/**
+ * Draws a normal-looking eye on the player's forehead. It does NOT rotate
+ * with the flower — it stays fixed on the body. Almond-shaped sclera,
+ * rarity-colored iris, black pupil, occasional blink animation.
+ */
+export function drawPlayerThirdEye(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, radius: number,
+  rarity: number, time: number,
+) {
+  const eyeR = radius * 0.30;
+  const eyeX = x;
+  const eyeY = y - radius * 0.40;
+  const blink = Math.sin(time * 0.7) > 0.95 ? 0.15 : 1.0;
+  ctx.save();
+
+  ctx.beginPath();
+  ctx.ellipse(eyeX, eyeY, eyeR + 1.5, (eyeR + 1.5) * blink, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.2)';
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.ellipse(eyeX, eyeY, eyeR, eyeR * blink, 0, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#333333';
+  ctx.stroke();
+
+  if (blink > 0.5) {
+    ctx.beginPath();
+    ctx.arc(eyeX, eyeY, eyeR * 0.50, 0, Math.PI * 2);
+    ctx.fillStyle = '#9b59b6';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(eyeX, eyeY, eyeR * 0.22, 0, Math.PI * 2);
+    ctx.fillStyle = '#000000';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(eyeX - eyeR * 0.20, eyeY - eyeR * 0.20, eyeR * 0.10, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(eyeX + eyeR * 0.12, eyeY + eyeR * 0.10, eyeR * 0.04, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.fill();
+  }
+
+  ctx.beginPath();
+  ctx.ellipse(eyeX, eyeY - eyeR * 0.3 * blink, eyeR * 0.8, eyeR * 0.15 * blink, 0, Math.PI, 0);
+  ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  ctx.restore();
+}
