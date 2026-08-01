@@ -1398,10 +1398,22 @@ export const ANTENNAE_ITEM = 43;
 /** Item id of the Third Eye petal (id: 48). */
 export const THIRD_EYE_ITEM = 48;
 
-/** Zoom bonus per Antennae rarity tier. */
-export const antennaeViewBonus = 0.1;
-/** Orbit speed bonus per Third Eye rarity tier. */
-export const thirdEyeOrbitBonus = 30;
+/** Scans slots for the best Antennae and returns the zoom bonus. */
+export function antennaeViewBonus(slots: { item: number; rarity: number }[]): number {
+  let best = -1;
+  for (const cell of slots) {
+    if (cell && cell.item === ANTENNAE_ITEM && cell.rarity > best) best = cell.rarity;
+  }
+  return best >= 0 ? 0.1 * (best + 1) : 0;
+}
+/** Scans slots for the best Third Eye and returns the orbit bonus. */
+export function thirdEyeOrbitBonus(slots: { item: number; rarity: number }[]): number {
+  let best = -1;
+  for (const cell of slots) {
+    if (cell && cell.item === THIRD_EYE_ITEM && cell.rarity > best) best = cell.rarity;
+  }
+  return best >= 0 ? 30 * (best + 1) : 0;
+}
 
 // =====================================================================
 // Lookup tables used by the chat system for colored name rendering.
