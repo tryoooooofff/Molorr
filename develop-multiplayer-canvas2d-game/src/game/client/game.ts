@@ -7127,21 +7127,23 @@ private bagLayout() {
     e.segmentColliders = segments;
   }
 
-  private drawMobEnt(e: Ent) {
-    const ctx = this.ctx;
-    const def = MOBS[e.type];
-    if (!def) return;
-    const isFriendly = e.team !== TEAM.HOSTILE;
-    drawMob(ctx, e.type, e.x, e.y, e.radius, e.angle, this.time, isFriendly, e.rarity, this.level);
-    if (e.hurt > 0) {
-      ctx.save();
-      ctx.globalAlpha = e.hurt * 3;
-      ctx.fillStyle = "rgba(255,120,120,0.7)";
-      ctx.beginPath();
-      ctx.arc(e.x, e.y, e.radius, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-    }
+private drawMobEnt(e: Ent) {
+  const ctx = this.ctx;
+  const def = MOBS[e.type];
+  if (!def) return;
+  const isFriendly = e.team !== TEAM.HOSTILE;
+  //                        ↓↓↓ 加 , e.id
+  drawMob(ctx, e.type, e.x, e.y, e.radius, e.angle, this.time, isFriendly, e.rarity, this.level, e.id);
+  if (e.hurt > 0) {
+    ctx.save();
+    ctx.globalAlpha = e.hurt * 3;
+    ctx.fillStyle = "rgba(255,120,120,0.7)";
+    ctx.beginPath();
+    ctx.arc(e.x, e.y, e.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
     // Fixed-size name/health-bar/rarity tag: sizes stay constant on screen
     // regardless of the world camera zoom.
     drawMobHealthLabel(ctx, e.x, e.y, e.radius, this.viewZoom, {
