@@ -1399,7 +1399,7 @@ export const ANTENNAE_ITEM = 43;
 export const THIRD_EYE_ITEM = 48;
 
 /** Scans slots for the best Antennae and returns the zoom bonus. */
-export function antennaeViewBonus(slots: { item: number; rarity: number }[]): number {
+export function antennaeViewBonus(slots: ({ item: number; rarity: number } | null)[]): number {
   let best = -1;
   for (const cell of slots) {
     if (cell && cell.item === ANTENNAE_ITEM && cell.rarity > best) best = cell.rarity;
@@ -1407,7 +1407,7 @@ export function antennaeViewBonus(slots: { item: number; rarity: number }[]): nu
   return best >= 0 ? 0.1 * (best + 1) : 0;
 }
 /** Scans slots for the best Third Eye and returns the orbit bonus. */
-export function thirdEyeOrbitBonus(slots: { item: number; rarity: number }[]): number {
+export function thirdEyeOrbitBonus(slots: ({ item: number; rarity: number } | null)[]): number {
   let best = -1;
   for (const cell of slots) {
     if (cell && cell.item === THIRD_EYE_ITEM && cell.rarity > best) best = cell.rarity;
@@ -1416,7 +1416,7 @@ export function thirdEyeOrbitBonus(slots: { item: number; rarity: number }[]): n
 }
 
 // =====================================================================
-// Lookup tables used by the chat system for colored name rendering.
+// Lookup tables used by the chat system for colored name rendering
 // =====================================================================
 
 /** Maps item name → item def for the chat system's name highlighting. */
