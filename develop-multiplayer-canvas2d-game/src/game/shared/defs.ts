@@ -1393,6 +1393,16 @@ export function getSpawnProtection(itemId: number): number {
 
 export const EMPTY_ITEM = 255;
 
+/** Item id of the Antennae petal (id: 43). */
+export const ANTENNAE_ITEM = 43;
+/** Item id of the Third Eye petal (id: 48). */
+export const THIRD_EYE_ITEM = 48;
+
+/** Zoom bonus per Antennae rarity tier. */
+export const antennaeViewBonus = 0.1;
+/** Orbit speed bonus per Third Eye rarity tier. */
+export const thirdEyeOrbitBonus = 30;
+
 // =====================================================================
 // Lookup tables used by the chat system for colored name rendering.
 // =====================================================================
