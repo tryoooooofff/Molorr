@@ -3239,7 +3239,7 @@ export class GameClient {
         this.afkPending = false;
       }
     };
-    net.onMessage = (data: ArrayBuffer) => this.handlePacket(new Uint8Array(data));
+    net.onMessage = (data: Uint8Array) => this.handlePacket(new Uint8Array(data));
   }
 
   /** Sends a ping timestamp; the reply latency drives the debug overlay's ping readout. */
