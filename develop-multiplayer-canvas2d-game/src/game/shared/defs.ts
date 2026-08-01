@@ -357,6 +357,10 @@ export const ITEMS: ItemDef[] = [
   // ── Cactus drops (desert) ────────────────────────────────────────────────
   { id: 41, name: "Cactus", kind: "petal", color: "#4caf50", outline: "#357a38", shape: "circle", radius: 10, damage: 8, health: 22, reload: 1.2, healthBonus: 100, dropFactor: 0.7, desc: "Toughens your flower, raising maximum health while equipped." },
   { id: 42, name: "Cactus Egg", kind: "summon", color: "#a5d6a7", outline: "#357a38", shape: "egg", radius: 10, damage: 5, health: 26, reload: 4.0, petMob: 4, dropFactor: 0.55, desc: "Plants a friendly cactus. It never moves." },
+  // ── Leech drops (swamp) ────────────────────────────────────────────────────
+{ id: 43, name: "Leech Egg", kind: "summon", color: "#4a4a4a", outline: "#2a2a2a", shape: "egg", radius: 10, damage: 4, health: 18, reload: 3.2, petMob: 16, dropFactor: 0.55, desc: "Hatches a leech." },
+{ id: 44, name: "Faster", kind: "petal", color: "#6ab04c", outline: "#4a8a32", shape: "circle", radius: 8, damage: 8, health: 14, reload: 1.2, speed: 12, dropFactor: 0.7, desc: "Makes you move faster while orbiting." },
+{ id: 45, name: "Fang", kind: "petal", color: "#d4d4d4", outline: "#8a8a8a", shape: "triangle", radius: 7, damage: 32, health: 10, reload: 1.4, dropFactor: 0.6, desc: "A sharp fang that deals high damage." },
   // ── Nest eggs (spawns multiple creatures, draws one large egg) ───────────
   { id: 47, name: "Ant Hole Egg", kind: "summon", color: "#6b4a2e", outline: "#3d2918", shape: "nest_egg", radius: 14, damage: 3, health: 22, reload: 3.8, petMob: 10, dropFactor: 0.5, desc: "Hatches a swarm of worker ants from the ant hole." },
 ];
@@ -448,6 +452,8 @@ export const MOBS: MobDef[] = [
   { id: 15, name: "Hive", color: "#d4a017", outline: "#9a7010", shape: "cactus", radius: 28, health: 280, damage: 0, speed: 0, xp: 28,
     drops: [{ item: 2, chance: 0.55 }, { item: 18, chance: 0.55 }, { item: 19, chance: 0.55 }, { item: 20, chance: 0.05 }],
     spawner: spawner([0.85, 0.60, 0.35, 0.10], 1, 1) },
+  { id: 16, name: "Leech", color: "#353535", outline: "#000000", shape: "leech", radius: 18, health: 80, damage: 22, speed: 30, xp: 18,
+  drops: [{ item: 43, chance: 0.7 }, { item: 44, chance: 0.7 }, { item: 45, chance: 0.7 }] },
 ];
 
 export interface Wall {
@@ -716,7 +722,7 @@ export const MAPS: MapDef[] = [
     accent: "#9fe6ff",
     width: 8000,
     height: 8000,
-    mobs: [7, 8, 9, 12, 14],
+    mobs: [7, 8, 9, 12, 14, 16],
     mobCap: 85,
     rarityBias: 0.22,
     walls: [
