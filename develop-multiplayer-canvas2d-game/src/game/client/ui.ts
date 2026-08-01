@@ -1500,6 +1500,7 @@ export function drawMob(
   friendly: boolean,
   rarity = 0,
   level = 0,
+  id = 0,
 ) {
   const def = MOBS[type];
   if (!def || radius <= 0) return;
