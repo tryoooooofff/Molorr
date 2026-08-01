@@ -312,6 +312,39 @@ export function craftBurst(ctx: CanvasRenderingContext2D, x: number, y: number, 
 // 核心绘制函数 - drawItemIcon (支持稀有度)
 // ============================================
 
+/** Draw antennae icon — a pair of curved feelers with tip dots. */
+export function drawAntennaeIcon(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, animTimer: number) {
+  const s = radius / 50;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(s, s);
+  const drawAntenna = (isLeft: boolean) => {
+    const side = isLeft ? -1 : 1;
+    ctx.save();
+    ctx.translate(14 * side, 20);
+    ctx.rotate((Math.PI / 6) * side);
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.quadraticCurveTo(-8, -30, 0, -70);
+    ctx.quadraticCurveTo(8, -30, 0, 0);
+    ctx.fillStyle = '#333333';
+    ctx.fill();
+    ctx.strokeStyle = '#111111';
+    ctx.lineWidth = 5;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+    // Tip dot
+    ctx.beginPath();
+    ctx.arc(0, -70, 6, 0, Math.PI * 2);
+    ctx.fillStyle = '#555555';
+    ctx.fill();
+    ctx.restore();
+  };
+  drawAntenna(true);
+  drawAntenna(false);
+  ctx.restore();
+}
+
 /** Draw the artwork of an item (petal or summon). */
 export function drawItemIcon(
   ctx: CanvasRenderingContext2D,
@@ -912,6 +945,97 @@ export function drawItemIcon(
       ctx.restore();
       break;
     }
+    case 43: { // Antennae — curved insect feelers
+      drawAntennaeIcon(ctx, 0, 0, size * 0.65, spin);
+      break;
+    }
+    case 44: { // Soil — a rugged clump outline
+      const k44 = size / 100;
+      ctx.save();
+      ctx.scale(k44, k44);
+      ctx.translate(-100, -77.5);
+      ctx.beginPath();
+      ctx.moveTo(75, 30);
+      ctx.lineTo(125, 30);
+      ctx.lineTo(145, 42);
+      ctx.lineTo(155, 70);
+      ctx.lineTo(155, 90);
+      ctx.lineTo(140, 115);
+      ctx.lineTo(110, 125);
+      ctx.lineTo(90, 125);
+      ctx.lineTo(60, 115);
+      ctx.lineTo(45, 90);
+      ctx.lineTo(45, 70);
+      ctx.lineTo(55, 42);
+      ctx.closePath();
+      ctx.fillStyle = '#6a4824';
+      ctx.fill();
+      ctx.lineWidth = 10;
+      ctx.strokeStyle = '#3f2a12';
+      ctx.stroke();
+      ctx.restore();
+      break;
+    }
+    case 45: { // Fang — a curved tooth (teardrop)
+      const k = size / 52;
+      ctx.save();
+      ctx.translate(0, size * 0.15);
+      ctx.scale(k, k);
+      ctx.beginPath();
+      ctx.moveTo(0, -52);
+      ctx.quadraticCurveTo(40, 0, 0, 55);
+      ctx.quadraticCurveTo(-40, 0, 0, -52);
+      ctx.closePath();
+      ctx.fillStyle = def.color;
+      ctx.fill();
+      ctx.lineWidth = 4 * k;
+      ctx.strokeStyle = def.outline;
+      ctx.stroke();
+      ctx.restore();
+      break;
+    }
+    case 46: { // Orange — three oranges with leaves
+      const R2 = 18;
+      const drawOrangeWithLeaf = (ox2: number, oy2: number, rotation: number) => {
+        ctx.save();
+        ctx.translate(ox2, oy2);
+        ctx.rotate(rotation);
+        ctx.beginPath();
+        ctx.arc(0, 0, R2, 0, Math.PI * 2);
+        ctx.fillStyle = def.color;
+        ctx.fill();
+        ctx.lineWidth = Math.max(2, R2 * 0.18);
+        ctx.strokeStyle = def.outline;
+        ctx.stroke();
+        // Leaf
+        const leafX = -3, leafY = -R2 + 7;
+        ctx.beginPath();
+        ctx.moveTo(leafX, leafY);
+        ctx.quadraticCurveTo(leafX + 12, leafY - 12, leafX + 18, leafY - 3);
+        ctx.quadraticCurveTo(leafX + 10, leafY + 6, leafX, leafY);
+        ctx.closePath();
+        ctx.fillStyle = '#4b8b33';
+        ctx.fill();
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = '#2c6214';
+        ctx.stroke();
+        ctx.restore();
+      };
+      const k2 = size * 0.38;
+      ctx.save();
+      ctx.translate(-k2, k2);
+      drawOrangeWithLeaf(0, 0, -2.09);
+      ctx.restore();
+      ctx.save();
+      ctx.translate(k2, k2);
+      drawOrangeWithLeaf(0, 0, 2.09);
+      ctx.restore();
+      ctx.save();
+      ctx.translate(0, -k2);
+      drawOrangeWithLeaf(0, 0, 0);
+      ctx.restore();
+      break;
+    }
     default: {
       switch (def.shape) {
         case "circle": {
@@ -998,6 +1122,27 @@ export function drawItemIcon(
               ctx.stroke();
             }
           }
+          break;
+        }
+        case "nest_egg": {
+          // Nest eggs draw ONE larger egg instead of a cluster of small ones.
+          const baseR = size * 1.0;
+          const rx = baseR * 0.65;
+          const ry = baseR;
+          ctx.save();
+          ctx.beginPath();
+          ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+          ctx.fillStyle = def.color;
+          ctx.fill();
+          ctx.lineWidth = Math.max(2, baseR * 0.18);
+          ctx.strokeStyle = def.outline;
+          ctx.stroke();
+          // A subtle highlight arc to give the egg volume.
+          ctx.beginPath();
+          ctx.ellipse(0, -ry * 0.12, rx * 0.4, ry * 0.3, 0, Math.PI, Math.PI * 2);
+          ctx.fillStyle = "rgba(255,255,255,0.18)";
+          ctx.fill();
+          ctx.restore();
           break;
         }
         case "star": {
