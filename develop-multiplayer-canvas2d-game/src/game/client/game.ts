@@ -5526,7 +5526,8 @@ private bagLayout() {
 
   /** Puts a bag cell into the craft slots, with a little pop of feedback.
    *  In normal (pentagon) mode, a plain click loads 5 cards distributed
-   *  evenly across the 5 slots (1 each). Shift+click instead distributes
+   *  evenly across the 5 slots (1 each). Clicking the same card again
+   *  adds 5 more cards on top (stacking). Shift+click instead distributes
    *  every owned card of this type evenly across the 5 slots in one go
    *  (see autoFillCraftSlots).
    */
@@ -5549,14 +5550,34 @@ private bagLayout() {
         this.craftMsgLife = 1.4;
         return;
       }
-      this.craftSel = { item: cell.item, rarity: cell.rarity };
-      this.craftSlotCounts = this.craftDistributeEvenly(Math.min(CRAFT_CARD_COUNT, avail));
-      this.craftMsg = avail > CRAFT_CARD_COUNT
-        ? `Loaded ${avail} cards — use shift+click to load all.`
-        : avail < CRAFT_CARD_COUNT
-          ? `Loaded ${avail} cards.`
-          : "";
-      if (this.craftMsg) this.craftMsgLife = 1.8;
+
+      // Same card already selected → stack more cards on top
+      if (this.craftSel && this.craftSel.item === cell.item && this.craftSel.rarity === cell.rarity) {
+        const alreadyLoaded = this.craftTotalLoaded();
+        const remaining = avail - alreadyLoaded;
+        if (remaining <= 0) {
+          this.craftMsg = "No more cards of this type.";
+          this.craftMsgLife = 1.4;
+          return;
+        }
+        const toAdd = Math.min(5, remaining);
+        for (let i = 0; i < toAdd; i++) {
+          this.craftSlotCounts[i % CRAFT_CARD_COUNT]++;
+        }
+        const newTotal = alreadyLoaded + toAdd;
+        this.craftMsg = `Loaded ${newTotal} cards.`;
+        if (this.craftMsg) this.craftMsgLife = 1.8;
+      } else {
+        // First time loading this card type
+        this.craftSel = { item: cell.item, rarity: cell.rarity };
+        this.craftSlotCounts = this.craftDistributeEvenly(Math.min(CRAFT_CARD_COUNT, avail));
+        this.craftMsg = avail > CRAFT_CARD_COUNT
+          ? `Loaded ${CRAFT_CARD_COUNT} cards — click again to add more.`
+          : avail < CRAFT_CARD_COUNT
+            ? `Loaded ${avail} cards.`
+            : "";
+        if (this.craftMsg) this.craftMsgLife = 1.8;
+      }
     } else {
       this.craftSel = { item: cell.item, rarity: cell.rarity };
       this.craftMsg = "";
