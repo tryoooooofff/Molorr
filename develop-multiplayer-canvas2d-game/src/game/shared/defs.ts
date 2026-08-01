@@ -333,34 +333,34 @@ export const ITEMS: ItemDef[] = [
   { id: 25, name: "Lightning", kind: "petal", color: "#53E5E8", outline: "#4ADEDE", shape: "star", radius: 7, damage: 30, health: 6, reload: 1.4, dropFactor: 0.6, desc: "Zaps hard, fades fast." },
   { id: 26, name: "Jellyfish Egg", kind: "summon", color: "#cfb0ec", outline: "#7d40a8", shape: "egg", radius: 10, damage: 5, health: 20, reload: 3.5, petMob: 7, dropFactor: 0.55, desc: "Hatches a jellyfish." },
   // ── Crab drops ──────────────────────────────────────────────────────────
-  { id: 27, name: "Claw", kind: "petal", color: "#ef7d3b", outline: "#7a3008", shape: "triangle", radius: 8, damage: 22, health: 12, reload: 1.4, dropFactor: 0.6, desc: "Snippy little claw." },
-  { id: 28, name: "Powder", kind: "petal", color: "#e6dcc4", outline: "#a89c80", shape: "circle", radius: 7, damage: 9, health: 11, reload: 1.0, dropFactor: 0.65, desc: "A puff of fine powder." },
-  { id: 29, name: "Crab Egg", kind: "summon", color: "#f5a06b", outline: "#b2541f", shape: "egg", radius: 10, damage: 6, health: 26, reload: 3.8, petMob: 8, dropFactor: 0.55, desc: "Hatches a crab." },
+  { id: 27, name: "Claw", kind: "petal", color: "#ef7d3b", outline: "#7a3008", shape: "triangle", radius: 8, damage: 22, health: 12, reload: 3.5, dropFactor: 0.6, desc: "Snippy little claw." },
+  { id: 28, name: "Powder", kind: "petal", color: "#e6dcc4", outline: "#a89c80", shape: "circle", radius: 7, damage: 9, health: 11, reload: 3.0, dropFactor: 0.65, desc: "A puff of fine powder." },
+  { id: 29, name: "Crab Egg", kind: "summon", color: "#f5a06b", outline: "#b2541f", shape: "egg", radius: 10, damage: 6, health: 26, reload: 8.0, petMob: 8, dropFactor: 0.55, desc: "Hatches a crab." },
   // ── Ladybug drops ───────────────────────────────────────────────────────
   { id: 30, name: "Rose", kind: "petal", color: "#d6354a", outline: "#8a1f2c", shape: "circle", radius: 8, damage: 5, health: 5, reload: 3.5, heal: 7.5, dropFactor: 0.7, desc: "Absorbs into an injured flower, heals once, then reloads." },
   { id: 31, name: "Light", kind: "petal", color: "#fff3a8", outline: "#c79a1e", shape: "circle", radius: 8, damage: 6, health: 10, reload: 1.0, dropFactor: 0.85, desc: "A warm mote of light." },
-  // Ladybug Egg = id 8 (defined above in the starting kit slot).
   // ── Sandstorm drops (desert) ─────────────────────────────────────────────
   // Stick (id 9) and Sand (id 4) are reused from the existing item list.
-  { id: 32, name: "Glass", kind: "petal", color: "#c8e6f5", outline: "#6f9bb0", shape: "square", radius: 8, damage: 12, health: 8, reload: 1.2, dropFactor: 0.55, desc: "A sharp shard of glass." },
+  { id: 32, name: "Glass", kind: "petal", color: "#c8e6f5", outline: "#6f9bb0", shape: "square", radius: 8, damage: 12, health: 8, reload: 2.5, dropFactor: 0.55, desc: "A sharp shard of glass." },
   // ── Beetle drops ────────────────────────────────────────────────────────
-  { id: 33, name: "Bone", kind: "petal", color: "#ece4d0", outline: "#9a8a6a", shape: "square", radius: 9, damage: 14, health: 18, reload: 1.3, dropFactor: 0.6, desc: "A bleached bone chip." },
-  { id: 34, name: "Beetle Egg", kind: "summon", color: "#e3c490", outline: "#9c7532", shape: "egg", radius: 11, damage: 6, health: 28, reload: 3.8, petMob: 6, dropFactor: 0.55, desc: "Hatches a beetle." },
+  { id: 33, name: "Bone", kind: "petal", color: "#ece4d0", outline: "#9a8a6a", shape: "square", radius: 9, damage: 14, health: 18, reload: 1.5, dropFactor: 0.6, desc: "A bleached bone chip." },
+  { id: 34, name: "Beetle Egg", kind: "summon", color: "#e3c490", outline: "#9c7532", shape: "egg", radius: 11, damage: 6, health: 28, reload: 5.0, petMob: 6, dropFactor: 0.55, desc: "Hatches a beetle." },
   // ── Shared (Beetle / Scorpion) and Scorpion drops ──────────────────────
-  { id: 35, name: "Pincer", kind: "petal", color: "#8a4a18", outline: "#3e1e08", shape: "triangle", radius: 8, damage: 20, health: 11, reload: 1.4, dropFactor: 0.6, desc: "A wicked little pincer." },
-  { id: 36, name: "Iris", kind: "petal", color: "#5b3aa0", outline: "#2c1a5e", shape: "circle", radius: 8, damage: 10, health: 12, reload: 1.1, dropFactor: 0.6, desc: "A deep-purple iris." },
-  { id: 37, name: "Scorpion Egg", kind: "summon", color: "#d9924a", outline: "#8c4718", shape: "egg", radius: 10, damage: 7, health: 26, reload: 3.7, petMob: 5, dropFactor: 0.55, desc: "Hatches a scorpion." },
+  { id: 35, name: "Pincer", kind: "petal", color: "#8a4a18", outline: "#3e1e08", shape: "triangle", radius: 8, damage: 20, health: 11, reload: 3.0, dropFactor: 0.6, desc: "A wicked little pincer." },
+  { id: 36, name: "Iris", kind: "petal", color: "#5b3aa0", outline: "#2c1a5e", shape: "circle", radius: 8, damage: 10, health: 12, reload: 2.5, dropFactor: 0.6, desc: "A deep-purple iris." },
+  { id: 37, name: "Scorpion Egg", kind: "summon", color: "#d9924a", outline: "#8c4718", shape: "egg", radius: 10, damage: 7, health: 26, reload: 4.5, petMob: 5, dropFactor: 0.55, desc: "Hatches a scorpion." },
   // ── Shell drops (ocean) ──────────────────────────────────────────────────
   { id: 38, name: "Shell", kind: "petal", color: "#f2d96e", outline: "#c8a030", shape: "circle", radius: 16, damage: 6, health: 20, reload: 3.5, shield: 12, dropFactor: 0.7, desc: "Absorbs into its flower, plates it with shield, then reloads." },
   { id: 39, name: "Magnet", kind: "petal", color: "#e05555", outline: "#8a2020", shape: "circle", radius: 8, damage: 4, health: 10, reload: 1.0, magnetRange: 100, dropFactor: 0.65, desc: "Attracts nearby drops toward you." },
-  { id: 40, name: "Shell Egg", kind: "summon", color: "#f8e8a0", outline: "#c8a030", shape: "egg", radius: 10, damage: 4, health: 22, reload: 3.6, petMob: 12, dropFactor: 0.55, desc: "Hatches a shell." },
+  { id: 40, name: "Shell Egg", kind: "summon", color: "#f8e8a0", outline: "#c8a030", shape: "egg", radius: 10, damage: 4, health: 22, reload: 8.0, petMob: 12, dropFactor: 0.55, desc: "Hatches a shell." },
   // ── Cactus drops (desert) ────────────────────────────────────────────────
-  { id: 41, name: "Cactus", kind: "petal", color: "#4caf50", outline: "#357a38", shape: "circle", radius: 10, damage: 8, health: 22, reload: 1.2, healthBonus: 100, dropFactor: 0.7, desc: "Toughens your flower, raising maximum health while equipped." },
+  { id: 41, name: "Cactus", kind: "petal", color: "#4caf50", outline: "#357a38", shape: "circle", radius: 10, damage: 8, health: 22, reload: 1.5, healthBonus: 100, dropFactor: 0.7, desc: "Toughens your flower, raising maximum health while equipped." },
   { id: 42, name: "Cactus Egg", kind: "summon", color: "#a5d6a7", outline: "#357a38", shape: "egg", radius: 10, damage: 5, health: 26, reload: 4.0, petMob: 4, dropFactor: 0.55, desc: "Plants a friendly cactus. It never moves." },
   // ── Leech drops (swamp) ────────────────────────────────────────────────────
-{ id: 43, name: "Leech Egg", kind: "summon", color: "#4a4a4a", outline: "#2a2a2a", shape: "egg", radius: 10, damage: 4, health: 18, reload: 3.2, petMob: 16, dropFactor: 0.55, desc: "Hatches a leech." },
-{ id: 44, name: "Faster", kind: "petal", color: "#6ab04c", outline: "#4a8a32", shape: "circle", radius: 8, damage: 8, health: 14, reload: 1.2, speed: 12, dropFactor: 0.7, desc: "Makes you move faster while orbiting." },
-{ id: 45, name: "Fang", kind: "petal", color: "#d4d4d4", outline: "#8a8a8a", shape: "triangle", radius: 7, damage: 32, health: 10, reload: 1.4, dropFactor: 0.6, desc: "A sharp fang that deals high damage." },
+{ id: 43, name: "Leech Egg", kind: "summon", color: "#4a4a4a", outline: "#2a2a2a", shape: "egg", radius: 10, damage: 4, health: 18, reload: 4.5, petMob: 16, dropFactor: 0.55, desc: "Hatches a leech." },
+{ id: 44, name: "Faster", kind: "petal", color: "#6ab04c", outline: "#4a8a32", shape: "circle", radius: 8, damage: 8, health: 14, reload: 1.5, speed: 12, dropFactor: 0.7, desc: "Makes you move faster while orbiting." },
+{ id: 45, name: "Fang", kind: "petal", color: "#d4d4d4", outline: "#8a8a8a", shape: "triangle", radius: 7, damage: 32, health: 10, reload: 2.5, dropFactor: 0.6, desc: "A sharp fang that deals high damage." },
+  { id: 46, name: "Fried", kind: "petal", color: "#d4d4d4", outline: "#8a8a8a", shape: "circle", radius: 7, damage: 15, health: 10, reload: 1.5, dropFactor: 0.6, desc: "A sharp fang that deals high damage." },
   // ── Nest eggs (spawns multiple creatures, draws one large egg) ───────────
   { id: 47, name: "Ant Hole Egg", kind: "summon", color: "#6b4a2e", outline: "#3d2918", shape: "nest_egg", radius: 14, damage: 3, health: 22, reload: 3.8, petMob: 10, dropFactor: 0.5, desc: "Hatches a swarm of worker ants from the ant hole." },
 ];
