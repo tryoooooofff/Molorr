@@ -3230,7 +3230,7 @@ export class GameClient {
       this.connected = true;
       this.sendJoin();
     };
-    net.onClose = (code: number) => {
+    net.onClose = (code?: number) => {
       this.connected = false;
       // Distinguish an AFK kick from a normal drop so the overlay can say why
       // the session ended instead of showing "connecting to server...".
