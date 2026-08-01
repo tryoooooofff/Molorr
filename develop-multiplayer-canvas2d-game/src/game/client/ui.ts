@@ -1496,7 +1496,7 @@ export function drawMob(
   };
 
   const drawHornet = () => {
-    const scale = (radius * 2) / 110;
+    const scale = (radius * 3) / 110;
     const colors = friendly
       ? { body: "#ffe667", stroke: "#d1bb54", dark: "#333333", stingerColor: "#333333" }
       : { body: "#ffd363", stroke: "#d3ad46", dark: "#333333", stingerColor: "#333333" };
@@ -1942,7 +1942,9 @@ const drawCrab = () => {
     const scaledSize = (radius * 2) / 1.4;
     const cactusColor = friendly ? [255, 215, 0] : [100, 200, 100];
     const outlineColor = friendly ? [200, 160, 0] : [50, 150, 50];
-    const spikeCount = 8 + level;
+    const baseSpikes = 8;
+    const spikesPerRarity = 2;
+    const spikeCount = Math.max(8, baseSpikes + rarity * spikesPerRarity);
     const baseRadius = scaledSize * 0.6;
     const spikeHeight = scaledSize * 0.2;
     const currentBaseRadius = baseRadius + Math.sin(t * 3) * 1.5;
@@ -2463,7 +2465,7 @@ export function drawDefaultSkin(
   ctx.beginPath();
 
   const baseMouthY = y + 8;
-  const cyOffset = 3.5 * (1 - wSpread) - 3.5 * wSpread; 
+  const cyOffset = 3.5 * (1 - wSpread) - 3.5 * wSpread;
 
   ctx.moveTo(x - 5.5, baseMouthY);
   ctx.quadraticCurveTo(x, baseMouthY + cyOffset, x + 5.5, baseMouthY);
