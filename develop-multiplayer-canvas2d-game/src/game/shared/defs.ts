@@ -399,7 +399,7 @@ export interface MobDef {
   name: string;
   color: string;
   outline: string;
-  shape: "bug" | "rock" | "cactus" | "jelly" | "crab" | "star" | "ant" | "wasp";
+  shape: "bug" | "rock" | "cactus" | "jelly" | "crab" | "star" | "ant" | "wasp" | "hornet" | "spider" | "leech";
   radius: number;
   health: number;
   damage: number;
@@ -1369,7 +1369,8 @@ export const SUMMON_CFG: Record<number, SummonCfg> = {
   40: { maxCount: 2 },                                  // Shell Egg
   42: { maxCount: 1, spawnProtection: 1.5 },            // Cactus Egg — one rooted cactus
   // ── Nest eggs ──────────────────────────────────────────────────────────
-  47: { maxCount: 4, spawnCount: 2 },                   // Ant Hole Egg — hatches a swarm of workers
+  47: { maxCount: 6, spawnCount: 6 },     
+  49: { maxCount: 2, spawnCount: 1 },
 };
 
 /** Default seconds of post-spawn invulnerability for a freshly hatched pet. */
@@ -1416,7 +1417,7 @@ export function thirdEyeOrbitBonus(slots: ({ item: number; rarity: number } | nu
 }
 
 // =====================================================================
-// Lookup tables used by the chat system for colored name rendering
+// Lookup tables used by the chat system for colored name rendering.
 // =====================================================================
 
 /** Maps item name → item def for the chat system's name highlighting. */
