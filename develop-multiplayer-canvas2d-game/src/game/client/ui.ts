@@ -2939,7 +2939,141 @@ export function drawHornet(
 
   context.restore();
 }
+// 在文件顶部定义类型
+interface SegmentCollider {
+  physicsBody: {
+    position: { x: number; y: number };
+    radius: number;
+  };
+}
 
+interface LeechEnemyObj {
+  isFriendly?: boolean;
+  segmentColliders?: SegmentCollider[];
+}
+
+export function drawLeech(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  size: number,
+  animationTimer: number,
+  angleToPlayer: number,
+  level: number,
+  viewScale: number = 1.0,
+  enemyObj: LeechEnemyObj | null = null,
+): void {
+  // Ensure segments exist
+  let segments = enemyObj?.segmentColliders;
+  if (!segments || segments.length === 0) {
+    segments = [];
+    const segRadius = size / 3;
+    for (let i = 0; i < 6; i++) {
+      segments.push({
+        physicsBody: {
+          position: { x: x - i * segRadius * 1.1, y: y },
+          radius: segRadius,
+        },
+      });
+    }
+  }
+
+  if (segments.length < 2) return;
+
+  const headPhysX = segments[0].physicsBody.position.x;
+  const headPhysY = segments[0].physicsBody.position.y;
+  const screenPoints = segments.map((seg) => {
+    const px = seg.physicsBody.position.x;
+    const py = seg.physicsBody.position.y;
+    return {
+      x: x + (px - headPhysX),
+      y: y + (py - headPhysY),
+      radius: seg.physicsBody.radius,
+    };
+  });
+
+  if (screenPoints.length < 2) return;
+
+  const isFriendly = enemyObj?.isFriendly === true;
+  const bodyColor = isFriendly ? '#FFD700' : '#353535';
+  const outlineColor = isFriendly ? '#B8860B' : '#000000';
+  const segmentWidth = screenPoints[0].radius * 2;
+
+  context.save();
+
+  // Draw mouth (head)
+  if (screenPoints.length >= 2) {
+    const headPoint = screenPoints[0];
+    const nextPoint = screenPoints[1] || headPoint;
+    const baseAngle = Math.atan2(nextPoint.y - headPoint.y, nextPoint.x - headPoint.x);
+    const rotationAngle = 3.0;
+    const swingAmount = Math.sin(animationTimer * 5) * 0.1;
+    const mouthLength = segmentWidth * 0.9;
+    const forwardOffset = segmentWidth * 0.1;
+    const startSeparation = segmentWidth * 0.3;
+    const endSeparation = segmentWidth * 0.4;
+    const mouthWidth = segmentWidth * 0.15;
+    const bendFactor = 1.2;
+
+    for (let side = -1; side <= 1; side += 2) {
+      const mouthAngle = baseAngle + rotationAngle + swingAmount * side;
+      const perpX = Math.cos(mouthAngle + Math.PI / 2);
+      const perpY = Math.sin(mouthAngle + Math.PI / 2);
+      const startX = headPoint.x + Math.cos(mouthAngle) * forwardOffset + perpX * startSeparation * side;
+      const startY = headPoint.y + Math.sin(mouthAngle) * forwardOffset + perpY * startSeparation * side;
+      const cp1X =
+        headPoint.x +
+        Math.cos(mouthAngle) * (forwardOffset + mouthLength * 0.2) +
+        perpX * (startSeparation + (endSeparation - startSeparation) * 0.2) * side * bendFactor;
+      const cp1Y =
+        headPoint.y +
+        Math.sin(mouthAngle) * (forwardOffset + mouthLength * 0.2) +
+        perpY * (startSeparation + (endSeparation - startSeparation) * 0.2) * side * bendFactor;
+      const cp2X =
+        headPoint.x +
+        Math.cos(mouthAngle) * (forwardOffset + mouthLength * 0.5) +
+        perpX * (startSeparation + (endSeparation - startSeparation) * 0.5) * side * bendFactor;
+      const cp2Y =
+        headPoint.y +
+        Math.sin(mouthAngle) * (forwardOffset + mouthLength * 0.5) +
+        perpY * (startSeparation + (endSeparation - startSeparation) * 0.5) * side * bendFactor;
+      const endX = headPoint.x + Math.cos(mouthAngle) * (forwardOffset + mouthLength) + perpX * endSeparation * side;
+      const endY = headPoint.y + Math.sin(mouthAngle) * (forwardOffset + mouthLength) + perpY * endSeparation * side;
+
+      context.beginPath();
+      context.moveTo(startX, startY);
+      context.bezierCurveTo(cp1X, cp1Y, cp2X, cp2Y, endX, endY);
+      context.strokeStyle = outlineColor;
+      context.lineWidth = mouthWidth;
+      context.stroke();
+    }
+  }
+
+  // Draw body segments as a smooth curve
+  context.beginPath();
+  context.moveTo(screenPoints[0].x, screenPoints[0].y);
+  for (let i = 0; i < screenPoints.length - 1; i++) {
+    const p0 = screenPoints[i];
+    const p1 = screenPoints[i + 1];
+    const xc = (p0.x + p1.x) / 2;
+    const yc = (p0.y + p1.y) / 2;
+    context.quadraticCurveTo(p0.x, p0.y, xc, yc);
+  }
+  const last = screenPoints[screenPoints.length - 1];
+  context.lineTo(last.x, last.y);
+  context.lineCap = 'round';
+  context.lineJoin = 'round';
+
+  context.strokeStyle = outlineColor;
+  context.lineWidth = segmentWidth * 1.2;
+  context.stroke();
+
+  context.strokeStyle = bodyColor;
+  context.lineWidth = segmentWidth;
+  context.stroke();
+
+  context.restore();
+}
 /** Spider: a round-bodied arachnid with 8 animated legs. */
 export function drawSpider(
   context: CanvasRenderingContext2D,
