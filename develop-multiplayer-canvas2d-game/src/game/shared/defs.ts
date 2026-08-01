@@ -235,7 +235,7 @@ export interface ItemDef {
   kind: ItemKind;
   color: string;
   outline: string;
-  shape: "circle" | "square" | "leaf" | "triangle" | "egg" | "stick" | "star";
+  shape: "circle" | "square" | "leaf" | "triangle" | "egg" | "stick" | "star"| "nest_egg";
   radius: number;
   damage: number;
   health: number;
