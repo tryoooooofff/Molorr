@@ -8580,81 +8580,92 @@ function drawThirdEyeIcon(ctx: CanvasRenderingContext2D, x: number, y: number, r
 /**
  * Draws Antennae on the player body. These do NOT rotate with the flower —
  * they stay fixed relative to the world, sticking up from the top of the head.
+ * The shape matches the Hornet's antenna drawing: a curved leaf-like feeler
+ * with a rarity-colored tip ball.
  */
 function drawPlayerAntennae(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, radius: number,
   rarity: number, time: number,
 ) {
-  const sway = Math.sin(time * 2) * 0.08;
-  const antLength = radius * 1.4;
-  const baseY = y - radius * 0.5;
+  // Scale matches the Hornet's internal scale (scaledSize / 110 ≈ radius / 55).
+  const scale = radius / 55;
+  const sway = Math.sin(time * 2) * 0.06;
   ctx.save();
+  ctx.translate(x, y);
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
-  for (let side = -1; side <= 1; side += 2) {
+
+  const drawAntenna = (isLeft: boolean) => {
+    const side = isLeft ? -1 : 1;
     ctx.save();
-    ctx.translate(x + side * radius * 0.35, baseY);
-    ctx.rotate(side * (Math.PI / 5) + sway * side);
-    // Antenna stalk
+    // Position at the top of the head, offset to each side — same as Hornet.
+    ctx.translate(14 * scale * side, -62 * scale);
+    ctx.rotate((Math.PI / 6) * side + sway * side);
+    // Curved leaf-like feeler — identical shape to the Hornet's antenna.
     ctx.beginPath();
     ctx.moveTo(0, 0);
-    ctx.quadraticCurveTo(-4, -antLength * 0.5, 0, -antLength);
-    ctx.quadraticCurveTo(4, -antLength * 0.5, 0, 0);
+    ctx.quadraticCurveTo(-8 * scale, -30 * scale, 0, -70 * scale);
+    ctx.quadraticCurveTo(8 * scale, -30 * scale, 0, 0);
     ctx.fillStyle = '#333333';
     ctx.fill();
-    ctx.strokeStyle = '#111111';
-    ctx.lineWidth = 3;
+    ctx.strokeStyle = '#333333';
+    ctx.lineWidth = 5 * scale;
+    ctx.lineJoin = 'round';
     ctx.stroke();
-    // Tip ball — colored by rarity
+    // Tip ball — colored by rarity so the player can tell the tier at a glance.
     ctx.beginPath();
-    ctx.arc(0, -antLength, radius * 0.18, 0, Math.PI * 2);
+    ctx.arc(0, -70 * scale, 7 * scale, 0, Math.PI * 2);
     ctx.fillStyle = RARITIES[Math.max(0, Math.min(10, rarity))]?.color || '#ffffff';
     ctx.fill();
     ctx.strokeStyle = '#111111';
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 2 * scale;
     ctx.stroke();
     ctx.restore();
-  }
+  };
+  drawAntenna(true);
+  drawAntenna(false);
   ctx.restore();
 }
 
 /**
- * Draws a Third Eye on the player's forehead. It does NOT rotate with the
- * flower — it stays fixed on the body, looking toward the camera.
+ * Draws a normal-looking eye on the player's forehead. It does NOT rotate
+ * with the flower — it stays fixed on the body, looking toward the camera.
+ * Round white sclera, rarity-colored iris, black pupil, and a shine highlight.
  */
 function drawPlayerThirdEye(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, radius: number,
   rarity: number, time: number,
 ) {
-  const eyeR = radius * 0.32;
+  const eyeR = radius * 0.30;
   const eyeX = x;
-  const eyeY = y - radius * 0.35;
-  const blink = Math.sin(time * 0.7) > 0.95 ? 0.3 : 1.0; // occasional blink
+  const eyeY = y - radius * 0.40;
+  // Occasional blink: squash the eye vertically for a brief moment.
+  const blink = Math.sin(time * 0.7) > 0.95 ? 0.15 : 1.0;
   ctx.save();
-  // Eye outline (almond shape)
+  // Sclera — round white eye.
   ctx.beginPath();
-  ctx.ellipse(eyeX, eyeY, eyeR, eyeR * 0.6 * blink, 0, 0, Math.PI * 2);
+  ctx.ellipse(eyeX, eyeY, eyeR, eyeR * blink, 0, 0, Math.PI * 2);
   ctx.fillStyle = '#ffffff';
   ctx.fill();
   ctx.lineWidth = 2;
-  ctx.strokeStyle = '#6c3483';
+  ctx.strokeStyle = '#333333';
   ctx.stroke();
   if (blink > 0.5) {
-    // Iris — colored by rarity
+    // Iris — colored by rarity.
     ctx.beginPath();
-    ctx.arc(eyeX, eyeY, eyeR * 0.45, 0, Math.PI * 2);
-    ctx.fillStyle = RARITIES[Math.max(0, Math.min(10, rarity))]?.color || '#9b59b6';
+    ctx.arc(eyeX, eyeY, eyeR * 0.55, 0, Math.PI * 2);
+    ctx.fillStyle = RARITIES[Math.max(0, Math.min(10, rarity))]?.color || '#8b4513';
     ctx.fill();
-    // Pupil
+    // Pupil — black center.
     ctx.beginPath();
-    ctx.arc(eyeX, eyeY, eyeR * 0.2, 0, Math.PI * 2);
-    ctx.fillStyle = '#1a1a2e';
+    ctx.arc(eyeX, eyeY, eyeR * 0.25, 0, Math.PI * 2);
+    ctx.fillStyle = '#000000';
     ctx.fill();
-    // Shine
+    // Shine highlight.
     ctx.beginPath();
-    ctx.arc(eyeX - eyeR * 0.15, eyeY - eyeR * 0.15, eyeR * 0.1, 0, Math.PI * 2);
+    ctx.arc(eyeX - eyeR * 0.2, eyeY - eyeR * 0.2, eyeR * 0.12, 0, Math.PI * 2);
     ctx.fillStyle = '#ffffff';
     ctx.fill();
   }
