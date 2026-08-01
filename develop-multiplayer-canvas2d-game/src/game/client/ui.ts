@@ -19,7 +19,24 @@ export function getLightPetalCount(rarity: number): number {
   if (rarity >= 8) return 8;      // Omega-Eternal: 8
   return 3;
 }
+// 用于 Leech 绘制时查找 segmentColliders
+// key = mob id, value = segmentColliders 数组
+const _leechSegmentCache = new Map<number, { physicsBody: { position: { x: number; y: number }; radius: number } }[]>();
 
+/**
+ * 由 game.ts 在每帧更新时调用，缓存 Leech 的分段数据
+ * 这样 drawMob 就不需要额外参数了
+ */
+export function updateLeechSegmentCache(
+  id: number,
+  segments: { physicsBody: { position: { x: number; y: number }; radius: number } }[] | undefined,
+) {
+  if (segments && segments.length > 0) {
+    _leechSegmentCache.set(id, segments);
+  } else {
+    _leechSegmentCache.delete(id);
+  }
+}
 /**
  * 根据稀有度获取 Stinger 三角形数量
  */
@@ -2482,6 +2499,14 @@ const drawCrab = () => {
     case 13: drawAntHole(); break;
     case 14: drawCrabCaveBody(); break;
     case 15: drawHiveBody(); break;
+      case 16: {
+  const segments = _leechSegmentCache.get(id);
+  drawLeech(ctx, x, y, radius * 2, t, angle, level, 1.0, {
+    isFriendly: friendly,
+    segmentColliders: segments,
+  });
+  break;
+}
     default: drawRock(); break;
   }
 
