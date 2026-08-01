@@ -1449,8 +1449,8 @@ class TooltipSystem {
  */
 class VirtualKeyboard {
   active = false;
-  /** Which input to feed: 'bagSearch' | 'craftSearch' | 'chat' | 'name' | 'account' */
-  target: 'bagSearch' | 'craftSearch' | 'chat' | 'name' | 'account' = 'bagSearch';
+  /** Which input to feed: 'bagSearch' | 'craftSearch' | 'chat' */
+  target: 'bagSearch' | 'craftSearch' | 'chat' = 'bagSearch';
   numMode = false;
 
   private readonly keysNormal = [
@@ -2680,9 +2680,6 @@ export class GameClient {
   private mobGallery = new MobGallery();
   private chat = new ChatSystem();
   private vk = new VirtualKeyboard();
-  /** Current value and callback for the account-input VK bridge. */
-  private vkAccountValue = "";
-  private vkAccountCallback: ((v: string) => void) | null = null;
   /** Canvas-painted account panel (local-storage based). */
   private accountSystem = new AccountSystem();
   private squadCode = "";
@@ -2918,23 +2915,6 @@ export class GameClient {
     }, 'gameCanvas');
     if (typeof window !== "undefined") {
       (window as any).gameInstance = this;
-      // Bridge the AccountSystem's showMobileKeyboard / hideMobileKeyboard hooks
-      // to the canvas VirtualKeyboard so mobile users can type into login and
-      // register fields. On desktop these are no-ops (the physical keyboard
-      // feeds keys directly through the keydown listener).
-      (window as any).showMobileKeyboard = (initialValue: string, callback: (v: string) => void) => {
-        this.vkAccountValue = initialValue || "";
-        this.vkAccountCallback = callback;
-        this.vk.active = true;
-        this.vk.target = "account";
-        this.vk.numMode = false;
-      };
-      (window as any).hideMobileKeyboard = () => {
-        if (this.vk.target === "account") {
-          this.vk.active = false;
-          this.vkAccountCallback = null;
-        }
-      };
     }
     this.loadLocal();
   }
@@ -4712,32 +4692,6 @@ private bagLayout() {
     else if (key.length === 1 && get().length < 16) set(get() + key);
   }
 
-  /**
-   * Feeds a VirtualKeyboard key into the currently-focused AccountSystem input.
-   * Bridges the VK's key-by-key interface to the AccountSystem's value-callback
-   * interface so mobile users can type into login/register fields.
-   */
-  private typeIntoAccount(key: string) {
-    const cb = this.vkAccountCallback;
-    if (!cb) return;
-    if (key === 'Backspace') {
-      this.vkAccountValue = this.vkAccountValue.slice(0, -1);
-    } else if (key === 'Enter' || key === 'Escape') {
-      // Done — close the keyboard and blur the account input.
-      this.vk.active = false;
-      this.vkAccountCallback = null;
-      this.accountSystem._focusInput(null);
-      return;
-    } else if (key === ' ') {
-      // Spaces are allowed in some fields but not usernames/passwords; the
-      // AccountSystem validates on submit, so just pass it through.
-      if (this.vkAccountValue.length < 24) this.vkAccountValue += ' ';
-    } else if (key.length === 1 && this.vkAccountValue.length < 24) {
-      this.vkAccountValue += key;
-    }
-    cb(this.vkAccountValue);
-  }
-
   private pointerPos(e: PointerEvent) {
     const rect = this.canvas.getBoundingClientRect();
     return { x: e.clientX - rect.left, y: e.clientY - rect.top };
@@ -4785,7 +4739,6 @@ private bagLayout() {
 
     // Virtual keyboard (mobile) — intercept clicks when active
     if (this.isMobile && this.vk.active) {
-      const wasTarget = this.vk.target;
       const vkResult = this.vk.handleClick(p.x, p.y);
       if (vkResult.handled) {
         if (vkResult.key) {
@@ -4796,17 +4749,7 @@ private bagLayout() {
             this.typeIntoCraftSearch(vkResult.key);
           } else if (this.vk.target === 'chat') {
             this.typeIntoChat(vkResult.key);
-          } else if (this.vk.target === 'name') {
-            this.typeInto(vkResult.key);
-          } else if (this.vk.target === 'account') {
-            this.typeIntoAccount(vkResult.key);
           }
-        } else {
-          // No key = "Done" or dismissed by clicking outside. Clear the
-          // associated focus so the field doesn't show a caret with no
-          // keyboard to feed it.
-          if (wasTarget === 'name') this.focus = null;
-          if (wasTarget === 'account') this.accountSystem._focusInput(null);
         }
         return;
       }
@@ -5292,18 +5235,7 @@ private bagLayout() {
     const nameFieldX = this.w / 2 - nameFieldW / 2;
     const nameFieldY = layout.gridY - 70;
     const nameRect = { x: nameFieldX, y: nameFieldY, w: nameFieldW, h: nameFieldH };
-    const nameHit = hit(nameRect, mx, my);
-    this.focus = nameHit ? "name" : null;
-    // Mobile: tapping the name field opens the virtual keyboard so the player
-    // can type a name without a physical keyboard.
-    if (nameHit && this.isMobile) {
-      this.vk.active = true;
-      this.vk.target = "name";
-      this.vk.numMode = false;
-    } else if (this.isMobile && this.vk.target === "name" && !nameHit) {
-      // Tapping elsewhere closes the name keyboard.
-      this.vk.active = false;
-    }
+    this.focus = hit(nameRect, mx, my) ? "name" : null;
 
     // Biome buttons
     const biomeButtons = this.menuBiomeButtons();
@@ -5673,8 +5605,8 @@ private bagLayout() {
 
     if (this.craftMode === "normal") {
       const loaded = this.craftTotalLoaded();
-      if (loaded < 1 || sel.rarity >= MAX_CRAFT_RARITY) {
-        this.craftMsg = loaded < 1 ? "Load cards first." : "Already at max craftable rarity.";
+      if (loaded < CRAFT_CARD_COUNT || sel.rarity >= MAX_CRAFT_RARITY) {
+        this.craftMsg = loaded < CRAFT_CARD_COUNT ? `Fill all ${CRAFT_CARD_COUNT} slots first.` : "Already at max craftable rarity.";
         this.craftMsgLife = 2;
         this.craftShake = 0.35;
         return;
@@ -8151,7 +8083,7 @@ function drawHornet(
   animationTimer: number, angleToPlayer: number, level: number,
   viewScale = 1.0, enemyObj: any = null,
 ) {
-  const scaledSize = size*1.5;
+  const scaledSize = size;
   if (scaledSize <= 0) return;
   const isFriendly = enemyObj && enemyObj.isFriendly === true;
   const scale = scaledSize / 110;
@@ -8240,7 +8172,7 @@ function drawSpider(
   animationTimer: number, angleToPlayer: number, level: number,
   viewScale = 1.0, enemyObj: any = null,
 ) {
-  const scaledSize = size*1.5;
+  const scaledSize = size;
   if (scaledSize <= 0) return;
   const isFriendly = enemyObj && enemyObj.isFriendly === true;
   const WAVE_MULTIPLIERS: Record<string, number> = { 'common': 1.0, 'unusual': 1.1, 'rare': 1.3, 'epic': 1.5, 'legendary': 1.8, 'mythic': 2.2, 'ultra': 2.7, 'super': 4.1, 'omega': 5.3, 'eternal': 5.5 };
@@ -8680,6 +8612,14 @@ function drawPlayerAntennae(
     ctx.strokeStyle = '#333333';
     ctx.lineWidth = 5 * scale;
     ctx.lineJoin = 'round';
+    ctx.stroke();
+    // Tip ball — colored by rarity so the player can tell the tier at a glance.
+    ctx.beginPath();
+    ctx.arc(0, -70 * scale, 7 * scale, 0, Math.PI * 2);
+    ctx.fillStyle = RARITIES[Math.max(0, Math.min(10, rarity))]?.color || '#ffffff';
+    ctx.fill();
+    ctx.strokeStyle = '#111111';
+    ctx.lineWidth = 2 * scale;
     ctx.stroke();
     ctx.restore();
   };
