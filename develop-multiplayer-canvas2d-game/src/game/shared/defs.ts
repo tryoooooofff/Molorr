@@ -175,12 +175,6 @@ export const SNAPSHOT_STALL_SECONDS = 0.35;
 /** Seconds of stall before a small "waiting for server" notice is drawn. */
 export const SNAPSHOT_STALL_NOTICE_SECONDS = 1.2;
 
-// ------------------------------------------------------------------- AFK
-/**
- * Seconds of no meaningful activity before the server pops the [AFK CHECK]
- * button on the player's screen. "Meaningful" excludes neutral input packets,
- * so a backgrounded tab (which sends a zeroed INPUT on blur) still goes idle.
- */
 export const AFK_IDLE_SECONDS = 180;
 /**
  * Seconds the player has to click [AFK CHECK] once it appears. When this runs
@@ -351,18 +345,21 @@ export const ITEMS: ItemDef[] = [
   { id: 37, name: "Scorpion Egg", kind: "summon", color: "#d9924a", outline: "#8c4718", shape: "egg", radius: 10, damage: 7, health: 26, reload: 4.5, petMob: 5, dropFactor: 0.55, desc: "Hatches a scorpion." },
   // ── Shell drops (ocean) ──────────────────────────────────────────────────
   { id: 38, name: "Shell", kind: "petal", color: "#f2d96e", outline: "#c8a030", shape: "circle", radius: 16, damage: 6, health: 20, reload: 3.5, shield: 12, dropFactor: 0.7, desc: "Absorbs into its flower, plates it with shield, then reloads." },
-  { id: 39, name: "Magnet", kind: "petal", color: "#e05555", outline: "#8a2020", shape: "circle", radius: 8, damage: 4, health: 10, reload: 1.0, magnetRange: 100, dropFactor: 0.65, desc: "Attracts nearby drops toward you." },
+  { id: 39, name: "Magnet", kind: "petal", color: "#e05555", outline: "#8a2020", shape: "circle", radius: 8, damage: 4, health: 10, reload: 1.0, magnetRange: 80, dropFactor: 0.65, desc: "Attracts nearby drops toward you." },
   { id: 40, name: "Shell Egg", kind: "summon", color: "#f8e8a0", outline: "#c8a030", shape: "egg", radius: 10, damage: 4, health: 22, reload: 8.0, petMob: 12, dropFactor: 0.55, desc: "Hatches a shell." },
   // ── Cactus drops (desert) ────────────────────────────────────────────────
   { id: 41, name: "Cactus", kind: "petal", color: "#4caf50", outline: "#357a38", shape: "circle", radius: 10, damage: 8, health: 22, reload: 1.5, healthBonus: 100, dropFactor: 0.7, desc: "Toughens your flower, raising maximum health while equipped." },
   { id: 42, name: "Cactus Egg", kind: "summon", color: "#a5d6a7", outline: "#357a38", shape: "egg", radius: 10, damage: 5, health: 26, reload: 4.0, petMob: 4, dropFactor: 0.55, desc: "Plants a friendly cactus. It never moves." },
-  // ── Leech drops (swamp) ────────────────────────────────────────────────────
-{ id: 43, name: "Leech Egg", kind: "summon", color: "#4a4a4a", outline: "#2a2a2a", shape: "egg", radius: 10, damage: 4, health: 18, reload: 4.5, petMob: 16, dropFactor: 0.55, desc: "Hatches a leech." },
-{ id: 44, name: "Faster", kind: "petal", color: "#6ab04c", outline: "#4a8a32", shape: "circle", radius: 8, damage: 8, health: 14, reload: 1.5, speed: 12, dropFactor: 0.7, desc: "Makes you move faster while orbiting." },
-{ id: 45, name: "Fang", kind: "petal", color: "#d4d4d4", outline: "#8a8a8a", shape: "triangle", radius: 7, damage: 32, health: 10, reload: 2.5, dropFactor: 0.6, desc: "A sharp fang that deals high damage." },
-  { id: 46, name: "Fried", kind: "petal", color: "#d4d4d4", outline: "#8a8a8a", shape: "circle", radius: 7, damage: 15, health: 10, reload: 1.5, dropFactor: 0.6, desc: "A sharp fang that deals high damage." },
+  { id: 43, name: "Antennae", kind: "petal", color: "#4a4a4a", outline: "#2a2a2a", shape: "circle", radius: 10, damage: 4, health: 1, reload: 1.5, dropFactor: 0.55, desc: "You can see more by this" },
+  { id: 44, name: "Soil", kind: "petal", color: "#4a4a4a", outline: "#2a2a2a", shape: "circle", radius: 10, damage: 4, health: 10, reload: 2.5, healthBonus: 100, dropFactor: 0.55, desc: "Increase your maximum health" },
+  { id: 45, name: "Fang", kind: "petal", color: "#911717", outline: "#700B0B", shape: "circle", radius: 10, damage: 4, health: 18, reload: 2.5, healthBonus: 100, dropFactor: 0.55, desc: "Increase your maximum health" },
+  { id: 46, name: "Orange", kind: "petal", color: "#FF8000", outline: "#CC6600", shape: "circle", radius: 18, damage: 25, health: 18, reload: 3.5, dropFactor: 0.55, desc: "Increase your maximum health" },
   // ── Nest eggs (spawns multiple creatures, draws one large egg) ───────────
-  { id: 47, name: "Ant Hole Egg", kind: "summon", color: "#6b4a2e", outline: "#3d2918", shape: "nest_egg", radius: 14, damage: 3, health: 22, reload: 3.8, petMob: 10, dropFactor: 0.5, desc: "Hatches a swarm of worker ants from the ant hole." },
+  { id: 47, name: "Ant Hole Egg", kind: "summon", color: "#6b4a2e", outline: "#3d2918", shape: "nest_egg", radius: 14, damage: 1, health: 22, reload: 15.5, petMob: 10, dropFactor: 0.5, desc: "Hatches a swarm of worker ants from the ant hole." },
+  { id: 48, name: "Third Eye", kind: "petal", color: "#e0e0e0", outline: "#c0c0c0", shape: "circle", radius: 10, damage: 10, health: 10, reload: 2.5, dropFactor: 0.05, desc: "Increase your maximum speed" },
+  { id: 49, name: "Hornet Egg", kind: "summon", color: "#859809", outline: "#647300", shape: "egg", radius: 14, damage: 1, health: 10, reload: 5.5, petMob: 16,dropFactor: 0.05, desc: "spawn something interesting" },
+  { id: 50, name: "Faster", kind: "petal", color: "#e0e0e0", outline: "#c0c0c0", shape: "circle", radius: 10, damage: 10, health: 10, reload: 2.5, speed: 10, dropFactor: 0.55, desc: "Increase your maximum speed" },
+
 ];
 
 /** Item ids that Oracle/Trade may hand back — never dropped by mobs, never craftable by combining. */
@@ -421,39 +418,38 @@ export interface MobDef {
 }
 
 export const MOBS: MobDef[] = [
-  { id: 0, name: "Ladybug", color: "#eb4034", outline: "#a82a20", shape: "bug", radius: 22, health: 60, damage: 18, speed: 42, xp: 10, drops: [{ item: 30, chance: 0.7 }, { item: 31, chance: 0.7 }, { item: 8, chance: 0.07 }] },
-  { id: 1, name: "Bee", color: "#f5d442", outline: "#c2a41e", shape: "wasp", radius: 18, health: 48, damage: 32, speed: 62, xp: 14, drops: [{ item: 2, chance: 0.7 }, { item: 18, chance: 0.7 }, { item: 19, chance: 0.7 }, { item: 20, chance: 0.06 }] },
-  { id: 2, name: "Rock", color: "#8d8d8d", outline: "#5f5f5f", shape: "rock", radius: 26, health: 130, damage: 10, speed: 0, xp: 12, drops: [{ item: 15, chance: 0.32 }, { item: 3, chance: 0.7 }, { item: 16, chance: 0.7 }, { item: 17, chance: 0.005 }] },
+  { id: 0, name: "Ladybug", color: "#eb4034", outline: "#a82a20", shape: "bug", radius: 22, health: 100, damage: 10, speed: 42, xp: 10, drops: [{ item: 30, chance: 0.7 }, { item: 31, chance: 0.7 }, { item: 8, chance: 0.07 }] },
+  { id: 1, name: "Bee", color: "#f5d442", outline: "#c2a41e", shape: "wasp", radius: 18, health: 50, damage: 50, speed: 62, xp: 14, drops: [{ item: 2, chance: 0.7 }, { item: 18, chance: 0.7 }, { item: 19, chance: 0.7 }, { item: 20, chance: 0.06 }] },
+  { id: 2, name: "Rock", color: "#8d8d8d", outline: "#5f5f5f", shape: "rock", radius: 26, health: 300, damage: 30, speed: 0, xp: 12, drops: [{ item: 15, chance: 0.32 }, { item: 3, chance: 0.7 }, { item: 16, chance: 0.7 }, { item: 17, chance: 0.005 }] },
   // The old generic "Ant" was replaced with Soldier Ant; Worker Ant is a
   // brand new mob added to the Garden biome (id 10 below).
-  { id: 3, name: "Soldier Ant", color: "#5b452c", outline: "#3a2b19", shape: "ant", radius: 17, health: 46, damage: 18, speed: 60, xp: 9, drops: [{ item: 7, chance: 0.7 }, { item: 11, chance: 0.7 }, { item: 12, chance: 0.07 }] },
-  { id: 4, name: "Cactus", color: "#4caf50", outline: "#357a38", shape: "cactus", radius: 25, health: 110, damage: 26, speed: 0, xp: 18, drops: [{ item: 41, chance: 0.7 }, { item: 42, chance: 0.07 }] },
-  { id: 5, name: "Scorpion", color: "#c76b2a", outline: "#8c4718", shape: "crab", radius: 21, health: 90, damage: 36, speed: 70, xp: 24, drops: [{ item: 36, chance: 0.7 }, { item: 37, chance: 0.28 }, { item: 35, chance: 0.7 }] },
+  { id: 3, name: "Soldier Ant", color: "#5b452c", outline: "#3a2b19", shape: "ant", radius: 17, health: 100, damage: 15, speed: 60, xp: 9, drops: [{ item: 7, chance: 0.7 }, { item: 11, chance: 0.7 }, { item: 12, chance: 0.07 }] },
+  { id: 4, name: "Cactus", color: "#4caf50", outline: "#357a38", shape: "cactus", radius: 25, health: 120, damage: 70, speed: 0, xp: 18, drops: [{ item: 41, chance: 0.7 }, { item: 42, chance: 0.07 }] },
+  { id: 5, name: "Scorpion", color: "#c76b2a", outline: "#8c4718", shape: "crab", radius: 21, health: 100, damage: 15, speed: 70, xp: 24, drops: [{ item: 36, chance: 0.7 }, { item: 37, chance: 0.28 }, { item: 35, chance: 0.7 }] },
   { id: 6, name: "Beetle", color: "#d1a054", outline: "#9c7532", shape: "bug", radius: 23, health: 100, damage: 24, speed: 48, xp: 20, drops: [{ item: 33, chance: 0.7 }, { item: 35, chance: 0.7 }, { item: 36, chance: 0.7 }] },
   { id: 7, name: "Jellyfish", color: "#b06be0", outline: "#7d40a8", shape: "jelly", radius: 22, health: 78, damage: 28, speed: 38, xp: 20, drops: [{ item: 24, chance: 0.7 }, { item: 25, chance: 0.7 }, { item: 26, chance: 0.07 }] },
   { id: 8, name: "Crab", color: "#ef7d3b", outline: "#b2541f", shape: "crab", radius: 24, health: 120, damage: 32, speed: 44, xp: 26, drops: [{ item: 27, chance: 0.7 }, { item: 28, chance: 0.7 }, { item: 29, chance: 0.07 }, { item: 4, chance: 0.7 }] },
   { id: 9, name: "Starfish", color: "#f2799e", outline: "#bc4c72", shape: "star", radius: 20, health: 95, damage: 18, speed: 36, xp: 18, drops: [{ item: 21, chance: 0.7 }, { item: 22, chance: 0.7 }, { item: 4, chance: 0.7 }, { item: 23, chance: 0.07 }] },
-  { id: 10, name: "Worker Ant", color: "#8a6a3c", outline: "#5d4528", shape: "ant", radius: 14, health: 32, damage: 10, speed: 68, xp: 6, drops: [{ item: 1, chance: 0.7 }, { item: 13, chance: 0.7 }, { item: 14, chance: 0.07 }] },
+  { id: 10, name: "Worker Ant", color: "#8a6a3c", outline: "#5d4528", shape: "ant", radius: 14, health: 50, damage: 10, speed: 68, xp: 6, drops: [{ item: 1, chance: 0.7 }, { item: 13, chance: 0.7 }, { item: 14, chance: 0.07 }] },
   // Sandstorm: a new desert hazard mob. It reuses the cactus "shape" placeholder
   // until the user finishes its detailed art.
   { id: 11, name: "Sandstorm", color: "#d4b878", outline: "#8a6a3c", shape: "cactus", radius: 28, health: 150, damage: 22, speed: 24, xp: 22, drops: [{ item: 9, chance: 0.18 }, { item: 4, chance: 0.7 }, { item: 32, chance: 0.7 }] },
   // Shell: a slow ocean mob that drops Shell, Magnet, Pearl, and Shell Egg.
   { id: 12, name: "Shell", color: "#f2d96e", outline: "#c8a030", shape: "rock", radius: 22, health: 100, damage: 14, speed: 18, xp: 16, drops: [{ item: 38, chance: 0.7 }, { item: 39, chance: 0.7 }, { item: 6, chance: 0.7 }, { item: 40, chance: 0.07 }] },
-  // ── Spawner mobs (nests) ──────────────────────────────────────────────────
   // Garden nest: spawns 1 Worker Ant + 1 Soldier Ant at each threshold.
-  { id: 13, name: "Ant Hole", color: "#4a3520", outline: "#2e1f10", shape: "rock", radius: 30, health: 300, damage: 0, speed: 0, xp: 30,
+  { id: 13, name: "Ant Hole", color: "#4a3520", outline: "#2e1f10", shape: "rock", radius: 30, health: 650, damage: 8, speed: 0, xp: 60,
     drops: [{ item: 11, chance: 0.55 }, { item: 12, chance: 0.05 }, { item: 13, chance: 0.55 }, { item: 14, chance: 0.05 }, { item: 47, chance: 0.04 }],
     spawner: spawner([0.85, 0.60, 0.35, 0.10], 10, 3) },
   // Ocean nest: spawns 2 Crabs at each threshold.
-  { id: 14, name: "Crab Cave", color: "#6b3a1f", outline: "#4a2510", shape: "rock", radius: 30, health: 350, damage: 0, speed: 0, xp: 35,
+  { id: 14, name: "Crab Cave", color: "#6b3a1f", outline: "#4a2510", shape: "rock", radius: 30, health: 350, damage: 20, speed: 0, xp: 35,
     drops: [{ item: 27, chance: 0.55 }, { item: 28, chance: 0.55 }, { item: 29, chance: 0.05 }, { item: 4, chance: 0.55 }],
     spawner: spawner([0.85, 0.60, 0.35, 0.10], 8, 8) },
   // Garden nest: spawns 2 Bees at each threshold.
-  { id: 15, name: "Hive", color: "#d4a017", outline: "#9a7010", shape: "cactus", radius: 28, health: 280, damage: 0, speed: 0, xp: 28,
+  { id: 15, name: "Hive", color: "#d4a017", outline: "#9a7010", shape: "cactus", radius: 28, health: 600, damage: 60, speed: 0, xp: 28,
     drops: [{ item: 2, chance: 0.55 }, { item: 18, chance: 0.55 }, { item: 19, chance: 0.55 }, { item: 20, chance: 0.05 }],
     spawner: spawner([0.85, 0.60, 0.35, 0.10], 1, 1) },
-  { id: 16, name: "Leech", color: "#353535", outline: "#000000", shape: "leech", radius: 18, health: 80, damage: 22, speed: 30, xp: 18,
-  drops: [{ item: 43, chance: 0.7 }, { item: 44, chance: 0.7 }, { item: 45, chance: 0.7 }] },
+  { id: 16, name: "Hornet", color: "#353535", outline: "#000000", shape: "leech", radius: 18, health: 80, damage: 22, speed: 50, xp: 18,
+  drops: [{ item: 43, chance: 0.7 }, { item: 46, chance: 0.7 }, { item: 49, chance: 0.7 }] },
 ];
 
 export interface Wall {
@@ -486,7 +482,7 @@ export const MAPS: MapDef[] = [
     accent: "#ffe27a",
     width: 8000,
     height: 8000,
-    mobs: [0, 1, 2, 3, 10, 13, 15],
+    mobs: [0, 1, 2, 3, 10, 13, 15, 16],
     mobCap: 85,
     rarityBias: 0,
     walls: [
@@ -722,7 +718,7 @@ export const MAPS: MapDef[] = [
     accent: "#9fe6ff",
     width: 8000,
     height: 8000,
-    mobs: [7, 8, 9, 12, 14, 16],
+    mobs: [7, 8, 9, 12, 14],
     mobCap: 85,
     rarityBias: 0.22,
     walls: [
@@ -1372,11 +1368,11 @@ export const SUMMON_CFG: Record<number, SummonCfg> = {
   29: { maxCount: 1 },                                  // Crab Egg
   34: { maxCount: 1, spawnProtection: 1.5 },            // Beetle Egg
   37: { maxCount: 2 },                                  // Scorpion Egg
-  40: { maxCount: 2 },                                  // Shell Egg
-  42: { maxCount: 1, spawnProtection: 1.5 },            // Cactus Egg — one rooted cactus
+  40: { maxCount: 2 },
+  42: { maxCount: 1, spawnProtection: 1.5 },
   // ── Nest eggs ──────────────────────────────────────────────────────────
   47: { maxCount: 6, spawnCount: 6 },     
-  49: { maxCount: 2, spawnCount: 1 },
+  49: { maxCount: 2, spawnCount: 2 },
 };
 
 /** Default seconds of post-spawn invulnerability for a freshly hatched pet. */
