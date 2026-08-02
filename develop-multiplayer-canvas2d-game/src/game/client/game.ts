@@ -431,7 +431,7 @@ class SettingsSystem {
                 this.showDebugInfo = data.showDebugInfo !== undefined ? data.showDebugInfo : false;
             }
         } catch(e) {}
-        this._forceRedraw(); 
+        this._forceRedraw();
     }
 
     save() {
@@ -1050,8 +1050,8 @@ class ChatSystem {
   inputText = "";
   inputActive = false;
   visible = true;
-  width = 380;
-  height = 65;
+  width = 250;
+  height = 30;
 
   addMessage(text: string, sender: string, isSystem = false, isCraftReport = false, isSelf = false) {
     this.messages.push({
@@ -1084,7 +1084,7 @@ class ChatSystem {
     const dpr = Math.min(2, (window.devicePixelRatio || 1));
     ctx.scale(dpr, dpr);
     const panelX = 15;
-    const panelY = screenHeight - this.height - 2;
+    const panelY = screenHeight - this.height + 40;
     const padding = 12;
     ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
     ctx.beginPath();
@@ -1119,7 +1119,7 @@ class ChatSystem {
     const sortedNames = allNames.sort((a, b) => b.length - a.length);
 
     visibleMsgs.forEach((msg, i) => {
-      const y = panelY - 10 - i * lineHeight;
+      const y = panelY - 15 - i * lineHeight;
       let displayText = msg.text || '';
 
       if (msg.sender === 'System' || msg.isSystem || msg.isCraftReport) {
@@ -2726,6 +2726,8 @@ export class GameClient {
   private debugCollisionChecks = 0;
   /** Total simulated entities (players + mobs + petals + drops), server-wide. */
   private debugEntityCount = 0;
+  /** Total connected players across every map. */
+  private debugPlayerCount = 0;
 
   // Packet-loss / stall handling
   /**
@@ -3321,7 +3323,7 @@ export class GameClient {
         this.ents.clear();
         this.roseParticles.length = 0;
         this.mapFlash = 1;
-        this.chat.addMessage("Welcome! Press [Enter] to chat. Commands: /claim, /create_public_squad, /create_private_squad, /join_squad <CODE>, /leave_squad, /find_public_squad", "System", true);
+        this.chat.addMessage("Welcome! Press [Enter] to chat. type /help for help", "System", true);
         break;
       }
       case S2C.SNAPSHOT: {
@@ -3472,6 +3474,7 @@ export class GameClient {
       case S2C.DEBUG: {
         this.debugCollisionChecks = r.u32();
         this.debugEntityCount = r.u16();
+        this.debugPlayerCount = r.u16();
         break;
       }
       default:
@@ -3854,18 +3857,18 @@ private bagLayout() {
   const p = this.bagPanelRect();
   const isMobile = this.isMobile || this.w < 640;
   const scale = Math.min(1, p.w / 380);
-  
+
   // 【修改】手机端更密集：减少间距
   let gap = 10 * scale;
   let pad = 15 * scale;
   let cols = 5;
-  
+
   if (isMobile) {
-    gap = 8 * scale;     
-    pad = 12 * scale;   
+    gap = 8 * scale;
+    pad = 12 * scale;
     cols = 5;
   }
-  
+
   const slotSize = Math.max(28 * scale, Math.floor((p.w - pad * 2 - gap * (cols - 1)) / cols));
   const itemHeight = slotSize + gap;
   const headerH = 44 * scale;
@@ -3876,19 +3879,19 @@ private bagLayout() {
   const barW = p.w - dropW - barGap - pad * 2;
   const barX = p.x + pad;
   const dropX = barX + barW + barGap;
-  
+
   // 【修改】手机端降低统计面板高度
   let statsH = 92 * scale;
   if (isMobile) {
     statsH = 70 * scale;  // 从92减小到76
   }
-  
+
   const gridTop = barY + barH + 12 * scale;
   const gridBottom = p.y + p.h - statsH - 6 * scale;
   const gridH = Math.max(1, gridBottom - gridTop);
   const maxVisibleRows = Math.max(1, Math.floor(gridH / itemHeight));
   const scrollTrack: Rect = { x: p.x + p.w - pad + 2, y: gridTop, w: 6, h: gridH };
-  
+
   return {
     panel: p,
     compact: false,
@@ -4065,7 +4068,7 @@ private bagLayout() {
 
     // [Change 2] Reduced offset from 38 to 10 to expand grid height significantly
     const gridTop = infoY + 10 * scale;
-    
+
     const gridBottom = p.y + p.h - 10 * scale;
 
     const cols = RARITIES.length;
@@ -5000,32 +5003,32 @@ private bagLayout() {
   };
 
   // ------------------------------------------------------------ menu logic
-  
+
   // Floating petals for menu animation
   private menuPetals: { x: number; y: number; size: number; speedX: number; speedY: number; rotation: number; rotationSpeed: number; opacity: number }[] = [];
   private menuBgColor: [number, number, number] = [26, 26, 46];
   private menuTargetBgColor: [number, number, number] = [26, 26, 46];
   private menuHoveredButton: string | null = null;
-  
+
   // Biome colors for the 3 maps
   private BIOME_COLORS: Record<string, [number, number, number]> = {
     "Garden": [102, 187, 106],
     "Desert": [255, 202, 128],
     "Ocean": [64, 164, 223],
   };
-  
+
   private BIOME_HOVER_COLORS: Record<string, [number, number, number]> = {
     "Garden": [67, 160, 71],
     "Desert": [255, 167, 38],
     "Ocean": [0, 105, 148],
   };
-  
+
   private BIOME_BG_COLORS: Record<string, [number, number, number]> = {
     "Garden": [36, 80, 36],
     "Desert": [90, 70, 20],
     "Ocean": [20, 50, 100],
   };
-  
+
   private initMenuPetals() {
     this.menuPetals = [];
     for (let i = 0; i < 20; i++) {
@@ -5041,13 +5044,13 @@ private bagLayout() {
       });
     }
   }
-  
+
   private updateMenuPetals(dt: number) {
     for (const p of this.menuPetals) {
       p.x += p.speedX * dt;
       p.y += p.speedY * dt;
       p.rotation += p.rotationSpeed * dt;
-      
+
       if (p.x > this.w + p.size) {
         p.x = -p.size;
         p.y = Math.random() * this.h;
@@ -5056,7 +5059,7 @@ private bagLayout() {
       else if (p.y < -p.size) p.y = this.h + p.size;
     }
   }
-  
+
   private updateMenuBgColor(dt: number) {
     for (let i = 0; i < 3; i++) {
       const diff = this.menuTargetBgColor[i] - this.menuBgColor[i];
@@ -5065,17 +5068,17 @@ private bagLayout() {
       }
     }
   }
-  
+
   private drawMenuGrid(ctx: CanvasRenderingContext2D, r: number, g: number, b: number) {
     const cell = 48;
     const lr = Math.min(255, r + 18);
     const lg = Math.min(255, g + 18);
     const lb = Math.min(255, b + 18);
-    
+
     ctx.save();
     ctx.strokeStyle = `rgba(${lr},${lg},${lb},0.40)`;
     ctx.lineWidth = 1;
-    
+
     for (let x = 0; x <= this.w; x += cell) {
       ctx.beginPath();
       ctx.moveTo(x, 0);
@@ -5088,7 +5091,7 @@ private bagLayout() {
       ctx.lineTo(this.w, y);
       ctx.stroke();
     }
-    
+
     ctx.fillStyle = `rgba(${lr},${lg},${lb},0.28)`;
     for (let x = 0; x <= this.w; x += cell) {
       for (let y = 0; y <= this.h; y += cell) {
@@ -5099,23 +5102,23 @@ private bagLayout() {
     }
     ctx.restore();
   }
-  
+
   private drawMenuPetal(ctx: CanvasRenderingContext2D, petal: typeof this.menuPetals[0]) {
     ctx.save();
     ctx.globalAlpha = petal.opacity;
     ctx.translate(petal.x, petal.y);
     ctx.rotate(petal.rotation);
-    
+
     // Draw a simple petal shape
     const s = petal.size / 2;
     ctx.fillStyle = `rgba(${this.menuBgColor[0] + 40}, ${this.menuBgColor[1] + 40}, ${this.menuBgColor[2] + 40}, 1)`;
     ctx.beginPath();
     ctx.ellipse(0, 0, s * 0.3, s * 0.6, 0, 0, Math.PI * 2);
     ctx.fill();
-    
+
     ctx.restore();
   }
-  
+
   private menuLayout() {
     // Mobile responsive: single column on phone, 3 columns on desktop
     const isMobileLayout = this.isMobile || this.w < 640;
@@ -5135,16 +5138,16 @@ private bagLayout() {
   private menuBiomeButtons() {
     const layout = this.menuLayout();
     const buttons: Record<number, { x: number; y: number; w: number; h: number }> = {};
-    
+
     const COLS = layout.COLS;
     const totalRows = Math.ceil(MAPS.length / COLS);
-    
+
     MAPS.forEach((map, i) => {
       const row = Math.floor(i / COLS);
       const itemsInRow = row === totalRows - 1 ? MAPS.length - row * COLS : COLS;
       const rowOffset = (COLS - itemsInRow) * (layout.BIOME_W + layout.BIOME_GAP) / 2;
       const col = i % COLS;
-      
+
       buttons[map.id] = {
         x: layout.gridX + rowOffset + col * (layout.BIOME_W + layout.BIOME_GAP),
         y: layout.gridY + row * (layout.BIOME_H + layout.BIOME_GAP),
@@ -5152,7 +5155,7 @@ private bagLayout() {
         h: layout.BIOME_H,
       };
     });
-    
+
     return buttons;
   }
 
@@ -5252,7 +5255,7 @@ private bagLayout() {
         return;
       }
     }
-    
+
     // Left sidebar buttons (same functions) — each returns so a single
     // tap never triggers two actions.
     if (actions.left_account && hit(actions.left_account, mx, my)) { this.accountSystem.openPanel(); return; }
@@ -5260,12 +5263,12 @@ private bagLayout() {
     if (actions.left_craft && hit(actions.left_craft, mx, my)) { this.toggleCraft(); return; }
     if (actions.left_bonus && hit(actions.left_bonus, mx, my)) { this.bonusOpen = true; return; }
     if (actions.left_settings && hit(actions.left_settings, mx, my)) { this.settings.togglePanel(); return; }
-    
+
     // Play button (big button below biome grid)
     const playBtnRect = this.menuPlayButtonRect();
     if (playBtnRect && hit(playBtnRect, mx, my)) this.startGame();
   }
-  
+
   private menuPlayButtonRect(): Rect | null {
     const layout = this.menuLayout();
     const isMobileLayout = this.isMobile || this.w < 640;
@@ -5888,6 +5891,7 @@ private bagLayout() {
       `Throughput: ↓${formatDebugBytes(this.debugThroughputInWindow)}/s ↑${formatDebugBytes(this.debugThroughputOutWindow)}/s`,
       `Objects: ${this.connected ? this.debugEntityCount : this.ents.size}`,
       `Collision checks: ${this.connected ? this.debugCollisionChecks : "--"}`,
+      `Players: ${this.connected ? this.debugPlayerCount : "--"}`,
     ];
 
     const fontSize = 12;
@@ -5915,60 +5919,60 @@ private bagLayout() {
     const t = this.time;
     const W = this.w;
     const H = this.h;
-    
+
     // Initialize petals if empty
     if (this.menuPetals.length === 0) this.initMenuPetals();
-    
+
     // Update background color transition
     this.updateMenuBgColor(dt);
-    
+
     // Update floating petals
     this.updateMenuPetals(dt);
-    
+
     // ─── Background ───
     const bg = this.menuBgColor;
     const r = Math.round(bg[0]), g = Math.round(bg[1]), b = Math.round(bg[2]);
     ctx.fillStyle = `rgb(${r},${g},${b})`;
     ctx.fillRect(0, 0, W, H);
-    
+
     // Grid background
     this.drawMenuGrid(ctx, r, g, b);
-    
+
     // Floating petals
     for (const petal of this.menuPetals) {
       this.drawMenuPetal(ctx, petal);
     }
-    
+
     // ─── Helpers ───
     const adj = (rgb: number[], f: number) => rgb.map(c => Math.max(0, Math.min(255, Math.floor(c * f))));
-    
+
     const drawBtn = (rect: { x: number; y: number; w: number; h: number }, baseColor: number[], whiteStroke = false) => {
       const { x, y, w, h } = rect;
-      
+
       roundRect(ctx, x, y, w, h, 8);
       ctx.fillStyle = `rgb(${baseColor[0]},${baseColor[1]},${baseColor[2]})`;
       ctx.fill();
-      
+
       ctx.save();
       roundRect(ctx, x, y, w, h, 8);
       ctx.clip();
       ctx.fillStyle = `rgb(${adj(baseColor, 0.78)[0]},${adj(baseColor, 0.78)[1]},${adj(baseColor, 0.78)[2]})`;
       ctx.fillRect(x, y, w, h / 2);
       ctx.restore();
-      
+
       if (whiteStroke) {
         ctx.strokeStyle = 'rgba(255,255,255,0.92)';
         ctx.lineWidth = 3;
         roundRect(ctx, x - 3, y - 3, w + 6, h + 6, 10);
         ctx.stroke();
       }
-      
+
       ctx.strokeStyle = `rgb(${adj(baseColor, 0.48)[0]},${adj(baseColor, 0.48)[1]},${adj(baseColor, 0.48)[2]})`;
       ctx.lineWidth = 3;
       roundRect(ctx, x, y, w, h, 8);
       ctx.stroke();
     };
-    
+
     const drawBtnLabel = (rect: { x: number; y: number; w: number; h: number }, txt: string, fontSize: number) => {
       const { x, y, w, h } = rect;
       ctx.font = `bold ${fontSize}px ${FONT_FAMILY}`;
@@ -5981,13 +5985,13 @@ private bagLayout() {
       ctx.fillStyle = 'white';
       ctx.fillText(txt, x + w / 2, y + h / 2);
     };
-    
+
     // ─── Title ───
     const isMobileLayout = this.isMobile || W < 640;
     const titleSize = isMobileLayout ? Math.max(26, Math.min(44, W * 0.12)) : Math.max(28, Math.min(60, W * 0.07));
     const bob = Math.sin(t * 1.6) * 6;
     const titleY = isMobileLayout ? Math.max(35, this.h * 0.08) : Math.max(60, this.h * 0.12);
-    
+
     ctx.font = `bold ${titleSize}px ${FONT_FAMILY}`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'alphabetic';
@@ -5996,14 +6000,14 @@ private bagLayout() {
     ctx.strokeText('PETALIA.IO', W / 2, titleY + bob * 0.4);
     ctx.fillStyle = '#ffe763';
     ctx.fillText('PETALIA.IO', W / 2, titleY + bob * 0.4);
-    
+
     // ─── Name Field (above biome buttons) ───
     const layout = this.menuLayout();
     const nameFieldW = isMobileLayout ? Math.min(260, W * 0.8) : Math.min(300, W * 0.4);
     const nameFieldH = isMobileLayout ? 36 : 42;
     const nameFieldX = W / 2 - nameFieldW / 2;
     const nameFieldY = isMobileLayout ? (layout.gridY - 48) : (layout.gridY - 70);
-    
+
     // Draw name field
     roundRect(ctx, nameFieldX, nameFieldY, nameFieldW, nameFieldH, 8);
     ctx.fillStyle = this.focus === 'name' ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.35)';
@@ -6011,7 +6015,7 @@ private bagLayout() {
     ctx.lineWidth = 3;
     ctx.strokeStyle = this.focus === 'name' ? '#ffe763' : 'rgba(255,255,255,0.3)';
     ctx.stroke();
-    
+
     const caret = this.focus === 'name' && Math.floor(t * 2) % 2 === 0 ? '|' : '';
     const nameText = this.playerName || 'Flower name';
     const nameColor = this.playerName ? '#ffffff' : 'rgba(255,255,255,0.45)';
@@ -6024,10 +6028,10 @@ private bagLayout() {
     ctx.strokeText(nameText + caret, nameFieldX + 14, nameFieldY + nameFieldH / 2);
     ctx.fillStyle = nameColor;
     ctx.fillText(nameText + caret, nameFieldX + 14, nameFieldY + nameFieldH / 2);
-    
+
     // ─── Biome Buttons (3-column grid) ───
     const biomeButtons = this.menuBiomeButtons();
-    
+
     // Update hover state
     this.menuHoveredButton = null;
     for (const map of MAPS) {
@@ -6036,26 +6040,26 @@ private bagLayout() {
         this.menuHoveredButton = `biome_${map.id}`;
       }
     }
-    
+
     for (const map of MAPS) {
       const rect = biomeButtons[map.id];
       if (!rect) continue;
-      
+
       const isHovered = this.menuHoveredButton === `biome_${map.id}`;
       const isSelected = this.selectedMap === map.id;
       const baseColor = isHovered ? this.BIOME_HOVER_COLORS[map.name] : this.BIOME_COLORS[map.name];
-      
+
       drawBtn(rect, baseColor, isSelected);
       drawBtnLabel(rect, map.name, isMobileLayout ? 13 : 16);
     }
-    
+
     // ─── Play Button (below biome grid) ───
     const playBtnRect = this.menuPlayButtonRect();
     if (playBtnRect) {
       const isPlayHovered = hit(playBtnRect, this.mx, this.my);
       const playColor: [number, number, number] = isPlayHovered ? [50, 190, 80] : [63, 174, 96];
       drawBtn(playBtnRect, playColor);
-      
+
       ctx.font = `bold ${isMobileLayout ? 20 : 26}px ${FONT_FAMILY}`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
@@ -6066,7 +6070,7 @@ private bagLayout() {
       ctx.fillStyle = 'white';
       ctx.fillText('PLAY', playBtnRect.x + playBtnRect.w / 2, playBtnRect.y + playBtnRect.h / 2);
     }
-    
+
     // ─── Left Sidebar Buttons ───
     const actions = this.menuActionRects();
     const leftBtnColors: Record<string, [number, number, number]> = {
@@ -6085,22 +6089,22 @@ private bagLayout() {
       left_settings: [100, 110, 110],
       left_account: [180, 50, 50],
     };
-    
+
     for (const key of ['left_inventory', 'left_craft', 'left_gallery', 'left_bonus', 'left_settings', 'left_account']) {
       const rect = actions[key];
       if (!rect) continue;
       const isHov = hit(rect, this.mx, this.my);
       const color = isHov ? leftBtnHoverColors[key] : leftBtnColors[key];
       drawBtn(rect, color);
-      
+
       ctx.font = `bold ${isMobileLayout ? 10 : 11}px ${FONT_FAMILY}`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.strokeStyle = 'rgba(0,0,0,0.8)';
       ctx.lineWidth = 2;
       ctx.lineJoin = 'round';
-      const labels: Record<string, string> = { 
-        left_inventory: isMobileLayout ? 'Bag' : '[I]nventory', 
+      const labels: Record<string, string> = {
+        left_inventory: isMobileLayout ? 'Bag' : '[I]nventory',
         left_craft: isMobileLayout ? 'Craft' : '[C]raft',
         left_gallery: isMobileLayout ? 'Mobs' : 'Mobs',
         left_bonus: 'Bonus',
@@ -6111,7 +6115,7 @@ private bagLayout() {
       ctx.fillStyle = 'white';
       ctx.fillText(labels[key] || '', rect.x + rect.w / 2, rect.y + rect.h / 2);
     }
-    
+
     // ─── Version text ───
     ctx.font = `${isMobileLayout ? 11 : 14}px ${FONT_FAMILY}`;
     ctx.textAlign = 'right';
@@ -6348,122 +6352,122 @@ private bagLayout() {
     this.accountSystem.draw(ctx);
   }
 
-  buildWallEdgeCache() {    
-    const d = (window as any).WALL_DATA?.[this.currentBiome];    
-    if (!d) return;    
-    
-    const size = Math.sqrt(d.length) | 0;    
-    const cellW = this.worldW / size;    
-    const cellH = this.worldH / size;    
-    
-    const W = (x: number, y: number) =>    
-        x >= 0 && y >= 0 && x < size && y < size &&    
-        d[y * size + x] === '1';    
-    
-    // =========================    
-    // 1. 栅格 → 有向边    
-    // =========================    
-    const edgeMap = new Map<number, { x: number; y: number }>();    
-    const keyOf = (x: number, y: number) => x * (size + 1) + y;    
-    
-    for (let y = 0; y < size; y++) {    
-        for (let x = 0; x < size; x++) {    
-            if (!W(x, y)) continue;    
-            if (!W(x, y - 1)) edgeMap.set(keyOf(x, y), { x: x + 1, y: y });    
-            if (!W(x + 1, y)) edgeMap.set(keyOf(x + 1, y), { x: x + 1, y: y + 1 });    
-            if (!W(x, y + 1)) edgeMap.set(keyOf(x + 1, y + 1), { x: x, y: y + 1 });    
-            if (!W(x - 1, y)) edgeMap.set(keyOf(x, y + 1), { x: x, y: y });    
-        }    
-    }    
-    
-    // =========================    
-    // 2. 串成闭合多边形    
-    // =========================    
-    const rawLoops: { x: number; y: number }[][] = [];    
-    const visited = new Set<number>();    
-    
-    for (const startKey of edgeMap.keys()) {    
-        if (visited.has(startKey)) continue;    
-        const loop: { x: number; y: number }[] = [];    
-        let curKey = startKey;    
-        let guard = 0;    
-        while (!visited.has(curKey) && guard++ < size * size * 4) {    
-            visited.add(curKey);    
-            loop.push({ x: Math.floor(curKey / (size + 1)), y: curKey % (size + 1) });    
-            const next = edgeMap.get(curKey);    
-            if (!next) break;    
-            curKey = keyOf(next.x, next.y);    
-        }    
-        if (loop.length >= 3) rawLoops.push(loop);    
-    }    
-    
-    // =========================    
-    // 3. 简化    
-    // =========================    
-    const simplify = (loop: { x: number; y: number }[]) => {    
-        const n = loop.length;    
-        const out: { x: number; y: number }[] = [];    
-        for (let i = 0; i < n; i++) {    
-            const p0 = loop[(i - 1 + n) % n];    
-            const p1 = loop[i];    
-            const p2 = loop[(i + 1) % n];    
-            const collinear = (p1.x - p0.x) * (p2.y - p1.y) === (p1.y - p0.y) * (p2.x - p1.x);    
-            if (!collinear) out.push(p1);    
-        }    
-        return out.length >= 3 ? out : loop;    
-    };    
-    const simplified = rawLoops.map(simplify);    
-    
-    // =========================    
-    // 4. 噪声（幅度调小，更平滑）    
-    // =========================    
-    const noise = (x: number, y: number, seed: number) => {    
-        let h = seed * 374761393 + x * 668265263 + y * 1274126177;    
-        h = (h ^ (h >> 13)) * 1274126177;    
-        h = h ^ (h >> 16);    
-        return (h & 0x7fffffff) / 0x7fffffff;    
-    };    
-    const PTS_PER_CELL = 3;    
-    const BIG_AMP = 0.1;    
-    const FINE_AMP = 0.04;    
-    const BIG_FREQ = 0.2;    
-    const FINE_FREQ = 2.9;    
-    
-    this.wallNoisyLoops = simplified.map((loop, loopIdx) => {    
-        const pts: { x: number; y: number }[] = [];    
-        const n = loop.length;    
-        const seed = loopIdx * 0.7 + 1;    
-    
-        for (let i = 0; i < n; i++) {    
-            const p1 = loop[i];    
-            const p2 = loop[(i + 1) % n];    
-            const horizontal = p1.y === p2.y;    
-            const len = horizontal ? Math.abs(p2.x - p1.x) : Math.abs(p2.y - p1.y);    
-            const steps = Math.max(1, Math.round(len * PTS_PER_CELL));    
-    
-            for (let s2 = 0; s2 < steps; s2++) {    
-                const t = s2 / steps;    
-                const wx = p1.x + (p2.x - p1.x) * t;    
-                const wy = p1.y + (p2.y - p1.y) * t;    
-    
-                let j = 0;    
-                if (s2 !== 0) {    
-                    const big = (noise(wx * BIG_FREQ, wy * BIG_FREQ, seed + 11) - 0.5) * 2 * BIG_AMP;    
-                    const fine = (noise(wx * FINE_FREQ, wy * FINE_FREQ, seed + 53) - 0.5) * 2 * FINE_AMP;    
-                    j = big + fine;    
-                }    
-    
-                pts.push({    
-                    x: (wx + (horizontal ? 0 : j)) * cellW,    
-                    y: (wy + (horizontal ? j : 0)) * cellH    
-                });    
-            }    
-        }    
-        return pts;    
-    });    
-    
-    this.wallMaxJitterPx = (BIG_AMP + FINE_AMP) * Math.min(cellW, cellH);    
-    this._wallEdgeBiome = this.currentBiome;    
+  buildWallEdgeCache() {
+    const d = (window as any).WALL_DATA?.[this.currentBiome];
+    if (!d) return;
+
+    const size = Math.sqrt(d.length) | 0;
+    const cellW = this.worldW / size;
+    const cellH = this.worldH / size;
+
+    const W = (x: number, y: number) =>
+        x >= 0 && y >= 0 && x < size && y < size &&
+        d[y * size + x] === '1';
+
+    // =========================
+    // 1. 栅格 → 有向边
+    // =========================
+    const edgeMap = new Map<number, { x: number; y: number }>();
+    const keyOf = (x: number, y: number) => x * (size + 1) + y;
+
+    for (let y = 0; y < size; y++) {
+        for (let x = 0; x < size; x++) {
+            if (!W(x, y)) continue;
+            if (!W(x, y - 1)) edgeMap.set(keyOf(x, y), { x: x + 1, y: y });
+            if (!W(x + 1, y)) edgeMap.set(keyOf(x + 1, y), { x: x + 1, y: y + 1 });
+            if (!W(x, y + 1)) edgeMap.set(keyOf(x + 1, y + 1), { x: x, y: y + 1 });
+            if (!W(x - 1, y)) edgeMap.set(keyOf(x, y + 1), { x: x, y: y });
+        }
+    }
+
+    // =========================
+    // 2. 串成闭合多边形
+    // =========================
+    const rawLoops: { x: number; y: number }[][] = [];
+    const visited = new Set<number>();
+
+    for (const startKey of edgeMap.keys()) {
+        if (visited.has(startKey)) continue;
+        const loop: { x: number; y: number }[] = [];
+        let curKey = startKey;
+        let guard = 0;
+        while (!visited.has(curKey) && guard++ < size * size * 4) {
+            visited.add(curKey);
+            loop.push({ x: Math.floor(curKey / (size + 1)), y: curKey % (size + 1) });
+            const next = edgeMap.get(curKey);
+            if (!next) break;
+            curKey = keyOf(next.x, next.y);
+        }
+        if (loop.length >= 3) rawLoops.push(loop);
+    }
+
+    // =========================
+    // 3. 简化
+    // =========================
+    const simplify = (loop: { x: number; y: number }[]) => {
+        const n = loop.length;
+        const out: { x: number; y: number }[] = [];
+        for (let i = 0; i < n; i++) {
+            const p0 = loop[(i - 1 + n) % n];
+            const p1 = loop[i];
+            const p2 = loop[(i + 1) % n];
+            const collinear = (p1.x - p0.x) * (p2.y - p1.y) === (p1.y - p0.y) * (p2.x - p1.x);
+            if (!collinear) out.push(p1);
+        }
+        return out.length >= 3 ? out : loop;
+    };
+    const simplified = rawLoops.map(simplify);
+
+    // =========================
+    // 4. 噪声（幅度调小，更平滑）
+    // =========================
+    const noise = (x: number, y: number, seed: number) => {
+        let h = seed * 374761393 + x * 668265263 + y * 1274126177;
+        h = (h ^ (h >> 13)) * 1274126177;
+        h = h ^ (h >> 16);
+        return (h & 0x7fffffff) / 0x7fffffff;
+    };
+    const PTS_PER_CELL = 3;
+    const BIG_AMP = 0.1;
+    const FINE_AMP = 0.04;
+    const BIG_FREQ = 0.2;
+    const FINE_FREQ = 2.9;
+
+    this.wallNoisyLoops = simplified.map((loop, loopIdx) => {
+        const pts: { x: number; y: number }[] = [];
+        const n = loop.length;
+        const seed = loopIdx * 0.7 + 1;
+
+        for (let i = 0; i < n; i++) {
+            const p1 = loop[i];
+            const p2 = loop[(i + 1) % n];
+            const horizontal = p1.y === p2.y;
+            const len = horizontal ? Math.abs(p2.x - p1.x) : Math.abs(p2.y - p1.y);
+            const steps = Math.max(1, Math.round(len * PTS_PER_CELL));
+
+            for (let s2 = 0; s2 < steps; s2++) {
+                const t = s2 / steps;
+                const wx = p1.x + (p2.x - p1.x) * t;
+                const wy = p1.y + (p2.y - p1.y) * t;
+
+                let j = 0;
+                if (s2 !== 0) {
+                    const big = (noise(wx * BIG_FREQ, wy * BIG_FREQ, seed + 11) - 0.5) * 2 * BIG_AMP;
+                    const fine = (noise(wx * FINE_FREQ, wy * FINE_FREQ, seed + 53) - 0.5) * 2 * FINE_AMP;
+                    j = big + fine;
+                }
+
+                pts.push({
+                    x: (wx + (horizontal ? 0 : j)) * cellW,
+                    y: (wy + (horizontal ? j : 0)) * cellH
+                });
+            }
+        }
+        return pts;
+    });
+
+    this.wallMaxJitterPx = (BIG_AMP + FINE_AMP) * Math.min(cellW, cellH);
+    this._wallEdgeBiome = this.currentBiome;
   }
 
   private wallExteriorPath(visibleWalls: Wall[], blockers: Wall[]): Path2D {
@@ -6634,190 +6638,190 @@ private bagLayout() {
     ctx.restore();
   }
 
-  _drawWallsLegacy(ctx: CanvasRenderingContext2D, cameraOffset: { x: number; y: number }, wallData: string) {    
-    const size = Math.sqrt(wallData.length) | 0;    
-    const cellW = this.worldW / size;    
-    const cellH = this.worldH / size;    
-    
-    const cx = cameraOffset.x;    
-    const cy = cameraOffset.y;    
-    
-    const viewScale = this.viewZoom || 1;    
-    const vw = this.w / viewScale;    
-    const vh = this.h / viewScale;    
-    
-    const left = cx - vw / 2;    
-    const right = cx + vw / 2;    
-    const top = cy - vh / 2;    
-    const bottom = cy + vh / 2;    
-    
-    const BUFFER_BLOCKS = 12;    
-    const pad = cellW * BUFFER_BLOCKS * viewScale;    
-    
-    const bgConfig = BIOME_BACKGROUNDS[this.currentBiome];    
-    const wallColor = bgConfig?.wall_color || [80, 80, 80];    
-    
-    // 初始化 Pattern    
-    if (!this._wallPatternLegacy || this._wallPatternLegacyBiome !== this.currentBiome) {    
-        const s = 512, cv = document.createElement('canvas');    
-        cv.width = cv.height = s;    
-        const g = cv.getContext('2d');    
+  _drawWallsLegacy(ctx: CanvasRenderingContext2D, cameraOffset: { x: number; y: number }, wallData: string) {
+    const size = Math.sqrt(wallData.length) | 0;
+    const cellW = this.worldW / size;
+    const cellH = this.worldH / size;
+
+    const cx = cameraOffset.x;
+    const cy = cameraOffset.y;
+
+    const viewScale = this.viewZoom || 1;
+    const vw = this.w / viewScale;
+    const vh = this.h / viewScale;
+
+    const left = cx - vw / 2;
+    const right = cx + vw / 2;
+    const top = cy - vh / 2;
+    const bottom = cy + vh / 2;
+
+    const BUFFER_BLOCKS = 12;
+    const pad = cellW * BUFFER_BLOCKS * viewScale;
+
+    const bgConfig = BIOME_BACKGROUNDS[this.currentBiome];
+    const wallColor = bgConfig?.wall_color || [80, 80, 80];
+
+    // 初始化 Pattern
+    if (!this._wallPatternLegacy || this._wallPatternLegacyBiome !== this.currentBiome) {
+        const s = 512, cv = document.createElement('canvas');
+        cv.width = cv.height = s;
+        const g = cv.getContext('2d');
         if (g) {
-          g.fillStyle = `rgb(${wallColor[0]},${wallColor[1]},${wallColor[2]})`;    
-          g.fillRect(0, 0, s, s);    
-    
-          g.fillStyle = `rgba(${Math.max(0, wallColor[0] - 25)}, ${Math.max(0, wallColor[1] - 25)}, ${Math.max(0, wallColor[2] - 25)}, .5)`;    
-          for (let i = 0; i < 17; i++) {    
-              const r = 5 + Math.random() * 10;    
-              const x = Math.random() * s;    
-              const y = Math.random() * s;    
-              g.beginPath();    
-              g.arc(x, y, r, 0, Math.PI * 2);    
-              g.fill();    
-          }    
+          g.fillStyle = `rgb(${wallColor[0]},${wallColor[1]},${wallColor[2]})`;
+          g.fillRect(0, 0, s, s);
+
+          g.fillStyle = `rgba(${Math.max(0, wallColor[0] - 25)}, ${Math.max(0, wallColor[1] - 25)}, ${Math.max(0, wallColor[2] - 25)}, .5)`;
+          for (let i = 0; i < 17; i++) {
+              const r = 5 + Math.random() * 10;
+              const x = Math.random() * s;
+              const y = Math.random() * s;
+              g.beginPath();
+              g.arc(x, y, r, 0, Math.PI * 2);
+              g.fill();
+          }
         }
-    
-        this._wallPatternLegacy = ctx.createPattern(cv, 'repeat');    
-        this._wallPatternLegacyBiome = this.currentBiome;    
-    }    
-    
-    // 计算颜色（匹配高质量模式）    
-    const darkColor = `rgb(${Math.max(0, wallColor[0] - 50)}, ${Math.max(0, wallColor[1] - 50)}, ${Math.max(0, wallColor[2] - 50)})`;    
-    const groundColor = bgConfig?.ground_color || [80, 80, 80];    
-    const lightColor = `rgba(${Math.min(255, groundColor[0] - 30)}, ${Math.min(255, groundColor[1] - 30)}, ${Math.min(255, groundColor[2] - 30)}, 0.4)`;    
-    
+
+        this._wallPatternLegacy = ctx.createPattern(cv, 'repeat');
+        this._wallPatternLegacyBiome = this.currentBiome;
+    }
+
+    // 计算颜色（匹配高质量模式）
+    const darkColor = `rgb(${Math.max(0, wallColor[0] - 50)}, ${Math.max(0, wallColor[1] - 50)}, ${Math.max(0, wallColor[2] - 50)})`;
+    const groundColor = bgConfig?.ground_color || [80, 80, 80];
+    const lightColor = `rgba(${Math.min(255, groundColor[0] - 30)}, ${Math.min(255, groundColor[1] - 30)}, ${Math.min(255, groundColor[2] - 30)}, 0.4)`;
+
     // renderGame already applied the camera transform, so cells are drawn at
     // raw world coordinates (no second -camera offset) and the pattern stays
     // aligned without a counter-translation.
-    ctx.save();    
-    ctx.lineJoin = 'round';    
-    ctx.lineCap = 'round';    
-    
+    ctx.save();
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+
     // Border widths are authored in screen pixels but stroked in world space.
-    const outlineScale = 1 / viewScale;    
-    
-    const startX = Math.max(0, Math.floor((left - pad) / cellW));    
-    const endX = Math.min(size, Math.ceil((right + pad) / cellW));    
-    const startY = Math.max(0, Math.floor((top - pad) / cellH));    
-    const endY = Math.min(size, Math.ceil((bottom + pad) / cellH));    
-    
-    // ==========================================    
-    // 步骤 1：第一圈粗边 —— 浅色外部框 (36px)    
-    // ==========================================    
-    ctx.strokeStyle = lightColor;    
-    ctx.lineWidth = 36 * outlineScale;    
-    for (let y = startY; y < endY; y++) {    
-        for (let x = startX; x < endX; x++) {    
-            if (wallData[y * size + x] === '1') {    
-                const px = x * cellW;    
-                const py = y * cellH;    
-                ctx.strokeRect(px, py, cellW, cellH);    
-            }    
-        }    
-    }    
-    
-    // ==========================================    
-    // 步骤 2：第一遍填充 —— 盖掉向内侵入的浅色边    
-    // ==========================================    
-    if (this._wallPatternLegacy) {
-      ctx.fillStyle = this._wallPatternLegacy;    
+    const outlineScale = 1 / viewScale;
+
+    const startX = Math.max(0, Math.floor((left - pad) / cellW));
+    const endX = Math.min(size, Math.ceil((right + pad) / cellW));
+    const startY = Math.max(0, Math.floor((top - pad) / cellH));
+    const endY = Math.min(size, Math.ceil((bottom + pad) / cellH));
+
+    // ==========================================
+    // 步骤 1：第一圈粗边 —— 浅色外部框 (36px)
+    // ==========================================
+    ctx.strokeStyle = lightColor;
+    ctx.lineWidth = 36 * outlineScale;
+    for (let y = startY; y < endY; y++) {
+        for (let x = startX; x < endX; x++) {
+            if (wallData[y * size + x] === '1') {
+                const px = x * cellW;
+                const py = y * cellH;
+                ctx.strokeRect(px, py, cellW, cellH);
+            }
+        }
     }
-    for (let y = startY; y < endY; y++) {    
-        for (let x = startX; x < endX; x++) {    
-            if (wallData[y * size + x] === '1') {    
-                const px = x * cellW;    
-                const py = y * cellH;    
-                ctx.fillRect(px - 0.5, py - 0.5, cellW + 1, cellH + 1);    
-            }    
-        }    
-    }    
-    
-    // ==========================================    
-    // 步骤 3：第二圈粗边 —— 深色内部框 (12px)    
-    // ==========================================    
-    ctx.strokeStyle = darkColor;    
-    ctx.lineWidth = 12 * outlineScale;    
-    for (let y = startY; y < endY; y++) {    
-        for (let x = startX; x < endX; x++) {    
-            if (wallData[y * size + x] === '1') {    
-                const px = x * cellW;    
-                const py = y * cellH;    
-                ctx.strokeRect(px, py, cellW, cellH);    
-            }    
-        }    
-    }    
-    
-    // ==========================================    
-    // 步骤 4：最终填充 —— 盖掉向内侵入的深色边，留下纯正图案    
-    // ==========================================    
-    for (let y = startY; y < endY; y++) {    
-        for (let x = startX; x < endX; x++) {    
-            if (wallData[y * size + x] === '1') {    
-                const px = x * cellW;    
-                const py = y * cellH;    
-                ctx.fillRect(px - 0.5, py - 0.5, cellW + 1, cellH + 1);    
-            }    
-        }    
-    }    
-    
-    ctx.restore();    
+
+    // ==========================================
+    // 步骤 2：第一遍填充 —— 盖掉向内侵入的浅色边
+    // ==========================================
+    if (this._wallPatternLegacy) {
+      ctx.fillStyle = this._wallPatternLegacy;
+    }
+    for (let y = startY; y < endY; y++) {
+        for (let x = startX; x < endX; x++) {
+            if (wallData[y * size + x] === '1') {
+                const px = x * cellW;
+                const py = y * cellH;
+                ctx.fillRect(px - 0.5, py - 0.5, cellW + 1, cellH + 1);
+            }
+        }
+    }
+
+    // ==========================================
+    // 步骤 3：第二圈粗边 —— 深色内部框 (12px)
+    // ==========================================
+    ctx.strokeStyle = darkColor;
+    ctx.lineWidth = 12 * outlineScale;
+    for (let y = startY; y < endY; y++) {
+        for (let x = startX; x < endX; x++) {
+            if (wallData[y * size + x] === '1') {
+                const px = x * cellW;
+                const py = y * cellH;
+                ctx.strokeRect(px, py, cellW, cellH);
+            }
+        }
+    }
+
+    // ==========================================
+    // 步骤 4：最终填充 —— 盖掉向内侵入的深色边，留下纯正图案
+    // ==========================================
+    for (let y = startY; y < endY; y++) {
+        for (let x = startX; x < endX; x++) {
+            if (wallData[y * size + x] === '1') {
+                const px = x * cellW;
+                const py = y * cellH;
+                ctx.fillRect(px - 0.5, py - 0.5, cellW + 1, cellH + 1);
+            }
+        }
+    }
+
+    ctx.restore();
   }
 
-  drawWavesDirect(context: CanvasRenderingContext2D, cameraOffset: { x: number; y: number }, groundColor: [number, number, number]) {  
-    const [r, g, b] = groundColor;  
-  
-    // 基础颜色  
-    const baseColor = `rgb(${r}, ${g}, ${b})`;  
-    const stripeColor = `rgba(${Math.min(255, r + 20)}, ${Math.min(255, g + 35)}, ${Math.min(255, b + 60)}, 0.45)`;  
-    const darkSpotColor = `rgba(${Math.max(0, r - 35)}, ${Math.max(0, g - 25)}, ${Math.max(0, b - 15)}, 0.35)`;  
-    const lightBlurColor = `rgba(${Math.min(255, r + 15)}, ${Math.min(255, g + 25)}, ${Math.min(255, b + 45)}, 0.2)`;  
-  
-    context.save();  
-    // 1. 底色  
+  drawWavesDirect(context: CanvasRenderingContext2D, cameraOffset: { x: number; y: number }, groundColor: [number, number, number]) {
+    const [r, g, b] = groundColor;
+
+    // 基础颜色
+    const baseColor = `rgb(${r}, ${g}, ${b})`;
+    const stripeColor = `rgba(${Math.min(255, r + 20)}, ${Math.min(255, g + 35)}, ${Math.min(255, b + 60)}, 0.45)`;
+    const darkSpotColor = `rgba(${Math.max(0, r - 35)}, ${Math.max(0, g - 25)}, ${Math.max(0, b - 15)}, 0.35)`;
+    const lightBlurColor = `rgba(${Math.min(255, r + 15)}, ${Math.min(255, g + 25)}, ${Math.min(255, b + 45)}, 0.2)`;
+
+    context.save();
+    // 1. 底色
     context.restore();
     context.save();
-    context.fillStyle = baseColor;  
-    context.fillRect(0, 0, this.w, this.h);  
-  
+    context.fillStyle = baseColor;
+    context.fillRect(0, 0, this.w, this.h);
+
     context.translate(this.w / 2, this.h / 2);
     context.scale(this.viewZoom || 1, this.viewZoom || 1);
-    context.translate(-cameraOffset.x, -cameraOffset.y);  
-  
-    // 2. 绘制带独立波动的斜条纹  
-    const stripeWidth = 150;  
-    const spacing = 300;  
-    const tilt = 0.75;  
-    const freq = 0.006;  
-    const amp = 30;  
-  
-    context.lineCap = 'round';  
-    context.strokeStyle = stripeColor;  
-    context.lineWidth = stripeWidth;  
-  
+    context.translate(-cameraOffset.x, -cameraOffset.y);
+
+    // 2. 绘制带独立波动的斜条纹
+    const stripeWidth = 150;
+    const spacing = 300;
+    const tilt = 0.75;
+    const freq = 0.006;
+    const amp = 30;
+
+    context.lineCap = 'round';
+    context.strokeStyle = stripeColor;
+    context.lineWidth = stripeWidth;
+
     for (let baseY = -this.worldH; baseY < this.worldH * 2; baseY += spacing) {
         context.beginPath();
-    
+
         const phase = (baseY * 0.123);
-    
+
         for (let wx = 0; wx <= this.worldW; wx += 30) {
             const wave = Math.sin(wx * freq + phase) * amp;
             const wy = baseY + (wx * tilt) + wave;
-    
+
             if (wx === 0) context.moveTo(wx, wy);
             else context.lineTo(wx, wy);
         }
         context.stroke();
     }
-    
+
     // 3. 背景大色块
     const bigSpotCount = 60;
     for (let i = 0; i < bigSpotCount; i++) {
         const bx = (i * 3571) % this.worldW;
         const by = (i * 2467) % this.worldH;
-    
+
         if (bx > cameraOffset.x - 200 && bx < cameraOffset.x + this.w / (this.viewZoom || 1) + 200 &&
             by > cameraOffset.y - 200 && by < cameraOffset.y + this.h / (this.viewZoom || 1) + 200) {
-    
+
             const size = 50 + (i % 4) * 15;
             context.beginPath();
             context.arc(bx, by, size, 0, Math.PI * 2);
@@ -6825,16 +6829,16 @@ private bagLayout() {
             context.fill();
         }
     }
-    
+
     // 4. 深色细碎斑点
     const smallSpotCount = 180;
     for (let i = 0; i < smallSpotCount; i++) {
         const sx = (i * 1234) % this.worldW;
         const sy = (i * 5678) % this.worldH;
-    
+
         if (sx > cameraOffset.x - 50 && sx < cameraOffset.x + this.w / (this.viewZoom || 1) + 50 &&
             sy > cameraOffset.y - 50 && sy < cameraOffset.y + this.h / (this.viewZoom || 1) + 50) {
-    
+
             const radius = 2 + (i % 3);
             context.beginPath();
             context.arc(sx, sy, radius, 0, Math.PI * 2);
@@ -6842,13 +6846,13 @@ private bagLayout() {
             context.fill();
         }
     }
-    
+
     context.restore();
   }
 
-  drawBackgroundPattern(context: CanvasRenderingContext2D, cameraOffset: { x: number; y: number }, groundColor: [number, number, number]) {    
-    const scale = this.viewZoom || 1;    
-    const pattern = this.getOrCreatePattern(groundColor, scale);    
+  drawBackgroundPattern(context: CanvasRenderingContext2D, cameraOffset: { x: number; y: number }, groundColor: [number, number, number]) {
+    const scale = this.viewZoom || 1;
+    const pattern = this.getOrCreatePattern(groundColor, scale);
     const [r, g, b] = groundColor;
 
     // 1. Opaque base pass in screen space. This is what actually clears the
@@ -6870,28 +6874,28 @@ private bagLayout() {
     const fillX = cameraOffset.x - fillW / 2;
     const fillY = cameraOffset.y - fillH / 2;
 
-    context.save();    
+    context.save();
     context.translate(this.w / 2, this.h / 2);
     context.scale(scale, scale);
-    context.translate(-cameraOffset.x, -cameraOffset.y);    
-    context.fillStyle = pattern;    
-    context.fillRect(fillX, fillY, fillW, fillH);    
-    context.restore();    
+    context.translate(-cameraOffset.x, -cameraOffset.y);
+    context.fillStyle = pattern;
+    context.fillRect(fillX, fillY, fillW, fillH);
+    context.restore();
   }
 
-  getOrCreatePattern(groundColor: [number, number, number], scale: number) {    
-    const key = `${this.currentBiome}_fixed`;    
-    
-    if (!this._patternCache) this._patternCache = {};    
-    if (this._patternCache[key]) return this._patternCache[key];    
-    
-    console.log(`🔄 生成固定图案: ${key}`);    
-    const pattern = this.createTilePattern(groundColor, 1.0);  // 始终用 1.0 创建    
+  getOrCreatePattern(groundColor: [number, number, number], scale: number) {
+    const key = `${this.currentBiome}_fixed`;
+
+    if (!this._patternCache) this._patternCache = {};
+    if (this._patternCache[key]) return this._patternCache[key];
+
+    console.log(`🔄 生成固定图案: ${key}`);
+    const pattern = this.createTilePattern(groundColor, 1.0);  // 始终用 1.0 创建
     if (pattern) {
-      this._patternCache[key] = pattern;    
+      this._patternCache[key] = pattern;
     }
-    
-    return pattern;    
+
+    return pattern;
   }
 
   createWavePattern(groundColor: [number, number, number], scale: number, tileSize: number): CanvasPattern | null {
@@ -6905,148 +6909,148 @@ private bagLayout() {
     return ctx.createPattern(canvas, "repeat");
   }
 
-  createTilePattern(groundColor: [number, number, number], scale: number) {    
-    const currentScale = scale || this.viewZoom || 1;    
-    const TILE_SIZE = 800 * Math.max(0.5, currentScale);    
-    
-    const canvas = document.createElement("canvas");    
-    canvas.width = TILE_SIZE;    
-    canvas.height = TILE_SIZE;    
-    const ctx = canvas.getContext("2d");    
+  createTilePattern(groundColor: [number, number, number], scale: number) {
+    const currentScale = scale || this.viewZoom || 1;
+    const TILE_SIZE = 800 * Math.max(0.5, currentScale);
+
+    const canvas = document.createElement("canvas");
+    canvas.width = TILE_SIZE;
+    canvas.height = TILE_SIZE;
+    const ctx = canvas.getContext("2d");
     if (!ctx) return null;
 
-    const r = groundColor[0];    
-    const g = groundColor[1];    
-    const b = groundColor[2];    
-    const type = this.currentBiome;    
-    
-    if (type === "Ocean" || type === "Desert") {    
-        return this.createWavePattern(groundColor, currentScale, TILE_SIZE);    
-    }    
+    const r = groundColor[0];
+    const g = groundColor[1];
+    const b = groundColor[2];
+    const type = this.currentBiome;
+
+    if (type === "Ocean" || type === "Desert") {
+        return this.createWavePattern(groundColor, currentScale, TILE_SIZE);
+    }
 
     // Opaque ground base inside the tile itself, so filling with this pattern
     // always covers whatever was drawn last frame instead of blending with it.
     ctx.fillStyle = `rgb(${r}, ${g}, ${b})`;
     ctx.fillRect(0, 0, TILE_SIZE, TILE_SIZE);
-    
-    const getShapeRadius = (size: number, shapeType: string) => {    
-        switch (shapeType) {    
-            case "Plain":    
-            case "Random":    
-            case "Jungle":    
-                return Math.max(size * 0.8, size * 0.6);    
-            case "Bio":    
-            case "Sewer":    
-                return size;    
-            default:    
-                return size * 0.5;    
-        }    
-    };    
-    
-    const drawShape = (ctx: CanvasRenderingContext2D, size: number, shapeType: string) => {    
-        switch (shapeType) {    
-            case "Plain":    
-            case "Random":    
-            case "Jungle":    
-                ctx.beginPath();    
-                ctx.ellipse(0, 0, size * 0.8, size * 0.6, 0, 0, Math.PI * 2);    
-                ctx.fill();    
-                break;    
-            case "Bio":    
-            case "Sewer":    
-                ctx.beginPath();    
-                ctx.moveTo(-size, 0);    
-                ctx.bezierCurveTo(    
-                    -size * 0.8, -size * 1.5,    
-                    size * 0.8, size * 1.5,    
-                    size, 0    
-                );    
-                ctx.lineWidth = size * 0.4;    
-                ctx.strokeStyle = ctx.fillStyle;    
-                ctx.stroke();    
-                break;    
-            default:    
-                ctx.beginPath();    
-                ctx.arc(0, 0, size * 0.5, 0, Math.PI * 2);    
-                ctx.fill();    
-        }    
-    };    
-    
-    const dark = `rgb(${r*0.85}, ${g*0.85}, ${b*0.85})`;    
-    const light = `rgb(${r*1.1}, ${g*1.1}, ${b*1.1})`;    
-    
-    const GRID_SIZE = TILE_SIZE / 6;    
-    const ROW_SPACING = GRID_SIZE;    
-    const COL_SPACING = GRID_SIZE;    
-    const DIAGONAL_OFFSET = COL_SPACING / 2;    
-    
-    const rows = Math.ceil(TILE_SIZE / ROW_SPACING) + 1;    
-    const cols = Math.ceil(TILE_SIZE / COL_SPACING) + 1;    
-    
-    let drawnCount = 0;    
-    const MAX_DRAW = 50;    
-    
-    for (let row = 0; row < rows && drawnCount < MAX_DRAW; row++) {    
-        for (let col = 0; col < cols && drawnCount < MAX_DRAW; col++) {    
-            const offsetX = (row % 2 === 0) ? 0 : DIAGONAL_OFFSET;    
-    
-            let x = col * COL_SPACING + offsetX;    
-            let y = row * ROW_SPACING;    
-    
-            const jitter = GRID_SIZE * 0.25;    
-            x += (Math.random() - 0.5) * jitter;    
-            y += (Math.random() - 0.5) * jitter;    
-    
-            const size = (25 + Math.random() * 12) * currentScale;    
-            const radius = getShapeRadius(size, type);    
-            const margin = radius + 5;    
-    
-            if (x < margin || x > TILE_SIZE - margin ||    
-                y < margin || y > TILE_SIZE - margin) {    
-                continue;    
-            }    
-    
-            ctx.save();    
-            ctx.translate(x, y);    
-            ctx.rotate((Math.random() - 0.5) * Math.PI * 0.3);    
-            ctx.globalAlpha = 0.2 + Math.random() * 0.25;    
-            ctx.fillStyle = Math.random() > 0.5 ? dark : light;    
-    
-            drawShape(ctx, size, type);    
-    
-            ctx.restore();    
-            drawnCount++;    
-        }    
-    }    
-    
-    if (drawnCount < 100) {    
-        const extra = Math.min(5, 25 - drawnCount);    
-        for (let i = 0; i < extra; i++) {    
-            let placed = false;    
-            for (let attempt = 0; attempt < 20 && !placed; attempt++) {    
-                const x = Math.random() * TILE_SIZE;    
-                const y = Math.random() * TILE_SIZE;    
-                const radius = 8 * currentScale;    
-                const margin = radius + 3;    
-    
-                if (x > margin && x < TILE_SIZE - margin &&    
-                    y > margin && y < TILE_SIZE - margin) {    
-    
-                    ctx.save();    
-                    ctx.translate(x, y);    
-                    ctx.globalAlpha = 0.15;    
-                    ctx.fillStyle = Math.random() > 0.5 ? dark : light;    
-                    ctx.beginPath();    
-                    ctx.arc(0, 0, radius, 0, Math.PI * 2);    
-                    ctx.fill();    
-                    ctx.restore();    
-                    placed = true;    
-                }    
-            }    
-        }    
-    }    
-    
-    return ctx.createPattern(canvas, "repeat");    
+
+    const getShapeRadius = (size: number, shapeType: string) => {
+        switch (shapeType) {
+            case "Plain":
+            case "Random":
+            case "Jungle":
+                return Math.max(size * 0.8, size * 0.6);
+            case "Bio":
+            case "Sewer":
+                return size;
+            default:
+                return size * 0.5;
+        }
+    };
+
+    const drawShape = (ctx: CanvasRenderingContext2D, size: number, shapeType: string) => {
+        switch (shapeType) {
+            case "Plain":
+            case "Random":
+            case "Jungle":
+                ctx.beginPath();
+                ctx.ellipse(0, 0, size * 0.8, size * 0.6, 0, 0, Math.PI * 2);
+                ctx.fill();
+                break;
+            case "Bio":
+            case "Sewer":
+                ctx.beginPath();
+                ctx.moveTo(-size, 0);
+                ctx.bezierCurveTo(
+                    -size * 0.8, -size * 1.5,
+                    size * 0.8, size * 1.5,
+                    size, 0
+                );
+                ctx.lineWidth = size * 0.4;
+                ctx.strokeStyle = ctx.fillStyle;
+                ctx.stroke();
+                break;
+            default:
+                ctx.beginPath();
+                ctx.arc(0, 0, size * 0.5, 0, Math.PI * 2);
+                ctx.fill();
+        }
+    };
+
+    const dark = `rgb(${r*0.85}, ${g*0.85}, ${b*0.85})`;
+    const light = `rgb(${r*1.1}, ${g*1.1}, ${b*1.1})`;
+
+    const GRID_SIZE = TILE_SIZE / 6;
+    const ROW_SPACING = GRID_SIZE;
+    const COL_SPACING = GRID_SIZE;
+    const DIAGONAL_OFFSET = COL_SPACING / 2;
+
+    const rows = Math.ceil(TILE_SIZE / ROW_SPACING) + 1;
+    const cols = Math.ceil(TILE_SIZE / COL_SPACING) + 1;
+
+    let drawnCount = 0;
+    const MAX_DRAW = 50;
+
+    for (let row = 0; row < rows && drawnCount < MAX_DRAW; row++) {
+        for (let col = 0; col < cols && drawnCount < MAX_DRAW; col++) {
+            const offsetX = (row % 2 === 0) ? 0 : DIAGONAL_OFFSET;
+
+            let x = col * COL_SPACING + offsetX;
+            let y = row * ROW_SPACING;
+
+            const jitter = GRID_SIZE * 0.25;
+            x += (Math.random() - 0.5) * jitter;
+            y += (Math.random() - 0.5) * jitter;
+
+            const size = (25 + Math.random() * 12) * currentScale;
+            const radius = getShapeRadius(size, type);
+            const margin = radius + 5;
+
+            if (x < margin || x > TILE_SIZE - margin ||
+                y < margin || y > TILE_SIZE - margin) {
+                continue;
+            }
+
+            ctx.save();
+            ctx.translate(x, y);
+            ctx.rotate((Math.random() - 0.5) * Math.PI * 0.3);
+            ctx.globalAlpha = 0.2 + Math.random() * 0.25;
+            ctx.fillStyle = Math.random() > 0.5 ? dark : light;
+
+            drawShape(ctx, size, type);
+
+            ctx.restore();
+            drawnCount++;
+        }
+    }
+
+    if (drawnCount < 100) {
+        const extra = Math.min(5, 25 - drawnCount);
+        for (let i = 0; i < extra; i++) {
+            let placed = false;
+            for (let attempt = 0; attempt < 20 && !placed; attempt++) {
+                const x = Math.random() * TILE_SIZE;
+                const y = Math.random() * TILE_SIZE;
+                const radius = 8 * currentScale;
+                const margin = radius + 3;
+
+                if (x > margin && x < TILE_SIZE - margin &&
+                    y > margin && y < TILE_SIZE - margin) {
+
+                    ctx.save();
+                    ctx.translate(x, y);
+                    ctx.globalAlpha = 0.15;
+                    ctx.fillStyle = Math.random() > 0.5 ? dark : light;
+                    ctx.beginPath();
+                    ctx.arc(0, 0, radius, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.restore();
+                    placed = true;
+                }
+            }
+        }
+    }
+
+    return ctx.createPattern(canvas, "repeat");
   }
 
   private drawDrop(e: Ent) {
