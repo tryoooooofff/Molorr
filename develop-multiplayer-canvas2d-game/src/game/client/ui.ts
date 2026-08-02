@@ -370,8 +370,6 @@ export function drawItemIcon(
     0: { k: 0.66, ox: 0, oy: 0.5 },      // Basic: shrink a bit + center the petal ring
     7: { k: 1.25, ox: 0.375, oy: 0 },    // Wing: enlarge + shift right (it sat too far left)
     9: { k: 1.25, ox: 0.15, oy: 0.28 },  // Stick: enlarge + re-center
-    // Starfish at 85% of original 3x (2.55x) — reduced by 15% per request.
-    // This applies consistently to its world petal, card, and drag artwork.
     21: { k: 2.55, ox: 0, oy: 0 },
   };
   const norm = ICON_NORM[def.id];
@@ -404,7 +402,7 @@ export function drawItemIcon(
       ctx.quadraticCurveTo(size, 0, 0, size);
       ctx.closePath();
       ctx.fill();
-      ctx.lineWidth = size * 0.1;
+      ctx.lineWidth = size * 0.15;
       ctx.stroke();
 
       ctx.beginPath();
@@ -599,7 +597,7 @@ export function drawItemIcon(
       ctx.fillStyle = "#53E5E8";
       ctx.fill();
       ctx.strokeStyle = "#4ADEDE";
-      ctx.lineWidth = 10;
+      ctx.lineWidth = 8;
       ctx.lineJoin = "round";
       ctx.stroke();
       ctx.restore();
@@ -750,7 +748,7 @@ export function drawItemIcon(
       ctx.closePath();
       ctx.fillStyle = "#5CAE53";
       ctx.strokeStyle = "#2D6B33";
-      ctx.lineWidth = Math.max(2, size * 0.15);
+      ctx.lineWidth = Math.max(4, size * 0.3);
       ctx.lineJoin = "round";
       ctx.stroke();
       ctx.fill();
@@ -769,10 +767,10 @@ export function drawItemIcon(
       const legLength = 10;
       // Thicker bars (was 32) per request — the horseshoe reads chunkier
       // while the pole gap stays clearly open.
-      const thickness = 42;
+      const thickness = 50;
 
       ctx.save();
-      ctx.scale(size / 66, size / 66);
+      ctx.scale(size / 60, size / 60);
       ctx.translate(-cx, -120);
 
       ctx.lineWidth = thickness;
@@ -910,6 +908,7 @@ export function drawItemIcon(
       ctx.quadraticCurveTo(size * 0.75, 0, -size * 0.75, -size * 1.0);
       ctx.closePath();
       ctx.fill();
+      ctx.lineJoin = 'round';
       ctx.stroke();
       break;
     }
@@ -931,7 +930,7 @@ export function drawItemIcon(
       drawSticks();
       ctx.fillStyle = def.outline;
       ctx.strokeStyle = def.outline;
-      ctx.lineWidth = size * 0.2;
+      ctx.lineWidth = size * 0.3;
       ctx.fill();
       ctx.stroke();
 
@@ -946,11 +945,11 @@ export function drawItemIcon(
       break;
     }
     case 43: { // Antennae — curved insect feelers
-      drawAntennaeIcon(ctx, 0, 0, size * 0.65, spin);
+      drawAntennaeIcon(ctx, 0, 0, size, spin);
       break;
     }
     case 44: { // Soil — a rugged clump outline
-      const k44 = size / 100;
+      const k44 = size / 70;
       ctx.save();
       ctx.scale(k44, k44);
       ctx.translate(-100, -77.5);
@@ -970,14 +969,14 @@ export function drawItemIcon(
       ctx.closePath();
       ctx.fillStyle = '#6a4824';
       ctx.fill();
-      ctx.lineWidth = 10;
+      ctx.lineWidth = 15;
       ctx.strokeStyle = '#3f2a12';
       ctx.stroke();
       ctx.restore();
       break;
     }
     case 45: { // Fang — a curved tooth (teardrop)
-      const k = size / 52;
+      const k = size / 55;
       ctx.save();
       ctx.translate(0, size * 0.15);
       ctx.scale(k, k);
@@ -988,14 +987,14 @@ export function drawItemIcon(
       ctx.closePath();
       ctx.fillStyle = def.color;
       ctx.fill();
-      ctx.lineWidth = 4 * k;
+      ctx.lineWidth = 40 * k;
       ctx.strokeStyle = def.outline;
       ctx.stroke();
       ctx.restore();
       break;
     }
     case 46: { // Orange — three oranges with leaves
-      const R2 = 18;
+      const R2 = 12;
       const drawOrangeWithLeaf = (ox2: number, oy2: number, rotation: number) => {
         ctx.save();
         ctx.translate(ox2, oy2);
@@ -1004,19 +1003,19 @@ export function drawItemIcon(
         ctx.arc(0, 0, R2, 0, Math.PI * 2);
         ctx.fillStyle = def.color;
         ctx.fill();
-        ctx.lineWidth = Math.max(2, R2 * 0.18);
+        ctx.lineWidth = Math.max(2, R2 * 0.3);
         ctx.strokeStyle = def.outline;
         ctx.stroke();
         // Leaf
         const leafX = -3, leafY = -R2 + 7;
         ctx.beginPath();
         ctx.moveTo(leafX, leafY);
-        ctx.quadraticCurveTo(leafX + 12, leafY - 12, leafX + 18, leafY - 3);
-        ctx.quadraticCurveTo(leafX + 10, leafY + 6, leafX, leafY);
+        ctx.quadraticCurveTo(leafX + 6, leafY - 6, leafX + 9, leafY - 1.5);
+        ctx.quadraticCurveTo(leafX + 5, leafY + 3, leafX, leafY);
         ctx.closePath();
         ctx.fillStyle = '#4b8b33';
         ctx.fill();
-        ctx.lineWidth = 3;
+        ctx.lineWidth = 2;
         ctx.strokeStyle = '#2c6214';
         ctx.stroke();
         ctx.restore();
@@ -1036,11 +1035,24 @@ export function drawItemIcon(
       ctx.restore();
       break;
     }
+    case 48: {
+     drawThirdEyeIcon(ctx, 0, 0, size * 0.65, spin);
+
+      break;
+    }
+    case 50: {
+        const FSize = size/2
+          ctx.beginPath();
+          ctx.arc(0, 0, FSize, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+      break;
+    }
     default: {
       switch (def.shape) {
         case "circle": {
           ctx.beginPath();
-          ctx.arc(0, 0, size, 0, Math.PI * 2);
+          ctx.arc(0, 0, size*0.9, 0, Math.PI * 2);
           ctx.fill();
           ctx.stroke();
           break;
@@ -1066,7 +1078,7 @@ export function drawItemIcon(
         }
         case "egg": {
           const count = getSummonCount(def.id);
-          const isCircleEgg = (def.id === 12 || def.id === 14);
+          const isCircleEgg = (def.id === 12 || def.id === 14|| def.id === 51);
 
           if (isCircleEgg) {
             // Draw circle arrangement
@@ -1126,22 +1138,17 @@ export function drawItemIcon(
         }
         case "nest_egg": {
           // Nest eggs draw ONE larger egg instead of a cluster of small ones.
-          const baseR = size * 1.0;
-          const rx = baseR * 0.65;
+          const baseR = size * 1.2;
+          const rx = baseR * 0.7;
           const ry = baseR;
           ctx.save();
           ctx.beginPath();
           ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
           ctx.fillStyle = def.color;
           ctx.fill();
-          ctx.lineWidth = Math.max(2, baseR * 0.18);
+          ctx.lineWidth = Math.max(2, baseR * 0.2);
           ctx.strokeStyle = def.outline;
           ctx.stroke();
-          // A subtle highlight arc to give the egg volume.
-          ctx.beginPath();
-          ctx.ellipse(0, -ry * 0.12, rx * 0.4, ry * 0.3, 0, Math.PI, Math.PI * 2);
-          ctx.fillStyle = "rgba(255,255,255,0.18)";
-          ctx.fill();
           ctx.restore();
           break;
         }
@@ -1403,13 +1410,16 @@ export function drawBee(
   context.rotate(swing);
 
   // --- 1. 绘制尾针 (放在最底层，稍微往右移一点点防止断层) ---
-  const sl = 10 * totalScale, sw2 = 8 * totalScale;
+  const sl = 20 * totalScale, sw2 = 14 * totalScale;
   context.fillStyle = "#000";
   context.beginPath();
   context.moveTo(bx + 2, cy - sw2); // +2 像素确保没入身体内部
   context.lineTo(bx + 2, cy + sw2);
   context.lineTo(bx - sl, cy);
   context.closePath();
+  context.strokeStyle = "#000";
+  context.lineJoin ='round';
+  context.stroke();
   context.fill();
 
   // --- 2. 绘制身体基础填充 ---
@@ -1483,6 +1493,7 @@ export function drawMob(
   friendly: boolean,
   rarity = 0,
   level = 0,
+  id = 0,
 ) {
   const def = MOBS[type];
   if (!def || radius <= 0) return;
@@ -1641,7 +1652,7 @@ export function drawMob(
   };
 
   const drawHornet = () => {
-    const scale = (radius * 3) / 110;
+    const scale = (radius * 2) / 110;
     const colors = friendly
       ? { body: "#ffe667", stroke: "#d1bb54", dark: "#333333", stingerColor: "#333333" }
       : { body: "#ffd363", stroke: "#d3ad46", dark: "#333333", stingerColor: "#333333" };
@@ -1910,10 +1921,10 @@ const drawCrab = () => {
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(angle);
-    const antennaScale = headRadius / 16;
+    const antennaScale = headRadius / 12;
     drawAntAntenna(
       headX, 0, 0, antennaScale, t,
-      antennaColor, 20, 2, 0.2, 10, 0.9,
+      antennaColor, 15, 2, 0.2, 10, 0.9,
       headRadius * 0.9 / antennaScale, -4,
     );
     drawCircle(-bodyRadius * 0.8, 0, bodyRadius, bodyColor);
@@ -1922,7 +1933,94 @@ const drawCrab = () => {
     drawCircle(headX, 0, headRadius * 0.7, innerBodyColor);
     ctx.restore();
   };
+const drawSoldierAnt = () => {
+  const scaledSize = radius * 2;
+  const bodyColor = friendly ? [200, 160, 0] : [60, 60, 60];
+  const innerBodyColor = friendly ? [255, 215, 0] : [90, 90, 90];
+  const antennaColor = [51, 51, 51];
 
+  // --- 翅膀颜色配置 ---
+  const wingBaseColor = friendly ? [255, 215, 0] : [200, 200, 255];
+  const wingAlpha = 0.5;
+
+  const headRadius = scaledSize / 2.2;
+  const bodyRadius = headRadius * 0.8;
+  const headX = headRadius * 0.3;
+  const bodyX = -bodyRadius * 0.8;
+
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+
+  // --- 1. 绘制身体 ---
+  drawCircle(bodyX, 0, bodyRadius, bodyColor);
+  drawCircle(bodyX, 0, bodyRadius * 0.7, innerBodyColor);
+
+  // --- 2. 绘制翅膀 ---
+  const wingAngle = Math.sin(t * 8) * (10 * Math.PI / 180);
+
+  ctx.save();
+  ctx.fillStyle = `rgba(${wingBaseColor[0]}, ${wingBaseColor[1]}, ${wingBaseColor[2]}, ${wingAlpha})`;
+  ctx.globalAlpha = 0.8;
+
+  // 翅膀长度（长轴半径）
+  const wingLength = scaledSize * 0.4;
+  // 翅膀根部Y偏移
+  const wingRootYOffset = -bodyRadius * 0.5;
+
+  // === 左翅膀 ===
+  ctx.save();
+  // 1. 移动到根部（旋转中心）
+  ctx.translate(bodyX*0.8, wingRootYOffset);
+  // 2. 旋转
+  ctx.rotate(wingAngle);
+
+  ctx.beginPath();
+  ctx.ellipse(
+    wingLength*0.2,
+    0,
+    wingLength,         // x半径 (长轴)
+    bodyRadius * 0.4,   // y半径 (短轴)
+    0, 0, Math.PI * 2
+  );
+  ctx.fill();
+  ctx.restore();
+
+  // === 右翅膀 ===
+  ctx.save();
+  // 1. 移动到根部 (右侧)
+  ctx.translate(bodyX*0.8, -wingRootYOffset);
+  // 2. 旋转
+  ctx.rotate(-wingAngle);
+
+  ctx.beginPath();
+  // 同样的逻辑，旋转中心位于翅膀根部端点
+  ctx.ellipse(
+    wingLength*0.2,
+    0,
+    wingLength,
+    bodyRadius * 0.4,
+    0, 0, Math.PI * 2
+  );
+  ctx.fill();
+  ctx.restore();
+
+  ctx.restore();
+
+  // --- 3. 绘制触角 ---
+  const antennaScale = headRadius / 12;
+  drawAntAntenna(
+    headX, 0, 0, antennaScale, t,
+    antennaColor, 15, 2, 0.2, 10, 0.9,
+    headRadius * 0.9 / antennaScale, -4,
+  );
+
+  // --- 4. 绘制头部 ---
+  drawCircle(headX, 0, headRadius, bodyColor);
+  drawCircle(headX, 0, headRadius * 0.7, innerBodyColor);
+
+  ctx.restore();
+};
   const drawLadybug = () => {
     const scaledSize = radius * 2;
     const DEEP_RED = friendly ? "#B8860B" : "#8B0000";
@@ -2355,6 +2453,100 @@ const drawCrab = () => {
     ctx.restore();
   };
 
+  const drawSpider = () => {
+    const scaledSize = radius * 2;
+    if (scaledSize <= 0) return;
+    const WAVE_MULTIPLIERS: Record<string, number> = { 'common': 1.0, 'unusual': 1.1, 'rare': 1.3, 'epic': 1.5, 'legendary': 1.8, 'mythic': 2.2, 'ultra': 2.7, 'super': 4.1, 'omega': 5.3, 'eternal': 5.5 };
+    const rarityNames = ['common', 'unusual', 'rare', 'epic', 'legendary', 'mythic', 'ultra', 'super', 'omega', 'eternal'];
+    const rarityName = rarityNames[Math.min(rarity, rarityNames.length - 1)] || 'common';
+    const waveMult = WAVE_MULTIPLIERS[rarityName] || 1.0;
+    const legColor: [number, number, number] = friendly ? [255, 215, 0] : [50, 48, 50];
+    const bodyColor: [number, number, number] = friendly ? [200, 160, 0] : [79, 64, 46];
+    const bodyEdgeColor: [number, number, number] = friendly ? [180, 140, 0] : [70, 55, 45];
+    const bodyRadius = scaledSize / 2;
+    const legLength = bodyRadius * 2.2;
+    const baseLegWidth = 3.5;
+    const baseBodyStroke = 3.5;
+    const legWidth = baseLegWidth * scaledSize / 35;
+    const bodyStrokeWidth = baseBodyStroke * scaledSize / 40;
+    const waveAmp1 = 7 * waveMult;
+    const waveAmp2 = 4 * waveMult;
+
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(angle + Math.PI / 2);
+
+    // Left legs (4)
+    for (let i = 0; i < 4; i++) {
+      const angleOffset = -1.0 + i * 0.50;
+      const baseAngle = Math.PI + angleOffset;
+      const startX = Math.cos(baseAngle) * bodyRadius * 0.85;
+      const startY = Math.sin(baseAngle) * bodyRadius * 0.85;
+      const midAngle = baseAngle + 0.3;
+      const midDist = bodyRadius + legLength * 0.3;
+      const ctrlX = Math.cos(midAngle) * midDist;
+      const ctrlY = Math.sin(midAngle) * midDist;
+      const endX = Math.cos(baseAngle) * legLength;
+      const endY = Math.sin(baseAngle) * legLength;
+      const freq1 = 8 + i * 0.7;
+      const freq2 = 12 + i * 1.1;
+      const phase1 = i * 1.3;
+      const phase2 = i * 0.8 + 2.1;
+      const wave1 = Math.sin(t * freq1 + phase1) * waveAmp1;
+      const wave2 = Math.sin(t * freq2 + phase2) * waveAmp2;
+      const wave = wave1 + wave2;
+      const perpX = -Math.sin(baseAngle);
+      const perpY = Math.cos(baseAngle);
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.quadraticCurveTo(ctrlX + perpX * wave, ctrlY + perpY * wave, endX + perpX * wave * 0.7, endY + perpY * wave * 0.7);
+      ctx.strokeStyle = `rgb(${legColor[0]}, ${legColor[1]}, ${legColor[2]})`;
+      ctx.lineWidth = legWidth;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+    // Right legs (4)
+    for (let i = 0; i < 4; i++) {
+      const angleOffset = 1.0 - i * 0.50;
+      const baseAngle = angleOffset;
+      const startX = Math.cos(baseAngle) * bodyRadius * 0.85;
+      const startY = Math.sin(baseAngle) * bodyRadius * 0.85;
+      const midAngle = baseAngle - 0.3;
+      const midDist = bodyRadius + legLength * 0.3;
+      const ctrlX = Math.cos(midAngle) * midDist;
+      const ctrlY = Math.sin(midAngle) * midDist;
+      const endX = Math.cos(baseAngle) * legLength;
+      const endY = Math.sin(baseAngle) * legLength;
+      const freq1 = 9 + i * 0.9;
+      const freq2 = 13 + i * 1.3;
+      const phase1 = i * 1.5 + 1.2;
+      const phase2 = i * 0.9 + 3.7;
+      const wave1 = Math.sin(t * freq1 + phase1) * waveAmp1;
+      const wave2 = Math.sin(t * freq2 + phase2) * waveAmp2;
+      const wave = wave1 + wave2;
+      const perpX = -Math.sin(baseAngle);
+      const perpY = Math.cos(baseAngle);
+      ctx.beginPath();
+      ctx.moveTo(startX, startY);
+      ctx.quadraticCurveTo(ctrlX + perpX * wave, ctrlY + perpY * wave, endX + perpX * wave * 0.7, endY + perpY * wave * 0.7);
+      ctx.strokeStyle = `rgb(${legColor[0]}, ${legColor[1]}, ${legColor[2]})`;
+      ctx.lineWidth = legWidth;
+      ctx.lineCap = 'round';
+      ctx.stroke();
+    }
+
+    // Body
+    ctx.beginPath();
+    ctx.arc(0, 0, bodyRadius, 0, Math.PI * 2);
+    ctx.fillStyle = `rgb(${bodyColor[0]}, ${bodyColor[1]}, ${bodyColor[2]})`;
+    ctx.fill();
+    ctx.strokeStyle = `rgb(${bodyEdgeColor[0]}, ${bodyEdgeColor[1]}, ${bodyEdgeColor[2]})`;
+    ctx.lineWidth = bodyStrokeWidth;
+    ctx.stroke();
+
+    ctx.restore();
+  };
+
   const drawRock = () => {
     ctx.save();
     ctx.translate(x, y);
@@ -2466,7 +2658,7 @@ const drawCrab = () => {
     case 0: drawLadybug(); break;
     case 1: drawBee(ctx, x, y, radius * 2, t, angle, level, 1.0, { isFriendly: friendly }); break;
     case 2: drawRock(); break;
-    case 3: drawWorkerAnt(); break;
+    case 3: drawSoldierAnt(); break;
     case 4: drawCactus(); break;
     case 5: drawScorpion(); break;
     case 6: drawBeetle(); break;
@@ -2482,6 +2674,8 @@ const drawCrab = () => {
     case 13: drawAntHole(); break;
     case 14: drawCrabCaveBody(); break;
     case 15: drawHiveBody(); break;
+    case 16: drawHornet(); break;
+    case 17: drawSpider(); break;
     default: drawRock(); break;
   }
 
@@ -2848,297 +3042,6 @@ export const ease = {
 };
 
 // =============================================================================
-// Custom mob renderers — Hornet, Spider, Leech
-// =============================================================================
-
-/** Hornet: a striped flying insect with a stinger and antennae. */
-export function drawHornet(
-  context: CanvasRenderingContext2D,
-  x: number, y: number, size: number,
-  animationTimer: number, angleToPlayer: number, level: number,
-  viewScale = 1.0, enemyObj: any = null,
-) {
-  const scaledSize = size;
-  if (scaledSize <= 0) return;
-  const isFriendly = enemyObj && enemyObj.isFriendly === true;
-  const scale = scaledSize / 110;
-  const facingAngle = enemyObj?.facingAngle !== undefined ? enemyObj.facingAngle : angleToPlayer;
-  let colors: { body: string; stroke: string; dark: string; stingerColor: string };
-  if (isFriendly) {
-    colors = { body: '#ffe667', stroke: '#d1bb54', dark: '#333333', stingerColor: '#333333' };
-  } else {
-    colors = { body: '#ffd363', stroke: '#d3ad46', dark: '#333333', stingerColor: '#333333' };
-  }
-  context.save();
-  context.translate(x, y);
-  context.rotate(facingAngle + Math.PI / 2);
-  context.lineCap = 'round';
-  context.lineJoin = 'round';
-
-  const bodyW = 55 * scale;
-  const bodyH = 75 * scale;
-  const strokeWidth = 12 * scale;
-
-  // Stinger
-  context.beginPath();
-  context.moveTo(-20 * scale, 50 * scale);
-  context.lineTo(0, 120 * scale);
-  context.lineTo(20 * scale, 50 * scale);
-  context.closePath();
-  context.fillStyle = colors.stingerColor;
-  context.strokeStyle = colors.stingerColor;
-  context.lineWidth = strokeWidth;
-  context.fill();
-  context.stroke();
-
-  // Body ellipse
-  context.beginPath();
-  context.ellipse(0, 0, bodyW, bodyH, 0, 0, Math.PI * 2);
-  context.fillStyle = colors.body;
-  context.fill();
-
-  // Stripes (clipped)
-  context.save();
-  context.beginPath();
-  context.ellipse(0, 0, bodyW, bodyH, 0, 0, Math.PI * 2);
-  context.clip();
-  context.fillStyle = colors.dark;
-  const stripeWidth = 26 * scale;
-  context.fillRect(-bodyW * 1.5, -45 * scale, bodyW * 3, stripeWidth);
-  context.fillRect(-bodyW * 1.5, 5 * scale, bodyW * 3, stripeWidth);
-  context.fillRect(-bodyW * 1.5, 55 * scale, bodyW * 3, stripeWidth);
-  context.restore();
-
-  // Body outline
-  context.beginPath();
-  context.ellipse(0, 0, bodyW, bodyH, 0, 0, Math.PI * 2);
-  context.strokeStyle = colors.stroke;
-  context.lineWidth = strokeWidth;
-  context.stroke();
-
-  // Antennae
-  const drawAntennaHornet = (isLeft: boolean) => {
-    context.save();
-    const side = isLeft ? -1 : 1;
-    context.translate(14 * scale * side, -62 * scale);
-    context.rotate((Math.PI / 6) * side);
-    context.beginPath();
-    context.moveTo(0, 0);
-    context.quadraticCurveTo(-8 * scale, -30 * scale, 0, -70 * scale);
-    context.quadraticCurveTo(8 * scale, -30 * scale, 0, 0);
-    context.fillStyle = colors.dark;
-    context.fill();
-    context.strokeStyle = colors.dark;
-    context.lineWidth = 5 * scale;
-    context.lineJoin = 'round';
-    context.stroke();
-    context.restore();
-  };
-  drawAntennaHornet(true);
-  drawAntennaHornet(false);
-
-  context.restore();
-}
-
-/** Spider: a round-bodied arachnid with 8 animated legs. */
-export function drawSpider(
-  context: CanvasRenderingContext2D,
-  x: number, y: number, size: number,
-  animationTimer: number, angleToPlayer: number, level: number,
-  viewScale = 1.0, enemyObj: any = null,
-) {
-  const scaledSize = size;
-  if (scaledSize <= 0) return;
-  const isFriendly = enemyObj && enemyObj.isFriendly === true;
-  const WAVE_MULTIPLIERS: Record<string, number> = { 'common': 1.0, 'unusual': 1.1, 'rare': 1.3, 'epic': 1.5, 'legendary': 1.8, 'mythic': 2.2, 'ultra': 2.7, 'super': 4.1, 'omega': 5.3, 'eternal': 5.5 };
-  const rarity: string = enemyObj?.rarity?.toLowerCase?.() || 'default';
-  const waveMult = WAVE_MULTIPLIERS[rarity] || 1.0;
-  const legColor: [number, number, number] = isFriendly ? [255, 215, 0] : [50, 48, 50];
-  const bodyColor: [number, number, number] = isFriendly ? [200, 160, 0] : [79, 64, 46];
-  const bodyEdgeColor: [number, number, number] = isFriendly ? [180, 140, 0] : [70, 55, 45];
-  const bodyRadius = scaledSize / 2;
-  const legLength = bodyRadius * 2.2;
-  const baseLegWidth = 3.5;
-  const baseBodyStroke = 3.5;
-  const legWidth = baseLegWidth * scaledSize / 35;
-  const bodyStrokeWidth = baseBodyStroke * scaledSize / 40;
-  const waveAmp1 = 7 * waveMult;
-  const waveAmp2 = 4 * waveMult;
-
-  context.save();
-  context.translate(x, y);
-  context.rotate(angleToPlayer + Math.PI / 2);
-
-  // Left legs (4)
-  for (let i = 0; i < 4; i++) {
-    const angleOffset = -1.0 + i * 0.50;
-    const baseAngle = Math.PI + angleOffset;
-    const startX = Math.cos(baseAngle) * bodyRadius * 0.85;
-    const startY = Math.sin(baseAngle) * bodyRadius * 0.85;
-    const midAngle = baseAngle + 0.3;
-    const midDist = bodyRadius + legLength * 0.3;
-    const ctrlX = Math.cos(midAngle) * midDist;
-    const ctrlY = Math.sin(midAngle) * midDist;
-    const endX = Math.cos(baseAngle) * legLength;
-    const endY = Math.sin(baseAngle) * legLength;
-    const freq1 = 8 + i * 0.7;
-    const freq2 = 12 + i * 1.1;
-    const phase1 = i * 1.3;
-    const phase2 = i * 0.8 + 2.1;
-    const wave1 = Math.sin(animationTimer * freq1 + phase1) * waveAmp1;
-    const wave2 = Math.sin(animationTimer * freq2 + phase2) * waveAmp2;
-    const wave = wave1 + wave2;
-    const perpX = -Math.sin(baseAngle);
-    const perpY = Math.cos(baseAngle);
-    context.beginPath();
-    context.moveTo(startX, startY);
-    context.quadraticCurveTo(ctrlX + perpX * wave, ctrlY + perpY * wave, endX + perpX * wave * 0.7, endY + perpY * wave * 0.7);
-    context.strokeStyle = `rgb(${legColor[0]}, ${legColor[1]}, ${legColor[2]})`;
-    context.lineWidth = legWidth;
-    context.lineCap = 'round';
-    context.stroke();
-  }
-  // Right legs (4)
-  for (let i = 0; i < 4; i++) {
-    const angleOffset = 1.0 - i * 0.50;
-    const baseAngle = angleOffset;
-    const startX = Math.cos(baseAngle) * bodyRadius * 0.85;
-    const startY = Math.sin(baseAngle) * bodyRadius * 0.85;
-    const midAngle = baseAngle - 0.3;
-    const midDist = bodyRadius + legLength * 0.3;
-    const ctrlX = Math.cos(midAngle) * midDist;
-    const ctrlY = Math.sin(midAngle) * midDist;
-    const endX = Math.cos(baseAngle) * legLength;
-    const endY = Math.sin(baseAngle) * legLength;
-    const freq1 = 9 + i * 0.9;
-    const freq2 = 13 + i * 1.3;
-    const phase1 = i * 1.5 + 1.2;
-    const phase2 = i * 0.9 + 3.7;
-    const wave1 = Math.sin(animationTimer * freq1 + phase1) * waveAmp1;
-    const wave2 = Math.sin(animationTimer * freq2 + phase2) * waveAmp2;
-    const wave = wave1 + wave2;
-    const perpX = -Math.sin(baseAngle);
-    const perpY = Math.cos(baseAngle);
-    context.beginPath();
-    context.moveTo(startX, startY);
-    context.quadraticCurveTo(ctrlX + perpX * wave, ctrlY + perpY * wave, endX + perpX * wave * 0.7, endY + perpY * wave * 0.7);
-    context.strokeStyle = `rgb(${legColor[0]}, ${legColor[1]}, ${legColor[2]})`;
-    context.lineWidth = legWidth;
-    context.lineCap = 'round';
-    context.stroke();
-  }
-
-  // Body
-  context.beginPath();
-  context.arc(0, 0, bodyRadius, 0, Math.PI * 2);
-  context.fillStyle = `rgb(${bodyColor[0]}, ${bodyColor[1]}, ${bodyColor[2]})`;
-  context.fill();
-  context.strokeStyle = `rgb(${bodyEdgeColor[0]}, ${bodyEdgeColor[1]}, ${bodyEdgeColor[2]})`;
-  context.lineWidth = bodyStrokeWidth;
-  context.stroke();
-
-  context.restore();
-}
-
-/** Leech: a segmented body with a gaping mouth, drawn from segment colliders. */
-export function drawLeech(
-  context: CanvasRenderingContext2D,
-  x: number, y: number, size: number,
-  animationTimer: number, angleToPlayer: number, level: number,
-  viewScale = 1.0, enemyObj: any = null,
-) {
-  type SegCollider = { physicsBody: { position: { x: number; y: number }; radius: number } };
-  let segments: SegCollider[] = enemyObj?.segmentColliders;
-  if (!segments || segments.length === 0) {
-    segments = [];
-    const segRadius = size / 3;
-    for (let i = 0; i < 6; i++) {
-      segments.push({
-        physicsBody: {
-          position: { x: x - i * segRadius * 1.1, y },
-          radius: segRadius,
-        },
-      });
-    }
-  }
-  if (!segments || segments.length < 2) return;
-
-  const headPhysX = segments[0].physicsBody.position.x;
-  const headPhysY = segments[0].physicsBody.position.y;
-  const screenPoints = segments.map(seg => {
-    const px = seg.physicsBody.position.x;
-    const py = seg.physicsBody.position.y;
-    return { x: x + (px - headPhysX), y: y + (py - headPhysY), radius: seg.physicsBody.radius };
-  });
-  if (screenPoints.length < 2) return;
-
-  const isFriendly = enemyObj?.isFriendly === true;
-  const bodyColor = isFriendly ? '#FFD700' : '#353535';
-  const outlineColor = isFriendly ? '#B8860B' : '#000000';
-  const segmentWidth = screenPoints[0].radius * 2;
-
-  context.save();
-
-  // Mouth (two curved mandibles at the head)
-  if (screenPoints.length >= 2) {
-    const headPoint = screenPoints[0];
-    const nextPoint = screenPoints[1] || headPoint;
-    const baseAngle = Math.atan2(nextPoint.y - headPoint.y, nextPoint.x - headPoint.x);
-    const rotationAngle = 3.0;
-    const swingAmount = Math.sin(animationTimer * 5) * 0.1;
-    const mouthLength = segmentWidth * 0.9;
-    const forwardOffset = segmentWidth * 0.1;
-    const startSeparation = segmentWidth * 0.3;
-    const endSeparation = segmentWidth * 0.4;
-    const mouthWidth = segmentWidth * 0.15;
-    const bendFactor = 1.2;
-
-    for (let side = -1; side <= 1; side += 2) {
-      const mouthAngle = baseAngle + rotationAngle + swingAmount * side;
-      const perpX = Math.cos(mouthAngle + Math.PI / 2);
-      const perpY = Math.sin(mouthAngle + Math.PI / 2);
-      const startX = headPoint.x + Math.cos(mouthAngle) * forwardOffset + perpX * startSeparation * side;
-      const startY = headPoint.y + Math.sin(mouthAngle) * forwardOffset + perpY * startSeparation * side;
-      const cp1X = headPoint.x + Math.cos(mouthAngle) * (forwardOffset + mouthLength * 0.2) + perpX * (startSeparation + (endSeparation - startSeparation) * 0.2) * side * bendFactor;
-      const cp1Y = headPoint.y + Math.sin(mouthAngle) * (forwardOffset + mouthLength * 0.2) + perpY * (startSeparation + (endSeparation - startSeparation) * 0.2) * side * bendFactor;
-      const cp2X = headPoint.x + Math.cos(mouthAngle) * (forwardOffset + mouthLength * 0.5) + perpX * (startSeparation + (endSeparation - startSeparation) * 0.5) * side * bendFactor;
-      const cp2Y = headPoint.y + Math.sin(mouthAngle) * (forwardOffset + mouthLength * 0.5) + perpY * (startSeparation + (endSeparation - startSeparation) * 0.5) * side * bendFactor;
-      const endX = headPoint.x + Math.cos(mouthAngle) * (forwardOffset + mouthLength) + perpX * endSeparation * side;
-      const endY = headPoint.y + Math.sin(mouthAngle) * (forwardOffset + mouthLength) + perpY * endSeparation * side;
-
-      context.beginPath();
-      context.moveTo(startX, startY);
-      context.bezierCurveTo(cp1X, cp1Y, cp2X, cp2Y, endX, endY);
-      context.strokeStyle = outlineColor;
-      context.lineWidth = mouthWidth;
-      context.stroke();
-    }
-  }
-
-  // Body: smooth curve through all segment centers
-  context.beginPath();
-  context.moveTo(screenPoints[0].x, screenPoints[0].y);
-  for (let i = 0; i < screenPoints.length - 1; i++) {
-    const p0 = screenPoints[i];
-    const p1 = screenPoints[i + 1];
-    const xc = (p0.x + p1.x) / 2;
-    const yc = (p0.y + p1.y) / 2;
-    context.quadraticCurveTo(p0.x, p0.y, xc, yc);
-  }
-  context.lineTo(screenPoints[screenPoints.length - 1].x, screenPoints[screenPoints.length - 1].y);
-  context.lineCap = 'round';
-  context.lineJoin = 'round';
-  context.strokeStyle = outlineColor;
-  context.lineWidth = segmentWidth * 1.2;
-  context.stroke();
-  context.strokeStyle = bodyColor;
-  context.lineWidth = segmentWidth;
-  context.stroke();
-
-  context.restore();
-}
-
-// =============================================================================
 // Custom item renderers — world-space draw helpers
 // =============================================================================
 
@@ -3170,30 +3073,32 @@ export function drawFaster(ctx: CanvasRenderingContext2D, x: number, y: number, 
 
 /** Third Eye icon (for cards/inventory): a single eye with iris. */
 export function drawThirdEyeIcon(ctx: CanvasRenderingContext2D, x: number, y: number, radius: number, animTimer: number) {
-  const r = radius * 0.8;
+  // 如果 animTimer 传入的是时间戳，这里可以计算角度；如果 animTimer 已经是角度，则直接使用。
+  // 这里假设 animTimer 就是你需要的角度值（弧度制）。
+  const angle = animTimer;
+
   ctx.save();
-  ctx.translate(x, y);
+
   ctx.beginPath();
-  ctx.ellipse(0, 0, r, r * 0.6, 0, 0, Math.PI * 2);
-  ctx.fillStyle = '#ffffff';
+  ctx.ellipse(x, y, 3, 9, 0, 0, Math.PI * 2);
+  ctx.fillStyle = "#000000";
   ctx.fill();
+    ctx.strokeStyle = "#000000";
   ctx.lineWidth = 3;
-  ctx.strokeStyle = '#6c3483';
   ctx.stroke();
+  ctx.clip(); // 核心遮罩：之后绘制的内容只会显示在这个椭圆内部
+
+
   ctx.beginPath();
-  ctx.arc(0, 0, r * 0.45, 0, Math.PI * 2);
-  ctx.fillStyle = '#9b59b6';
+  const pupilX = x + Math.cos(angle) * 1.5;
+  const pupilY = y + Math.sin(angle) * 3.0;
+  ctx.arc(pupilX-1.5, pupilY, 4, 0, Math.PI * 2);
+  ctx.fillStyle = "#FFFFFF";
   ctx.fill();
-  ctx.beginPath();
-  ctx.arc(0, 0, r * 0.2, 0, Math.PI * 2);
-  ctx.fillStyle = '#1a1a2e';
-  ctx.fill();
-  ctx.beginPath();
-  ctx.arc(-r * 0.15, -r * 0.15, r * 0.1, 0, Math.PI * 2);
-  ctx.fillStyle = '#ffffff';
-  ctx.fill();
-  ctx.restore();
+
+  ctx.restore(); // 释放当前眼睛的遮罩，准备处理下一个
 }
+
 
 // =============================================================================
 // Player body accessories — Antennae & Third Eye (drawn on body, not rotating)
@@ -3237,65 +3142,33 @@ export function drawPlayerAntennae(
   ctx.restore();
 }
 
-/**
- * Draws a normal-looking eye on the player's forehead. It does NOT rotate
- * with the flower — it stays fixed on the body. Almond-shaped sclera,
- * rarity-colored iris, black pupil, occasional blink animation.
- */
 export function drawPlayerThirdEye(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, radius: number,
   rarity: number, time: number,
 ) {
-  const eyeR = radius * 0.30;
+  const eyeR = radius * 0.10;
   const eyeX = x;
-  const eyeY = y - radius * 0.40;
-  const blink = Math.sin(time * 0.7) > 0.95 ? 0.15 : 1.0;
+  const eyeY = y - radius * 0.70;
+
   ctx.save();
 
   ctx.beginPath();
-  ctx.ellipse(eyeX, eyeY, eyeR + 1.5, (eyeR + 1.5) * blink, 0, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(0,0,0,0.2)';
-  ctx.fill();
-
-  ctx.beginPath();
-  ctx.ellipse(eyeX, eyeY, eyeR, eyeR * blink, 0, 0, Math.PI * 2);
-  ctx.fillStyle = '#ffffff';
+  ctx.ellipse(eyeX, eyeY, eyeR*0.8, eyeR * 2.5, 0, 0, Math.PI * 2);
+  ctx.fillStyle = "#000000";
   ctx.fill();
   ctx.lineWidth = 2;
   ctx.strokeStyle = '#333333';
   ctx.stroke();
 
-  if (blink > 0.5) {
-    ctx.beginPath();
-    ctx.arc(eyeX, eyeY, eyeR * 0.50, 0, Math.PI * 2);
-    ctx.fillStyle = '#9b59b6';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.arc(eyeX, eyeY, eyeR * 0.22, 0, Math.PI * 2);
-    ctx.fillStyle = '#000000';
-    ctx.fill();
-
-    ctx.beginPath();
-    ctx.arc(eyeX - eyeR * 0.20, eyeY - eyeR * 0.20, eyeR * 0.10, 0, Math.PI * 2);
-    ctx.fillStyle = '#ffffff';
-    ctx.fill();
-
-    ctx.beginPath();
-    ctx.arc(eyeX + eyeR * 0.12, eyeY + eyeR * 0.10, eyeR * 0.04, 0, Math.PI * 2);
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    ctx.fill();
-  }
-
+  ctx.clip();
+  const moveX = Math.cos(time * 0.002) * (eyeR * 0.35);
+  const moveY = Math.sin(time * 0.002) * (eyeR * 0.8);
   ctx.beginPath();
-  ctx.ellipse(eyeX, eyeY - eyeR * 0.3 * blink, eyeR * 0.8, eyeR * 0.15 * blink, 0, Math.PI, 0);
-  ctx.strokeStyle = 'rgba(0,0,0,0.15)';
-  ctx.lineWidth = 1.5;
-  ctx.stroke();
+  ctx.arc(eyeX + moveX, eyeY + moveY, eyeR*1.2, 0, Math.PI * 2);
+  ctx.fillStyle = "#FFFFFF";
+  ctx.fill();
+
 
   ctx.restore();
 }
