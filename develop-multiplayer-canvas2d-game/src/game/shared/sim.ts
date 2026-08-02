@@ -204,10 +204,6 @@ export class Mob {
   spawnedThresholds: Set<number> = new Set();
   /** Accumulated damage dealt by each player (petal + friendly mob damage). */
   damageByPlayer: Map<number, number> = new Map();
-  /** Position history for segmented mobs (Leech). Stores recent head positions. */
-  positionHistory: { x: number; y: number }[] = [];
-  /** Segment colliders for segmented mobs (Leech). Updated each tick from positionHistory. */
-  segmentColliders: { physicsBody: { position: { x: number; y: number }; radius: number } }[] = [];
 
   constructor(
     id: number,
@@ -243,63 +239,6 @@ export class Mob {
     this.damageByPlayer.set(playerId, (this.damageByPlayer.get(playerId) || 0) + amount);
   }
 
-  /**
-   * Update segmented body for Leech-type mobs. Records the head position into
-   * a history buffer, then builds segment colliders spaced evenly along that
-   * trail. Called once per tick from updateWorld.
-   */
-  updateSegments(dt: number) {
-    const def = MOBS[this.type];
-    if (!def || def.shape !== "leech") return;
-    const segRadius = this.radius * 0.55;
-    const segCount = 6;
-    const spacing = segRadius * 1.1;
-
-    // Record current head position
-    this.positionHistory.unshift({ x: this.x, y: this.y });
-    // Keep enough history to space all segments
-    const maxHistory = Math.ceil(segCount * spacing / Math.max(1, this.speed * dt + 1)) + segCount * 4;
-    if (this.positionHistory.length > maxHistory) this.positionHistory.length = maxHistory;
-
-    // Build segment colliders by sampling the trail at fixed distances
-    const segments: { physicsBody: { position: { x: number; y: number }; radius: number } }[] = [];
-    // Head segment is always at current position
-    segments.push({
-      physicsBody: { position: { x: this.x, y: this.y }, radius: segRadius },
-    });
-    // Walk along the trail picking points at `spacing` distance apart
-    let lastX = this.x, lastY = this.y;
-    let needed = spacing;
-    for (let i = 1; i < segCount; i++) {
-      let placed = false;
-      for (let j = 0; j < this.positionHistory.length; j++) {
-        const p = this.positionHistory[j];
-        const d = Math.hypot(p.x - lastX, p.y - lastY);
-        if (d >= needed) {
-          const t = needed / d;
-          const sx = lastX + (p.x - lastX) * t;
-          const sy = lastY + (p.y - lastY) * t;
-          segments.push({
-            physicsBody: { position: { x: sx, y: sy }, radius: segRadius },
-          });
-          lastX = sx; lastY = sy;
-          needed = spacing;
-          placed = true;
-          break;
-        } else {
-          needed -= d;
-          lastX = p.x; lastY = p.y;
-        }
-      }
-      if (!placed) {
-        // Ran out of history — just duplicate the last known point
-        segments.push({
-          physicsBody: { position: { x: lastX, y: lastY }, radius: segRadius },
-        });
-      }
-    }
-    this.segmentColliders = segments;
-  }
 }
 
 export class Drop {
@@ -496,7 +435,7 @@ export class GameServer {
   private nextId = 1;
   private clients = new Map<number, ClientState>();
   private worlds: World[] = MAPS.map(() => ({ mobs: [], drops: [] }));
-  
+
   // Pre-computed wall grids for each map
   private wallGrids: WallGrid[] = [];
 
@@ -524,7 +463,7 @@ export class GameServer {
     for (const map of MAPS) {
       this.wallGrids.push(buildWallGrid(map.walls, WALL_GRID_CELL_SIZE));
     }
-    
+
     for (const map of MAPS) {
       for (let i = 0; i < this.mobCapForMap(map.id); i++) this.spawnMob(map.id);
     }
@@ -1517,128 +1456,253 @@ export class GameServer {
     if (Math.random() < totalChance && mappedRarity < MAX_RARITY) return mappedRarity + 1;
     return mappedRarity;
   }
+private updateWorld(mapId: number, dt: number, players: Player[]) {
+  const map = MAPS[mapId];
+  const world = this.worlds[mapId];
+  const wallGrid = this.wallGrids[mapId];
+  const here = players.filter((p) => p.mapId === mapId && p.alive);
 
-  private updateWorld(mapId: number, dt: number, players: Player[]) {
-    const map = MAPS[mapId];
-    const world = this.worlds[mapId];
-    const wallGrid = this.wallGrids[mapId];
-    const here = players.filter((p) => p.mapId === mapId && p.alive);
-    const MOB_CELL_SIZE = 250;
-    const mobGrid = new Map<string, Mob[]>();
-    const getKey = (x: number, y: number) => `${Math.floor(x / MOB_CELL_SIZE)},${Math.floor(y / MOB_CELL_SIZE)}`;
-    for (const mob of world.mobs) { const k = getKey(mob.x, mob.y); if (!mobGrid.has(k)) mobGrid.set(k, []); mobGrid.get(k)!.push(mob); }
-    const getNearby = (x: number, y: number) => {
-      const cx = Math.floor(x / MOB_CELL_SIZE), cy = Math.floor(y / MOB_CELL_SIZE);
-      const r: Mob[] = [];
-      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) { const c = mobGrid.get(`${cx + dx},${cy + dy}`); if (c) r.push(...c); }
-      return r;
-    };
-    for (let i = world.mobs.length - 1; i >= 0; i--) {
-      const mob = world.mobs[i];
-      mob.hitCd = Math.max(0, mob.hitCd - dt);
-      mob.spawnProtection = Math.max(0, mob.spawnProtection - dt);
-      // Update segmented body for Leech-type mobs (records trail, builds segment colliders)
-      mob.updateSegments(dt);
-      let target: { x: number; y: number; id: number } | null = null;
-      let best = Infinity;
-      if (mob.friendly) {
-        for (const other of world.mobs) { if (!other.friendly) { const d = Math.hypot(other.x - mob.x, other.y - mob.y); if (d < 520 && d < best) { best = d; target = other; } } }
-        const owner = here.find((p) => p.id === mob.ownerId);
-        if (owner) { const od = Math.hypot(owner.x - mob.x, owner.y - mob.y); if (!target || od > 260) target = { x: owner.x, y: owner.y, id: owner.id }; }
-      } else {
-        for (const p of here) { const d = Math.hypot(p.x - mob.x, p.y - mob.y); if (d < 460 && d < best) { best = d; target = { x: p.x, y: p.y, id: p.id }; } }
-        for (const other of world.mobs) { if (other.friendly) { const d = Math.hypot(other.x - mob.x, other.y - mob.y); if (d < 380 && d < best) { best = d; target = other; } } }
-      }
-      if (target && mob.speed > 0) {
-        const dx = target.x - mob.x, dy = target.y - mob.y, d = Math.hypot(dx, dy) || 1;
-        mob.vx += ((dx / d) * mob.speed - mob.vx) * Math.min(1, dt * 4);
-        mob.vy += ((dy / d) * mob.speed - mob.vy) * Math.min(1, dt * 4);
-        mob.angle = Math.atan2(dy, dx);
-      } else if (mob.speed > 0) {
-        mob.wander -= dt;
-        if (mob.wander <= 0) { mob.wander = 1.5 + Math.random() * 3; mob.angle = Math.random() * Math.PI * 2; }
-        mob.vx += (Math.cos(mob.angle) * mob.speed * 0.4 - mob.vx) * Math.min(1, dt * 2);
-        mob.vy += (Math.sin(mob.angle) * mob.speed * 0.4 - mob.vy) * Math.min(1, dt * 2);
-      } else { mob.vx *= 0.9; mob.vy *= 0.9; }
-      mob.x += mob.vx * dt; mob.y += mob.vy * dt;
-      mob.x = clamp(mob.x, mob.radius, map.width - mob.radius); mob.y = clamp(mob.y, mob.radius, map.height - mob.radius);
-      [mob.x, mob.y] = collideWalls(wallGrid, mob.x, mob.y, mob.radius, this.collisionCounter);
-      const nearby = getNearby(mob.x, mob.y);
-      for (const other of nearby) {
-        if (other === mob) continue;
-        this.collisionCounter.n++;
-        const dx = mob.x - other.x, dy = mob.y - other.y, d = Math.hypot(dx, dy), min = mob.radius + other.radius;
-        if (d < min && d > 0.001) {
-          const push = (min - d) * 0.4; mob.x += (dx / d) * push; mob.y += (dy / d) * push;
-          if (mob.friendly !== other.friendly && mob.hitCd <= 0) {
-            const attacker = mob.friendly ? mob : other, victim = mob.friendly ? other : mob;
-            if (victim.spawnProtection <= 0) { const dmg = attacker.damage * 0.6; victim.hp -= dmg; victim.lastHitBy = attacker.ownerId; if (!victim.friendly && attacker.friendly && attacker.ownerId) victim.addDamage(attacker.ownerId, dmg); }
-            if (attacker.spawnProtection <= 0) attacker.hp -= victim.damage * 0.3;
-            mob.hitCd = 0.5; other.hitCd = 0.5;
-          }
-        }
-      }
-      if (!mob.friendly) {
-        for (const p of here) {
-          this.collisionCounter.n++;
-          const d = Math.hypot(p.x - mob.x, p.y - mob.y);
-          if (d < mob.radius + PLAYER_RADIUS) {
-            const push = (mob.radius + PLAYER_RADIUS - d) * 0.5;
-            const ux = (p.x - mob.x) / (d || 1), uy = (p.y - mob.y) / (d || 1);
-            p.x += ux * push; p.y += uy * push; mob.x -= ux * push * 0.4; mob.y -= uy * push * 0.4;
-            if (p.hurtCd <= 0) {
-              let dmg = mob.damage;
-              if (p.shield > 0 && dmg > 0) { const absorbed = Math.min(p.shield * 2, dmg); p.shield -= absorbed / 2; dmg -= absorbed; }
-              p.hp -= dmg; p.hurtCd = 0.55; p.statsDirty = true;
-              const c = this.clientOf(p.id);
-              if (c) this.pushEvent(c, EVT.HIT, p.x, p.y, Math.round(mob.damage));
-              if (p.hp <= 0) this.killPlayer(p);
-            }
-          }
-        }
-      }
+  // ===== ✅ 视野裁剪范围 =====
+  const VIEW_RADIUS = 2000; // 只处理玩家周围 2000 像素内的生物
+  const VIEW_RADIUS_SQ = VIEW_RADIUS * VIEW_RADIUS;
 
-      // Spawner nest mobs: release minions each time HP drops below a threshold.
-      if (!mob.friendly) {
-        const mobDef = MOBS[mob.type];
-        if (mobDef.spawner) {
-          const hpPct = mob.hp / mob.maxHp;
-          for (const threshold of mobDef.spawner.thresholds) {
-            if (hpPct <= threshold && !mob.spawnedThresholds.has(threshold)) {
-              mob.spawnedThresholds.add(threshold);
-              for (const spawnId of mobDef.spawner.spawnMobs(mob.rarity)) {
-                const spawnDef = MOBS[spawnId];
-                if (!spawnDef) continue;
-                const angle = Math.random() * Math.PI * 2;
-                const dist = mob.radius + spawnDef.radius + 12 + Math.random() * 28;
-                let sx = mob.x + Math.cos(angle) * dist;
-                let sy = mob.y + Math.sin(angle) * dist;
-                sx = clamp(sx, spawnDef.radius + 4, map.width - spawnDef.radius - 4);
-                sy = clamp(sy, spawnDef.radius + 4, map.height - spawnDef.radius - 4);
-                const [rx, ry] = collideWalls(wallGrid, sx, sy, spawnDef.radius + 4);
-                world.mobs.push(new Mob(this.nextId++, spawnId, mapId, rx, ry, mob.rarity));
-              }
-            }
-          }
-        }
-      }
+  // ===== 构建玩家位置集合（用于快速距离检查） =====
+  const playerPositions = here.map(p => ({ x: p.x, y: p.y }));
 
-      if (mob.hp <= 0) {
-        world.mobs.splice(i, 1);
-        if (mob.friendly) {
-          const owner = here.find((p) => p.id === mob.ownerId);
-          if (owner && mob.ownerSlot >= 0) owner.pets[mob.ownerSlot] = (owner.pets[mob.ownerSlot] || []).filter((m) => m !== mob);
-          continue;
-        }
-        this.onMobKilled(mob, mapId);
-        continue;
-      }
-    }
-    for (let i = world.drops.length - 1; i >= 0; i--) { const d = world.drops[i]; d.ttl -= dt; if (d.ttl <= 0) world.drops.splice(i, 1); }
-    const hostiles = world.mobs.filter((m) => !m.friendly).length;
-    if (hostiles < this.mobCapForMap(mapId) && Math.random() < 0.5) this.spawnMob(mapId);
+  // ===== 空间网格 =====
+  const MOB_CELL_SIZE = 250;
+  const mobGrid = new Map<string, Mob[]>();
+  const getKey = (x: number, y: number) => `${Math.floor(x / MOB_CELL_SIZE)},${Math.floor(y / MOB_CELL_SIZE)}`;
+
+  for (const mob of world.mobs) {
+    const k = getKey(mob.x, mob.y);
+    if (!mobGrid.has(k)) mobGrid.set(k, []);
+    mobGrid.get(k)!.push(mob);
   }
 
+  const getNearby = (x: number, y: number) => {
+    const cx = Math.floor(x / MOB_CELL_SIZE), cy = Math.floor(y / MOB_CELL_SIZE);
+    const r: Mob[] = [];
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const c = mobGrid.get(`${cx + dx},${cy + dy}`);
+        if (c) r.push(...c);
+      }
+    }
+    return r;
+  };
+
+  for (let i = world.mobs.length - 1; i >= 0; i--) {
+    const mob = world.mobs[i];
+
+    // ===== ✅ 检查是否在玩家视野内 =====
+    let inView = false;
+    // 玩家召唤物始终在视野内
+    if (mob.ownerId !== 0) {
+      inView = true;
+    } else {
+      for (const pos of playerPositions) {
+        const dx = mob.x - pos.x;
+        const dy = mob.y - pos.y;
+        if (dx * dx + dy * dy < VIEW_RADIUS_SQ) {
+          inView = true;
+          break;
+        }
+      }
+    }
+
+    // ===== ✅ 如果不在视野内，只做基础更新（不进行碰撞检测） =====
+    if (!inView) {
+      // 仍然移动和更新
+      mob.x += mob.vx * dt;
+      mob.y += mob.vy * dt;
+      mob.x = clamp(mob.x, mob.radius, map.width - mob.radius);
+      mob.y = clamp(mob.y, mob.radius, map.height - mob.radius);
+
+
+      // 减少生命值恢复（可选）
+      if (mob.hp < mob.maxHp) {
+        mob.hp = Math.min(mob.maxHp, mob.hp + 0.1 * dt);
+      }
+      continue; // 跳过碰撞检测
+    }
+
+    // ===== 视野内的生物：完整更新 =====
+    mob.hitCd = Math.max(0, mob.hitCd - dt);
+    mob.spawnProtection = Math.max(0, mob.spawnProtection - dt);
+
+
+    // ---- 目标寻找 ----
+    let target: { x: number; y: number; id: number } | null = null;
+    let best = Infinity;
+
+    if (mob.friendly) {
+      for (const other of world.mobs) {
+        if (!other.friendly) {
+          const d = Math.hypot(other.x - mob.x, other.y - mob.y);
+          if (d < 520 && d < best) { best = d; target = other; }
+        }
+      }
+      const owner = here.find((p) => p.id === mob.ownerId);
+      if (owner) {
+        const od = Math.hypot(owner.x - mob.x, owner.y - mob.y);
+        if (!target || od > 260) target = { x: owner.x, y: owner.y, id: owner.id };
+      }
+    } else {
+      for (const p of here) {
+        const d = Math.hypot(p.x - mob.x, p.y - mob.y);
+        if (d < 460 && d < best) { best = d; target = { x: p.x, y: p.y, id: p.id }; }
+      }
+      for (const other of world.mobs) {
+        if (other.friendly) {
+          const d = Math.hypot(other.x - mob.x, other.y - mob.y);
+          if (d < 380 && d < best) { best = d; target = other; }
+        }
+      }
+    }
+
+    // ---- 移动 ----
+    if (target && mob.speed > 0) {
+      const dx = target.x - mob.x, dy = target.y - mob.y, d = Math.hypot(dx, dy) || 1;
+      mob.vx += ((dx / d) * mob.speed - mob.vx) * Math.min(1, dt * 4);
+      mob.vy += ((dy / d) * mob.speed - mob.vy) * Math.min(1, dt * 4);
+      mob.angle = Math.atan2(dy, dx);
+    } else if (mob.speed > 0) {
+      mob.wander -= dt;
+      if (mob.wander <= 0) {
+        mob.wander = 1.5 + Math.random() * 3;
+        mob.angle = Math.random() * Math.PI * 2;
+      }
+      mob.vx += (Math.cos(mob.angle) * mob.speed * 0.4 - mob.vx) * Math.min(1, dt * 2);
+      mob.vy += (Math.sin(mob.angle) * mob.speed * 0.4 - mob.vy) * Math.min(1, dt * 2);
+    } else {
+      mob.vx *= 0.9;
+      mob.vy *= 0.9;
+    }
+
+    // ---- 位置更新 ----
+    mob.x += mob.vx * dt;
+    mob.y += mob.vy * dt;
+    mob.x = clamp(mob.x, mob.radius, map.width - mob.radius);
+    mob.y = clamp(mob.y, mob.radius, map.height - mob.radius);
+    [mob.x, mob.y] = collideWalls(wallGrid, mob.x, mob.y, mob.radius, this.collisionCounter);
+
+    // ---- 生物间碰撞 ----
+    const nearby = getNearby(mob.x, mob.y);
+    for (const other of nearby) {
+      if (other === mob) continue;
+      this.collisionCounter.n++;
+      const dx = mob.x - other.x, dy = mob.y - other.y, d = Math.hypot(dx, dy), min = mob.radius + other.radius;
+      if (d < min && d > 0.001) {
+        const push = (min - d) * 0.4;
+        mob.x += (dx / d) * push;
+        mob.y += (dy / d) * push;
+
+        // ---- 敌对生物攻击 ----
+        if (mob.friendly !== other.friendly && mob.hitCd <= 0) {
+          const attacker = mob.friendly ? mob : other;
+          const victim = mob.friendly ? other : mob;
+          if (victim.spawnProtection <= 0) {
+            const dmg = attacker.damage * 0.6;
+            victim.hp -= dmg;
+            victim.lastHitBy = attacker.ownerId;
+            if (!victim.friendly && attacker.friendly && attacker.ownerId) {
+              victim.addDamage(attacker.ownerId, dmg);
+            }
+          }
+          if (attacker.spawnProtection <= 0) {
+            attacker.hp -= victim.damage * 0.3;
+          }
+          mob.hitCd = 0.1;
+          other.hitCd = 0.1;
+        }
+      }
+    }
+
+    // ---- 生物攻击玩家 ----
+    if (!mob.friendly) {
+      for (const p of here) {
+        this.collisionCounter.n++;
+        const d = Math.hypot(p.x - mob.x, p.y - mob.y);
+        if (d < mob.radius + PLAYER_RADIUS) {
+          const push = (mob.radius + PLAYER_RADIUS - d) * 0.5;
+          const ux = (p.x - mob.x) / (d || 1), uy = (p.y - mob.y) / (d || 1);
+          p.x += ux * push;
+          p.y += uy * push;
+          mob.x -= ux * push * 0.4;
+          mob.y -= uy * push * 0.4;
+
+          if (p.hurtCd <= 0) {
+            let dmg = mob.damage;
+            if (p.shield > 0 && dmg > 0) {
+              const absorbed = Math.min(p.shield * 2, dmg);
+              p.shield -= absorbed / 2;
+              dmg -= absorbed;
+            }
+            p.hp -= dmg;
+            p.hurtCd = 0.1;
+            p.statsDirty = true;
+            const c = this.clientOf(p.id);
+            if (c) this.pushEvent(c, EVT.HIT, p.x, p.y, Math.round(mob.damage));
+            if (p.hp <= 0) this.killPlayer(p);
+          }
+        }
+      }
+    }
+
+    // ---- Spawner 逻辑 ----
+    if (!mob.friendly) {
+      const mobDef = MOBS[mob.type];
+      if (mobDef.spawner) {
+        const hpPct = mob.hp / mob.maxHp;
+        for (const threshold of mobDef.spawner.thresholds) {
+          if (hpPct <= threshold && !mob.spawnedThresholds.has(threshold)) {
+            mob.spawnedThresholds.add(threshold);
+            for (const spawnId of mobDef.spawner.spawnMobs(mob.rarity)) {
+              const spawnDef = MOBS[spawnId];
+              if (!spawnDef) continue;
+              const angle = Math.random() * Math.PI * 2;
+              const dist = mob.radius + spawnDef.radius + 12 + Math.random() * 28;
+              let sx = mob.x + Math.cos(angle) * dist;
+              let sy = mob.y + Math.sin(angle) * dist;
+              sx = clamp(sx, spawnDef.radius + 4, map.width - spawnDef.radius - 4);
+              sy = clamp(sy, spawnDef.radius + 4, map.height - spawnDef.radius - 4);
+              const [rx, ry] = collideWalls(wallGrid, sx, sy, spawnDef.radius + 4);
+              world.mobs.push(new Mob(this.nextId++, spawnId, mapId, rx, ry, mob.rarity));
+            }
+          }
+        }
+      }
+    }
+
+    // ---- 死亡处理 ----
+    if (mob.hp <= 0) {
+      world.mobs.splice(i, 1);
+      if (mob.friendly) {
+        const owner = here.find((p) => p.id === mob.ownerId);
+        if (owner && mob.ownerSlot >= 0) {
+          owner.pets[mob.ownerSlot] = (owner.pets[mob.ownerSlot] || []).filter((m) => m !== mob);
+        }
+        continue;
+      }
+      this.onMobKilled(mob, mapId);
+      continue;
+    }
+  }
+
+  // ---- 掉落物更新 ----
+  for (let i = world.drops.length - 1; i >= 0; i--) {
+    const d = world.drops[i];
+    d.ttl -= dt;
+    if (d.ttl <= 0) world.drops.splice(i, 1);
+  }
+
+  // ---- 生成新生物 ----
+  const hostiles = world.mobs.filter((m) => !m.friendly).length;
+  if (hostiles < this.mobCapForMap(mapId) && Math.random() < 0.5) {
+    this.spawnMob(mapId);
+  }
+}
   private setBonusStatus(p: Player, multiplier: number, seconds: number) {
     const safeMultiplier = Math.max(1, Math.min(5, Math.floor(multiplier)));
     const safeSeconds = Math.max(0, Math.min(60 * 60, Math.floor(seconds)));
