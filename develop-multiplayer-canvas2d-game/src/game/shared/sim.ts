@@ -894,6 +894,38 @@ export class GameServer {
         this.broadcastChatToSquad(chosen.code, `System: ${p.name} joined.`, "System");
         break;
       }
+      case "/help": {
+        const commands = [
+          "/claim — Daily bonus from main menu",
+          "/create_public_squad — Create a public squad",
+          "/create_private_squad — Create a private squad",
+          "/join_squad <CODE> — Join a squad by code",
+          "/leave_squad — Leave current squad",
+          "/find_public_squad — Auto-join a public squad",
+          "/find_player — Show player count per map",
+          "/help — Show this help message",
+        ];
+        for (const line of commands) {
+          this.sendChatToClient(c, line, "System", true, false);
+        }
+        break;
+      }
+      case "/find_player": {
+        const mapCounts = new Map<number, number>();
+        for (const client of this.clients.values()) {
+          if (client.player) {
+            mapCounts.set(client.player.mapId, (mapCounts.get(client.player.mapId) || 0) + 1);
+          }
+        }
+        let total = 0;
+        for (const map of MAPS) {
+          const count = mapCounts.get(map.id) || 0;
+          total += count;
+          this.sendChatToClient(c, `${map.name}: ${count} player${count === 1 ? "" : "s"}`, "System", true, false);
+        }
+        this.sendChatToClient(c, `Total: ${total} player${total === 1 ? "" : "s"}`, "System", true, false);
+        break;
+      }
       default:
         this.sendChatToClient(c, `Unknown command: ${command}`, "System", true, false);
     }
@@ -1873,13 +1905,13 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
     const p = c.player;
     if (!p) return;
     const world = this.worlds[p.mapId];
-    const w = new Writer(4096);
+    const w = new Writer(64);
     w.u8(S2C.SNAPSHOT).u32(this.tickCount);
     let count = 0;
     const viewX = 1300;
     const viewY = 950;
     const inView = (x: number, y: number) => Math.abs(x - p.x) < viewX && Math.abs(y - p.y) < viewY;
-    const body = new Writer(4096);
+    const body = new Writer(65536);
     for (const other of this.clients.values()) {
       const op = other.player;
       if (!op || op.mapId !== p.mapId || !op.alive) continue;
@@ -1963,8 +1995,8 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
       c.send(sw.bytes());
     }
     if (this.tickCount % 20 === 0) {
-      const dw = new Writer(8);
-      dw.u8(S2C.DEBUG).u32(this.collisionCounter.n).u16(Math.min(65535, this.entityCount()));
+      const dw = new Writer(10);
+      dw.u8(S2C.DEBUG).u32(this.collisionCounter.n).u16(Math.min(65535, this.entityCount())).u16(Math.min(65535, this.playerCount()));
       c.send(dw.bytes());
     }
     for (const e of c.events) c.send(e);
