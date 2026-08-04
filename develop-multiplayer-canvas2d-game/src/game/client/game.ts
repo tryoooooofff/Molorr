@@ -2663,7 +2663,7 @@ export class GameClient {
   private time = 0;
   private w = 800;
   private h = 600;
-
+private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map();
   // scene
   private scene: "menu" | "game" = "menu";
   private fade = 0; // 1 = fully covered
@@ -2688,8 +2688,6 @@ export class GameClient {
   private accountSystem = new AccountSystem();
   private squadCode = "";
 
-  // Rose arrival burst. The absorption travel itself is authoritative petal
-  // movement streamed by the server, so every client sees the same animation.
   private roseParticles: Array<{
     x: number;
     y: number;
@@ -3283,6 +3281,7 @@ export class GameClient {
     // The server uses this only to spawn the additional copies; it also tracks
     // the supplied duration so the bonus cannot outlive its one-hour window.
     w.u8(this.bonus.currentMultiplier).u16(this.bonus.remainingSeconds);
+    this.wallPolygonsCache.clear();
     this.net?.send(w.bytes());
   }
 
@@ -6352,123 +6351,6 @@ private bagLayout() {
     this.accountSystem.draw(ctx);
   }
 
-  buildWallEdgeCache() {
-    const d = (window as any).WALL_DATA?.[this.currentBiome];
-    if (!d) return;
-
-    const size = Math.sqrt(d.length) | 0;
-    const cellW = this.worldW / size;
-    const cellH = this.worldH / size;
-
-    const W = (x: number, y: number) =>
-        x >= 0 && y >= 0 && x < size && y < size &&
-        d[y * size + x] === '1';
-
-    // =========================
-    // 1. 栅格 → 有向边
-    // =========================
-    const edgeMap = new Map<number, { x: number; y: number }>();
-    const keyOf = (x: number, y: number) => x * (size + 1) + y;
-
-    for (let y = 0; y < size; y++) {
-        for (let x = 0; x < size; x++) {
-            if (!W(x, y)) continue;
-            if (!W(x, y - 1)) edgeMap.set(keyOf(x, y), { x: x + 1, y: y });
-            if (!W(x + 1, y)) edgeMap.set(keyOf(x + 1, y), { x: x + 1, y: y + 1 });
-            if (!W(x, y + 1)) edgeMap.set(keyOf(x + 1, y + 1), { x: x, y: y + 1 });
-            if (!W(x - 1, y)) edgeMap.set(keyOf(x, y + 1), { x: x, y: y });
-        }
-    }
-
-    // =========================
-    // 2. 串成闭合多边形
-    // =========================
-    const rawLoops: { x: number; y: number }[][] = [];
-    const visited = new Set<number>();
-
-    for (const startKey of edgeMap.keys()) {
-        if (visited.has(startKey)) continue;
-        const loop: { x: number; y: number }[] = [];
-        let curKey = startKey;
-        let guard = 0;
-        while (!visited.has(curKey) && guard++ < size * size * 4) {
-            visited.add(curKey);
-            loop.push({ x: Math.floor(curKey / (size + 1)), y: curKey % (size + 1) });
-            const next = edgeMap.get(curKey);
-            if (!next) break;
-            curKey = keyOf(next.x, next.y);
-        }
-        if (loop.length >= 3) rawLoops.push(loop);
-    }
-
-    // =========================
-    // 3. 简化
-    // =========================
-    const simplify = (loop: { x: number; y: number }[]) => {
-        const n = loop.length;
-        const out: { x: number; y: number }[] = [];
-        for (let i = 0; i < n; i++) {
-            const p0 = loop[(i - 1 + n) % n];
-            const p1 = loop[i];
-            const p2 = loop[(i + 1) % n];
-            const collinear = (p1.x - p0.x) * (p2.y - p1.y) === (p1.y - p0.y) * (p2.x - p1.x);
-            if (!collinear) out.push(p1);
-        }
-        return out.length >= 3 ? out : loop;
-    };
-    const simplified = rawLoops.map(simplify);
-
-    // =========================
-    // 4. 噪声（幅度调小，更平滑）
-    // =========================
-    const noise = (x: number, y: number, seed: number) => {
-        let h = seed * 374761393 + x * 668265263 + y * 1274126177;
-        h = (h ^ (h >> 13)) * 1274126177;
-        h = h ^ (h >> 16);
-        return (h & 0x7fffffff) / 0x7fffffff;
-    };
-    const PTS_PER_CELL = 3;
-    const BIG_AMP = 0.1;
-    const FINE_AMP = 0.04;
-    const BIG_FREQ = 0.2;
-    const FINE_FREQ = 2.9;
-
-    this.wallNoisyLoops = simplified.map((loop, loopIdx) => {
-        const pts: { x: number; y: number }[] = [];
-        const n = loop.length;
-        const seed = loopIdx * 0.7 + 1;
-
-        for (let i = 0; i < n; i++) {
-            const p1 = loop[i];
-            const p2 = loop[(i + 1) % n];
-            const horizontal = p1.y === p2.y;
-            const len = horizontal ? Math.abs(p2.x - p1.x) : Math.abs(p2.y - p1.y);
-            const steps = Math.max(1, Math.round(len * PTS_PER_CELL));
-
-            for (let s2 = 0; s2 < steps; s2++) {
-                const t = s2 / steps;
-                const wx = p1.x + (p2.x - p1.x) * t;
-                const wy = p1.y + (p2.y - p1.y) * t;
-
-                let j = 0;
-                if (s2 !== 0) {
-                    const big = (noise(wx * BIG_FREQ, wy * BIG_FREQ, seed + 11) - 0.5) * 2 * BIG_AMP;
-                    const fine = (noise(wx * FINE_FREQ, wy * FINE_FREQ, seed + 53) - 0.5) * 2 * FINE_AMP;
-                    j = big + fine;
-                }
-
-                pts.push({
-                    x: (wx + (horizontal ? 0 : j)) * cellW,
-                    y: (wy + (horizontal ? j : 0)) * cellH
-                });
-            }
-        }
-        return pts;
-    });
-
-    this.wallMaxJitterPx = (BIG_AMP + FINE_AMP) * Math.min(cellW, cellH);
-    this._wallEdgeBiome = this.currentBiome;
-  }
 
   private wallExteriorPath(visibleWalls: Wall[], blockers: Wall[]): Path2D {
     const path = new Path2D();
@@ -6551,34 +6433,178 @@ private bagLayout() {
 
     return path;
   }
+    private buildWallPolygons(): { x: number; y: number }[][] {
+    const map = MAPS[this.mapId] ?? MAPS[0];
+    const size = 256;
+    const cellW = map.width / size;
+    const cellH = map.height / size;
 
-  drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
+
+    // 1. 栅格化
+    const grid = new Uint8Array(size * size);
+    for (const w of this.walls) {
+      const x0 = Math.max(0, Math.floor(w.x / cellW));
+      const y0 = Math.max(0, Math.floor(w.y / cellH));
+      const x1 = Math.min(size - 1, Math.floor((w.x + w.w) / cellW));
+      const y1 = Math.min(size - 1, Math.floor((w.y + w.h) / cellH));
+      for (let y = y0; y <= y1; y++) {
+        for (let x = x0; x <= x1; x++) {
+          grid[y * size + x] = 1;
+        }
+      }
+    }
+
+    // 2. 提取轮廓边缘
+    const W = (x: number, y: number) =>
+      x >= 0 && y >= 0 && x < size && y < size && grid[y * size + x] === 1;
+
+    const edgeMap = new Map<number, { x: number; y: number }>();
+    const keyOf = (x: number, y: number) => x * (size + 1) + y;
+
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        if (!W(x, y)) continue;
+        if (!W(x, y - 1)) edgeMap.set(keyOf(x, y), { x: x + 1, y });
+        if (!W(x + 1, y)) edgeMap.set(keyOf(x + 1, y), { x: x + 1, y: y + 1 });
+        if (!W(x, y + 1)) edgeMap.set(keyOf(x + 1, y + 1), { x, y: y + 1 });
+        if (!W(x - 1, y)) edgeMap.set(keyOf(x, y + 1), { x, y });
+      }
+    }
+
+    const rawLoops: { x: number; y: number }[][] = [];
+    const visited = new Set<number>();
+
+    for (const startKey of edgeMap.keys()) {
+      if (visited.has(startKey)) continue;
+      const loop: { x: number; y: number }[] = [];
+      let curKey = startKey;
+      let guard = 0;
+      while (!visited.has(curKey) && guard++ < size * size * 4) {
+        visited.add(curKey);
+        loop.push({ x: Math.floor(curKey / (size + 1)), y: curKey % (size + 1) });
+        const next = edgeMap.get(curKey);
+        if (!next) break;
+        curKey = keyOf(next.x, next.y);
+      }
+      if (loop.length >= 3) rawLoops.push(loop);
+    }
+
+    // 3. 简化多边形 (去除直线上的冗余点)
+    const simplified = rawLoops.map(loop => {
+      const n = loop.length;
+      const out: { x: number; y: number }[] = [];
+      for (let i = 0; i < n; i++) {
+        const p0 = loop[(i - 1 + n) % n];
+        const p1 = loop[i];
+        const p2 = loop[(i + 1) % n];
+        const collinear =
+          (p1.x - p0.x) * (p2.y - p1.y) === (p1.y - p0.y) * (p2.x - p1.x);
+        if (!collinear) out.push(p1);
+      }
+      return out.length >= 3 ? out : loop;
+    });
+
+    // 4. 添加噪声 (确定性噪声)
+    // 使用简单的哈希函数代替随机数，保证墙壁形状固定
+    const noise = (x: number, y: number) => {
+      let h = x * 374761393 + y * 668265263;
+      h = (h ^ (h >> 13)) * 1274126177;
+      h = h ^ (h >> 16);
+      return (h & 0x7fffffff) / 0x7fffffff;
+    };
+
+    const PTS_PER_CELL = 1;  // 原值是 7。改为 0.5 意味着“每2个单位才产生一个点”。
+                                // 8000 的长度将只生成 4000 个点（原来是 56000+ 个），压力骤减。
+
+    const BIG_AMP = 0.4;       // 保持或稍微增大。点变少了，每个点的波动要稍微明显一点才看得出效果。
+    const FINE_AMP = 0.2;      // 保持或稍微增大。同上，细节波动要明显一点。
+
+    const BIG_FREQ = 0.08;     // 降低频率。原来的 0.1 在长距离上会产生很多波动，降低它可以减少计算次数。
+    const FINE_FREQ = 1.8;
+
+    return simplified.map((loop) => {
+      const pts: { x: number; y: number }[] = [];
+      const n = loop.length;
+
+      // 从 n-1 遍历到 0 (倒序)
+      for (let i = n - 1; i >= 0; i--) {
+        const p1 = loop[i];
+        const p2 = loop[(i - 1 + n) % n]; // 配合倒序，取前一个点
+
+        const horizontal = p1.y === p2.y;
+        const len = horizontal ? Math.abs(p2.x - p1.x) : Math.abs(p2.y - p1.y);
+        const steps = Math.max(1, Math.round(len * PTS_PER_CELL));
+
+        for (let s = 0; s < steps; s++) {
+          const t = s / steps;
+          const wx = p1.x + (p2.x - p1.x) * t;
+          const wy = p1.y + (p2.y - p1.y) * t;
+
+          let j = 0;
+          if (s !== 0) {
+            // 使用坐标作为噪声参数，而不是随机数
+            const big = (noise(Math.floor(wx * BIG_FREQ * 1000), Math.floor(wy * BIG_FREQ * 1000)) - 0.5) * 2 * BIG_AMP;
+            const fine = (noise(Math.floor(wx * FINE_FREQ * 1000), Math.floor(wy * FINE_FREQ * 1000)) - 0.5) * 2 * FINE_AMP;
+            j = big + fine;
+          }
+
+          pts.push({
+            x: (wx + (horizontal ? 0 : j)) * cellW,
+            y: (wy + (horizontal ? j : 0)) * cellH,
+          });
+        }
+      }
+
+      return pts;
+    });
+  }
+drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
     if (!this.walls.length) return;
 
-    // Draw directly from the authoritative wall rectangles received from the
-    // sim. The previous renderer converted walls to a 64px raster first; that
-    // rounded every rectangle outward and could also cache an empty grid before
-    // the server's wall list arrived (Garden then had collision but no visible
-    // walls). Direct rectangles keep the drawn footprint identical to collision
-    // for every biome.
-    const cx = c.x;
-    const cy = c.y;
-    const viewScale = this.viewZoom || 1;
-    const vw = this.w / viewScale;
-    const vh = this.h / viewScale;
-    const left = cx - vw / 2;
-    const right = cx + vw / 2;
-    const top = cy - vh / 2;
-    const bottom = cy + vh / 2;
-    const pad = 80 / viewScale;
+    const cx = Math.round(c.x * 100) / 100;
+    const cy = Math.round(c.y * 100) / 100;
+    const viewScale = Math.round((this.viewZoom || 1) * 100) / 100;
+    const vw = Math.round((this.w / viewScale) * 100) / 100;
+    const vh = Math.round((this.h / viewScale) * 100) / 100;
+    const left = Math.round((cx - vw / 2) * 100) / 100;
+    const right = Math.round((cx + vw / 2) * 100) / 100;
+    const top = Math.round((cy - vh / 2) * 100) / 100;
+    const bottom = Math.round((cy + vh / 2) * 100) / 100;
+    const pad = Math.round((2000 / viewScale) * 100) / 100;
 
-    const visibleWalls = this.walls.filter((w) =>
-      w.x + w.w >= left - pad && w.x <= right + pad &&
-      w.y + w.h >= top - pad && w.y <= bottom + pad,
-    );
-    if (!visibleWalls.length) return;
 
-    if (!this.wallPattern || this._wallPatternBiome !== this.currentBiome) {
+    // 获取多边形
+    const cacheKey = `${this.mapId}_${this.walls.length}`;
+    let polygons = this.wallPolygonsCache?.get(cacheKey);
+    if (!polygons) {
+      polygons = this.buildWallPolygons();
+      if (!this.wallPolygonsCache) this.wallPolygonsCache = new Map();
+      this.wallPolygonsCache.set(cacheKey, polygons);
+    }
+
+    // 视野裁剪（边界框检查）
+    const visiblePolygons = polygons.filter(poly => {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const pt of poly) {
+        if (pt.x < minX) minX = pt.x;
+        if (pt.x > maxX) maxX = pt.x;
+        if (pt.y < minY) minY = pt.y;
+        if (pt.y > maxY) maxY = pt.y;
+      }
+      return minX <= right && maxX >= left &&
+             minY <= bottom && maxY >= top;
+    });
+
+    if (!visiblePolygons.length) {
+      return;
+    }
+
+    // 纹理缓存
+    const biomeKey = this.currentBiome;
+    if (!this.wallPatternCache) this.wallPatternCache = new Map();
+    let cachedPattern = this.wallPatternCache.get(biomeKey);
+
+    if (!cachedPattern) {
       const s = 512, cv = document.createElement('canvas');
       cv.width = cv.height = s;
       const g = cv.getContext('2d');
@@ -6596,13 +6622,11 @@ private bagLayout() {
           g.fill();
         }
       }
-      this.wallPattern = ctx.createPattern(cv, 'repeat');
-      this._wallPatternBiome = this.currentBiome;
+      cachedPattern = ctx.createPattern(cv, 'repeat');
+      this.wallPatternCache.set(biomeKey, cachedPattern);
     }
-
-    const path = new Path2D();
-    for (const w of visibleWalls) path.rect(w.x, w.y, w.w, w.h);
-    const exteriorPath = this.wallExteriorPath(visibleWalls, this.walls);
+    this.wallPattern = cachedPattern;
+    this._wallPatternBiome = this.currentBiome;
 
     const bgConfig = BIOME_BACKGROUNDS[this.currentBiome];
     const wallColor = bgConfig?.wall_color || [80, 80, 80];
@@ -6613,33 +6637,71 @@ private bagLayout() {
 
     ctx.save();
     ctx.lineJoin = 'round';
-    // Exterior sides are stroked as individual path segments after internal
-    // shared spans have been removed. Butt caps prevent rounded caps from
-    // showing at places where two neighbouring wall rectangles meet.
-    ctx.lineCap = 'butt';
+    ctx.lineCap = 'round';
 
-    // Clip all decoration to the wall path. This prevents the art from
-    // extending past the collision rectangles, which made Desert/Ocean walls
-    // appear larger than the actual blocked area.
-    ctx.clip(path);
-    ctx.fillStyle = this.wallPattern || `rgb(${wallColor[0]},${wallColor[1]},${wallColor[2]})`;
-    ctx.fill(path);
-
-    if (!this.settings.lowQualityWall) {
-      ctx.strokeStyle = lightColor;
-      ctx.lineWidth = 28 * outlineScale;
-      ctx.stroke(exteriorPath);
+    // 1. 浅色粗描边
+    ctx.strokeStyle = lightColor;
+    ctx.lineWidth = 36 / outlineScale;
+    ctx.beginPath();
+    for (const poly of visiblePolygons) {
+      if (poly.length < 3) continue;
+      ctx.moveTo(poly[0].x, poly[0].y);
+      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+      ctx.closePath();
     }
+    ctx.stroke();
 
+    // 2. 填充纹理（裁剪到视野）
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(left - pad, top - pad, (right - left) + pad * 2, (bottom - top) + pad * 2);
+    ctx.clip();
+
+    ctx.fillStyle = this.wallPattern;
+    ctx.beginPath();
+    for (const poly of visiblePolygons) {
+      if (poly.length < 3) continue;
+      ctx.moveTo(poly[0].x, poly[0].y);
+      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+      ctx.closePath();
+    }
+    ctx.fill();
+    ctx.restore();
+
+    // 3. 深色细描边
     ctx.strokeStyle = darkColor;
-    ctx.lineWidth = (this.settings.lowQualityWall ? 4 : 10) * outlineScale;
-    ctx.stroke(exteriorPath);
+    ctx.lineWidth = 12 / outlineScale;
+    ctx.beginPath();
+    for (const poly of visiblePolygons) {
+      if (poly.length < 3) continue;
+      ctx.moveTo(poly[0].x, poly[0].y);
+      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+      ctx.closePath();
+    }
+    ctx.stroke();
+
+    // 4. 再次填充（修正内边框）
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(left - pad, top - pad, (right - left) + pad * 2, (bottom - top) + pad * 2);
+    ctx.clip();
+
+    ctx.fillStyle = this.wallPattern;
+    ctx.beginPath();
+    for (const poly of visiblePolygons) {
+      if (poly.length < 3) continue;
+      ctx.moveTo(poly[0].x, poly[0].y);
+      for (let i = 1; i < poly.length; i++) ctx.lineTo(poly[i].x, poly[i].y);
+      ctx.closePath();
+    }
+    ctx.fill();
+    ctx.restore();
 
     ctx.restore();
-  }
-
+}
   _drawWallsLegacy(ctx: CanvasRenderingContext2D, cameraOffset: { x: number; y: number }, wallData: string) {
     const size = Math.sqrt(wallData.length) | 0;
+
     const cellW = this.worldW / size;
     const cellH = this.worldH / size;
 
