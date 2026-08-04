@@ -2669,7 +2669,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private fade = 0; // 1 = fully covered
   private pendingScene: (() => void) | null = null;
   private mapFlash = 0;
-
+  private wallPatternCache: Map<string, CanvasPattern> = new Map();
   // menu state
   private playerName = "flower";
   private selectedMap = 0;
