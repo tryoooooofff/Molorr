@@ -167,6 +167,13 @@ export class Player {
   shield = 0;
   dirty = true;
   statsDirty = true;
+
+  // =====================================================================
+  // Bubble: defend-key rising-edge detection
+  // =====================================================================
+  /** Previous tick's defend flag, used to detect a fresh press of Shift/Contract. */
+  wasDefending = false;
+
   constructor(id: number) {
     this.id = id;
   }
@@ -304,127 +311,440 @@ export interface CollisionCounter {
 // Spatial Hashing for Walls (Static)
 // ---------------------------------------------------------------------
 
-const WALL_GRID_CELL_SIZE = 400; // Size of each cell for wall partitioning
+// =====================================================================
+// Polygon-based Wall Collider with BVH (O(log n) queries)
+// 多边形噪声墙壁 + 层次包围盒碰撞系统
+// =====================================================================
 
-interface WallGrid {
-  cells: Map<string, Wall[]>;
-  cellSize: number;
+interface WallEdge {
+  x1: number; y1: number;
+  x2: number; y2: number;
+  nx: number; ny: number;   // 预计算外法线（单位向量）
+  len: number;
 }
 
-function buildWallGrid(walls: Wall[], cellSize: number): WallGrid {
-  const cells = new Map<string, Wall[]>();
-  for (const wall of walls) {
-    const startX = Math.floor(wall.x / cellSize);
-    const startY = Math.floor(wall.y / cellSize);
-    const endX = Math.floor((wall.x + wall.w) / cellSize);
-    const endY = Math.floor((wall.y + wall.h) / cellSize);
+interface AABB {
+  minX: number; minY: number;
+  maxX: number; maxY: number;
+}
 
-    for (let gx = startX; gx <= endX; gx++) {
-      for (let gy = startY; gy <= endY; gy++) {
-        const key = `${gx},${gy}`;
-        if (!cells.has(key)) cells.set(key, []);
-        cells.get(key)!.push(wall);
+interface BVHNode {
+  aabb: AABB;
+  left: BVHNode | null;
+  right: BVHNode | null;
+  edges: WallEdge[] | null;  // 仅叶子节点存储边
+}
+
+interface GridCell {
+  edges: WallEdge[];
+}
+
+class PolygonWallCollider {
+  private polygons: { x: number; y: number }[][] = [];
+  private edges: WallEdge[] = [];
+  private bvh: BVHNode | null = null;
+  private spatialGrid: Map<string, GridCell> = new Map();
+  private gridCellSize: number;
+  private mapWidth: number;
+  private mapHeight: number;
+  private gridCols: number;
+  private gridRows: number;
+  wallMaxJitterPx = 0;
+
+  // 调试统计
+  bvhNodeCount = 0;
+  bvhLeafCount = 0;
+  bvhMaxDepth = 0;
+
+  constructor(
+    walls: Wall[],
+    mapWidth: number,
+    mapHeight: number,
+    gridResolution: number = 256,
+    private maxEdgesPerLeaf: number = 8
+  ) {
+    this.mapWidth = mapWidth;
+    this.mapHeight = mapHeight;
+    this.gridCellSize = Math.max(mapWidth, mapHeight) / gridResolution;
+    this.gridCols = Math.ceil(mapWidth / this.gridCellSize);
+    this.gridRows = Math.ceil(mapHeight / this.gridCellSize);
+
+    // =========================
+    // 预处理阶段（服务器启动一次性完成）
+    // =========================
+    const t0 = performance.now();
+
+    // 1. AABB 墙壁栅格化为二进制网格
+    const grid = this.rasterizeWalls(walls, gridResolution);
+
+    // 2. 提取有向轮廓边（逆时针闭合多边形）
+    const loops = this.extractContours(grid, gridResolution);
+
+    // 3. 简化：剔除共线中间点
+    const simplified = loops.map(l => this.simplifyLoop(l));
+
+    // 4. 加噪声并转换到世界坐标
+    const cellW = mapWidth / gridResolution;
+    const cellH = mapHeight / gridResolution;
+    this.polygons = simplified.map((loop, idx) =>
+      this.addNoise(loop, idx, cellW, cellH)
+    );
+
+    // 5. 构建带预计算法线的边表
+    for (const poly of this.polygons) {
+      const n = poly.length;
+      for (let i = 0; i < n; i++) {
+        const p1 = poly[i];
+        const p2 = poly[(i + 1) % n];
+        const dx = p2.x - p1.x;
+        const dy = p2.y - p1.y;
+        const len = Math.hypot(dx, dy);
+        if (len < 0.001) continue;
+        // 外法线：轮廓为逆时针，(-dy, dx) 朝外
+        const nx = -dy / len;
+        const ny = dx / len;
+        this.edges.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, nx, ny, len });
+      }
+    }
+
+    // 6. 构建 BVH 层次包围盒
+    this.bvh = this.buildBVH(this.edges);
+
+    // 7. 构建空间网格（作为 broad-phase 备选/兼容层）
+    this.buildSpatialGrid();
+
+    const t1 = performance.now();
+    console.log(
+      `[PolygonWallCollider] Preprocessed ${walls.length} walls => ` +
+      `${this.edges.length} edges, ${this.bvhNodeCount} BVH nodes ` +
+      `(${this.bvhLeafCount} leaves, depth ${this.bvhMaxDepth}), ` +
+      `${this.spatialGrid.size} grid cells. ` +
+      `Took ${(t1 - t0).toFixed(2)}ms`
+    );
+  }
+
+  // 1. 栅格化：将 AABB 墙壁填充到二进制网格
+  private rasterizeWalls(walls: Wall[], size: number): Uint8Array {
+    const grid = new Uint8Array(size * size);
+    const cellW = this.mapWidth / size;
+    const cellH = this.mapHeight / size;
+
+    for (const w of walls) {
+      const x0 = Math.max(0, Math.floor(w.x / cellW));
+      const y0 = Math.max(0, Math.floor(w.y / cellH));
+      const x1 = Math.min(size - 1, Math.floor((w.x + w.w) / cellW));
+      const y1 = Math.min(size - 1, Math.floor((w.y + w.h) / cellH));
+      for (let y = y0; y <= y1; y++) {
+        for (let x = x0; x <= x1; x++) {
+          grid[y * size + x] = 1;
+        }
+      }
+    }
+    return grid;
+  }
+
+  // 2. 轮廓提取：栅格 → 有向边 → 闭合多边形
+  private extractContours(grid: Uint8Array, size: number): { x: number; y: number }[][] {
+    const W = (x: number, y: number) =>
+      x >= 0 && y >= 0 && x < size && y < size && grid[y * size + x] === 1;
+
+    const edgeMap = new Map<number, { x: number; y: number }>();
+    const keyOf = (x: number, y: number) => x * (size + 1) + y;
+
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        if (!W(x, y)) continue;
+        if (!W(x, y - 1)) edgeMap.set(keyOf(x, y), { x: x + 1, y });
+        if (!W(x + 1, y)) edgeMap.set(keyOf(x + 1, y), { x: x + 1, y: y + 1 });
+        if (!W(x, y + 1)) edgeMap.set(keyOf(x + 1, y + 1), { x, y: y + 1 });
+        if (!W(x - 1, y)) edgeMap.set(keyOf(x, y + 1), { x, y });
+      }
+    }
+
+    const rawLoops: { x: number; y: number }[][] = [];
+    const visited = new Set<number>();
+
+    for (const startKey of edgeMap.keys()) {
+      if (visited.has(startKey)) continue;
+      const loop: { x: number; y: number }[] = [];
+      let curKey = startKey;
+      let guard = 0;
+      while (!visited.has(curKey) && guard++ < size * size * 4) {
+        visited.add(curKey);
+        loop.push({ x: Math.floor(curKey / (size + 1)), y: curKey % (size + 1) });
+        const next = edgeMap.get(curKey);
+        if (!next) break;
+        curKey = keyOf(next.x, next.y);
+      }
+      if (loop.length >= 3) rawLoops.push(loop);
+    }
+    return rawLoops;
+  }
+
+  // 3. 简化：剔除共线中间点
+  private simplifyLoop(loop: { x: number; y: number }[]): { x: number; y: number }[] {
+    const n = loop.length;
+    const out: { x: number; y: number }[] = [];
+    for (let i = 0; i < n; i++) {
+      const p0 = loop[(i - 1 + n) % n];
+      const p1 = loop[i];
+      const p2 = loop[(i + 1) % n];
+      const collinear =
+        (p1.x - p0.x) * (p2.y - p1.y) === (p1.y - p0.y) * (p2.x - p1.x);
+      if (!collinear) out.push(p1);
+    }
+    return out.length >= 3 ? out : loop;
+  }
+
+    private addNoise(
+    loop: { x: number; y: number }[],
+    loopIdx: number, // 保留参数以兼容调用，但内部不再使用
+    cellW: number,
+    cellH: number
+  ): { x: number; y: number }[] {
+    // 1. 优化后的噪声函数：去掉了 seed 参数，直接基于坐标计算
+    // 这保证了全地图的噪声风格统一
+    const noise = (x: number, y: number) => {
+      // 使用大质数防止产生规律性
+      let h = x * 374761393 + y * 668265263;
+      h = (h ^ (h >> 13)) * 1274126177;
+      h = h ^ (h >> 16);
+      return (h & 0x7fffffff) / 0x7fffffff;
+    };
+
+    // 2. 参数配置
+    const PTS_PER_CELL = 1;  // 原值是 7。改为 0.5 意味着“每2个单位才产生一个点”。
+                                // 8000 的长度将只生成 4000 个点（原来是 56000+ 个），压力骤减。
+
+    const BIG_AMP = 0.4;       // 保持或稍微增大。点变少了，每个点的波动要稍微明显一点才看得出效果。
+    const FINE_AMP = 0.2;      // 保持或稍微增大。同上，细节波动要明显一点。
+
+    const BIG_FREQ = 0.08;     // 降低频率。原来的 0.1 在长距离上会产生很多波动，降低它可以减少计算次数。
+    const FINE_FREQ = 1.8;
+
+    const pts: { x: number; y: number }[] = [];
+    const n = loop.length;
+
+    for (let i = 0; i < n; i++) {
+      const p1 = loop[i];
+      const p2 = loop[(i + 1) % n];
+      const horizontal = p1.y === p2.y;
+      const len = horizontal ? Math.abs(p2.x - p1.x) : Math.abs(p2.y - p1.y);
+
+      // 限制最大步数，防止超长墙壁产生过多顶点
+      const steps = Math.max(1, Math.min(Math.round(len * PTS_PER_CELL), 200));
+
+      for (let s = 0; s < steps; s++) {
+        const t = s / steps;
+        const wx = p1.x + (p2.x - p1.x) * t;
+        const wy = p1.y + (p2.y - p1.y) * t;
+
+        let j = 0;
+        if (s !== 0) { // 跳过顶点，保持角落锐利
+          // 【核心修改】传入坐标作为噪声种子，不再传 loopIdx
+            const big = (noise(Math.floor(wx * BIG_FREQ * 1000), Math.floor(wy * BIG_FREQ * 1000)) - 0.5) * 2 * BIG_AMP;
+            const fine = (noise(Math.floor(wx * FINE_FREQ * 1000), Math.floor(wy * FINE_FREQ * 1000)) - 0.5) * 2 * FINE_AMP;
+          j = big + fine;
+        }
+
+        pts.push({
+          x: (wx + (horizontal ? 0 : j)) * cellW,
+          y: (wy + (horizontal ? j : 0)) * cellH,
+        });
+      }
+    }
+
+    // 更新最大抖动值
+    this.wallMaxJitterPx = Math.max(
+      this.wallMaxJitterPx,
+      (BIG_AMP + FINE_AMP) * Math.min(cellW, cellH)
+    );
+    return pts;
+  }
+
+  // 5. BVH 构建（SAH 中位分割）
+  private buildBVH(edges: WallEdge[]): BVHNode | null {
+    if (edges.length === 0) return null;
+    return this.buildBVHRecursive(edges, 0);
+  }
+
+  private buildBVHRecursive(edges: WallEdge[], depth: number): BVHNode {
+    this.bvhNodeCount++;
+    this.bvhMaxDepth = Math.max(this.bvhMaxDepth, depth);
+
+    const aabb = this.computeEdgesAABB(edges);
+
+    if (edges.length <= this.maxEdgesPerLeaf) {
+      this.bvhLeafCount++;
+      return { aabb, left: null, right: null, edges };
+    }
+
+    const extentX = aabb.maxX - aabb.minX;
+    const extentY = aabb.maxY - aabb.minY;
+    const axis = extentX >= extentY ? 0 : 1;
+
+    const sorted = edges.slice().sort((a, b) => {
+      const ca = axis === 0 ? (a.x1 + a.x2) * 0.5 : (a.y1 + a.y2) * 0.5;
+      const cb = axis === 0 ? (b.x1 + b.x2) * 0.5 : (b.y1 + b.y2) * 0.5;
+      return ca - cb;
+    });
+
+    const mid = Math.floor(sorted.length / 2);
+    const left = this.buildBVHRecursive(sorted.slice(0, mid), depth + 1);
+    const right = this.buildBVHRecursive(sorted.slice(mid), depth + 1);
+
+    return { aabb, left, right, edges: null };
+  }
+
+  private computeEdgesAABB(edges: WallEdge[]): AABB {
+    let minX = Infinity, minY = Infinity;
+    let maxX = -Infinity, maxY = -Infinity;
+    for (const e of edges) {
+      minX = Math.min(minX, e.x1, e.x2);
+      minY = Math.min(minY, e.y1, e.y2);
+      maxX = Math.max(maxX, e.x1, e.x2);
+      maxY = Math.max(maxY, e.y1, e.y2);
+    }
+    return { minX, minY, maxX, maxY };
+  }
+
+  // 6. 空间网格（broad-phase / 兼容层）
+  private buildSpatialGrid() {
+    for (const e of this.edges) {
+      const x0 = Math.floor(Math.min(e.x1, e.x2) / this.gridCellSize);
+      const y0 = Math.floor(Math.min(e.y1, e.y2) / this.gridCellSize);
+      const x1 = Math.floor(Math.max(e.x1, e.x2) / this.gridCellSize);
+      const y1 = Math.floor(Math.max(e.y1, e.y2) / this.gridCellSize);
+
+      for (let gy = y0; gy <= y1; gy++) {
+        for (let gx = x0; gx <= x1; gx++) {
+          const key = `${gx},${gy}`;
+          let cell = this.spatialGrid.get(key);
+          if (!cell) {
+            cell = { edges: [] };
+            this.spatialGrid.set(key, cell);
+          }
+          cell.edges.push(e);
+        }
       }
     }
   }
-  return { cells, cellSize };
-}
 
-function getWallsNear(wallGrid: WallGrid, x: number, y: number, radius: number): Wall[] {
-  const results = new Set<Wall>();
-  const minGX = Math.floor((x - radius) / wallGrid.cellSize);
-  const maxGX = Math.floor((x + radius) / wallGrid.cellSize);
-  const minGY = Math.floor((y - radius) / wallGrid.cellSize);
-  const maxGY = Math.floor((y + radius) / wallGrid.cellSize);
+  // =========================
+  // 7. 碰撞查询 API
+  // =========================
 
-  for (let gx = minGX; gx <= maxGX; gx++) {
+  /** 圆与多边形墙壁碰撞检测（主 API）。使用 BVH 快速排除，平均 O(log n)。 */
+  collideCircle(x: number, y: number, r: number, counter?: CollisionCounter): [number, number] {
+    if (!this.bvh) return [x, y];
+    for (let pass = 0; pass < 3; pass++) {
+      let moved = false;
+      const candidates = this.queryBVH(this.bvh, x, y, r, counter);
+      for (const e of candidates) {
+        if (counter) counter.n++;
+        const result = this.circleSegmentCollide(x, y, r, e);
+        if (result) {
+          moved = true;
+          x = result.x;
+          y = result.y;
+        }
+      }
+      if (!moved) break;
+    }
+    return [x, y];
+  }
+
+  /** 带移动步进的圆碰撞（防止高速穿透）。 */
+  moveCircle(
+    x: number, y: number, dx: number, dy: number, r: number, counter?: CollisionCounter
+  ): [number, number] {
+    const dist = Math.hypot(dx, dy);
+    const maxStep = Math.max(4, r * 0.45);
+    const steps = Math.max(1, Math.ceil(dist / maxStep));
+    const sx = dx / steps;
+    const sy = dy / steps;
+    for (let i = 0; i < steps; i++) {
+      x += sx;
+      y += sy;
+      [x, y] = this.collideCircle(x, y, r, counter);
+    }
+    return [x, y];
+  }
+
+  /** 兼容旧接口：获取某位置附近的墙壁边（空间网格查询）。 */
+  getWallsNear(x: number, y: number, radius: number): WallEdge[] {
+    const results = new Set<WallEdge>();
+    const minGX = Math.floor((x - radius) / this.gridCellSize);
+    const maxGX = Math.floor((x + radius) / this.gridCellSize);
+    const minGY = Math.floor((y - radius) / this.gridCellSize);
+    const maxGY = Math.floor((y + radius) / this.gridCellSize);
+
     for (let gy = minGY; gy <= maxGY; gy++) {
-      const key = `${gx},${gy}`;
-      const cell = wallGrid.cells.get(key);
-      if (cell) {
-        for (const w of cell) results.add(w);
+      for (let gx = minGX; gx <= maxGX; gx++) {
+        const cell = this.spatialGrid.get(`${gx},${gy}`);
+        if (cell) {
+          for (const e of cell.edges) results.add(e);
+        }
       }
     }
+    return Array.from(results);
   }
-  return Array.from(results);
-}
 
-// ---------------------------------------------------------------------
+  // 8. BVH 查询（核心 O(log n) 路径）
+  private queryBVH(node: BVHNode, x: number, y: number, r: number, counter?: CollisionCounter): WallEdge[] {
+    const results: WallEdge[] = [];
+    const stack: BVHNode[] = [node];
 
-function collideWalls(
-  wallGrid: WallGrid, // Changed signature to use WallGrid
-  x: number,
-  y: number,
-  r: number,
-  counter?: CollisionCounter
-): [number, number] {
-  // Optimization: Only check walls in the local grid area
-  const relevantWalls = getWallsNear(wallGrid, x, y, r);
-
-  // Repeat a few times because being pushed out of one rectangle can put the
-  // circle into a neighbouring rectangle at corners.
-  for (let pass = 0; pass < 3; pass++) {
-    let moved = false;
-    for (const w of relevantWalls) {
+    while (stack.length > 0) {
+      const cur = stack.pop()!;
       if (counter) counter.n++;
-      const cx = clamp(x, w.x, w.x + w.w);
-      const cy = clamp(y, w.y, w.y + w.h);
-      const dx = x - cx;
-      const dy = y - cy;
-      const d2 = dx * dx + dy * dy;
-      if (d2 >= r * r) continue;
-      moved = true;
-      if (d2 === 0) {
-        // The centre is inside the rectangle. Choose the nearest face rather
-        // than an arbitrary side so correction is small and deterministic.
-        const faces = [
-          { distance: x - w.x, axis: "x" as const, value: w.x - r },
-          { distance: w.x + w.w - x, axis: "x" as const, value: w.x + w.w + r },
-          { distance: y - w.y, axis: "y" as const, value: w.y - r },
-          { distance: w.y + w.h - y, axis: "y" as const, value: w.y + w.h + r },
-        ];
-        const face = faces.reduce((best, candidate) =>
-          candidate.distance < best.distance ? candidate : best
-        );
-        if (face.axis === "x") x = face.value;
-        else y = face.value;
+      if (!this.circleAABBOverlap(x, y, r, cur.aabb)) continue;
+      if (cur.edges) {
+        results.push(...cur.edges);
       } else {
-        const d = Math.sqrt(d2);
-        const push = r - d;
-        x += (dx / d) * push;
-        y += (dy / d) * push;
+        if (cur.left) stack.push(cur.left);
+        if (cur.right) stack.push(cur.right);
       }
     }
-    if (!moved) break;
+    return results;
   }
-  return [x, y];
-}
 
-/**
- * Move a circle in short collision-tested steps. Testing only the final point
- * lets a delayed/throttled tick jump completely across a wall (most visible
- * after returning to a background browser tab).
- */
-function moveCircleWithWalls(
-  wallGrid: WallGrid, // Changed signature
-  x: number,
-  y: number,
-  dx: number,
-  dy: number,
-  r: number,
-  counter?: CollisionCounter
-): [number, number] {
-  const distance = Math.hypot(dx, dy);
-  const maxStep = Math.max(4, r * 0.45);
-  const steps = Math.max(1, Math.ceil(distance / maxStep));
-  const stepX = dx / steps;
-  const stepY = dy / steps;
-  for (let i = 0; i < steps; i++) {
-    x += stepX;
-    y += stepY;
-    [x, y] = collideWalls(wallGrid, x, y, r, counter);
+  private circleAABBOverlap(cx: number, cy: number, r: number, aabb: AABB): boolean {
+    const closestX = Math.max(aabb.minX, Math.min(cx, aabb.maxX));
+    const closestY = Math.max(aabb.minY, Math.min(cy, aabb.maxY));
+    const dx = cx - closestX;
+    const dy = cy - closestY;
+    return dx * dx + dy * dy <= r * r;
   }
-  return [x, y];
+
+  // 9. 精确碰撞：圆 vs 线段
+  private circleSegmentCollide(
+    cx: number, cy: number, r: number, e: WallEdge
+  ): { x: number; y: number } | null {
+    const { x1, y1, x2, y2 } = e;
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const len2 = dx * dx + dy * dy;
+    let t = len2 === 0 ? 0 : ((cx - x1) * dx + (cy - y1) * dy) / len2;
+    t = Math.max(0, Math.min(1, t));
+
+    const closestX = x1 + t * dx;
+    const closestY = y1 + t * dy;
+
+    const dcx = cx - closestX;
+    const dcy = cy - closestY;
+    const dist2 = dcx * dcx + dcy * dcy;
+
+    if (dist2 >= r * r) return null;
+
+    if (dist2 < 0.0001) {
+      return { x: cx + e.nx * r, y: cy + e.ny * r };
+    }
+
+    const dist = Math.sqrt(dist2);
+    const push = r - dist;
+    return { x: cx + (dcx / dist) * push, y: cy + (dcy / dist) * push };
+  }
 }
 
 interface GameServerOptions {
@@ -437,10 +757,15 @@ export class GameServer {
   private worlds: World[] = MAPS.map(() => ({ mobs: [], drops: [] }));
 
   // Pre-computed wall grids for each map
-  private wallGrids: WallGrid[] = [];
+  private wallColliders: PolygonWallCollider[] = [];
 
   private tickCount = 0;
   private mobCapScale: number;
+
+  /** 墙壁碰撞累积计时器（秒），用于 20fps 批量碰撞 */
+  private wallCollisionAccumulator = 0;
+  /** 墙壁碰撞间隔：20fps = 50ms */
+  private readonly WALL_COLLISION_INTERVAL = 1 / 20;
 
   /** All active squads, keyed by their 6-character code. */
   private squads = new Map<string, Squad>();
@@ -459,9 +784,9 @@ export class GameServer {
         ? options.mobCapScale ?? 1
         : 1;
 
-    // Build spatial hash for walls for each map
+    // Build polygon wall colliders with BVH for each map
     for (const map of MAPS) {
-      this.wallGrids.push(buildWallGrid(map.walls, WALL_GRID_CELL_SIZE));
+      this.wallColliders.push(new PolygonWallCollider(map.walls, map.width, map.height, 256));
     }
 
     for (const map of MAPS) {
@@ -561,6 +886,55 @@ export class GameServer {
       }
     }
   }
+
+
+private wallCollisionBatch(dt: number, players: Player[]) {
+  this.wallCollisionAccumulator += dt;
+  if (this.wallCollisionAccumulator < this.WALL_COLLISION_INTERVAL) return;
+  this.wallCollisionAccumulator -= this.WALL_COLLISION_INTERVAL;
+
+  const VIEW_RADIUS = 1300;
+  const VIEW_RADIUS_SQ = VIEW_RADIUS * VIEW_RADIUS;
+
+  // ---- 玩家墙壁碰撞 ----
+  for (const p of players) {
+    if (!p.alive) continue;
+    // 每个玩家只做自己的碰撞
+    const collider = this.wallColliders[p.mapId];
+    [p.x, p.y] = collider.collideCircle(p.x, p.y, PLAYER_RADIUS, this.collisionCounter);
+  }
+
+  // ---- Mob 墙壁碰撞 ----
+  for (let m = 0; m < MAPS.length; m++) {
+    const map = MAPS[m];
+    const collider = this.wallColliders[m];
+    // 收集该地图的玩家位置
+    const mapPlayers = players.filter(p => p.mapId === m && p.alive);
+    const playerPositions = mapPlayers.map(p => ({ x: p.x, y: p.y }));
+
+    for (const mob of this.worlds[m].mobs) {
+      // 检查是否在玩家视野内
+      let inView = false;
+      if (mob.ownerId !== 0) {
+        inView = true; // 召唤物始终在视野内
+      } else {
+        for (const pos of playerPositions) {
+          const dx = mob.x - pos.x;
+          const dy = mob.y - pos.y;
+          if (dx * dx + dy * dy < VIEW_RADIUS_SQ) {
+            inView = true;
+            break;
+          }
+        }
+      }
+
+      // 不在视野内，跳过墙壁碰撞
+      if (!inView) continue;
+
+      [mob.x, mob.y] = collider.collideCircle(mob.x, mob.y, mob.radius, this.collisionCounter);
+    }
+  }
+}
 
   drainKicks(): number[] {
     const ids: number[] = [];
@@ -1147,7 +1521,7 @@ export class GameServer {
   // --------------------------------------------------------------- spawning
   private spawnPlayer(p: Player) {
     const map = MAPS[p.mapId];
-    const wallGrid = this.wallGrids[p.mapId];
+    const collider = this.wallColliders[p.mapId];
     const spawnTiles = findSpawnTiles(p.mapId);
     if (spawnTiles.length > 0) {
       const tile = spawnTiles[Math.floor(Math.random() * spawnTiles.length)];
@@ -1156,7 +1530,7 @@ export class GameServer {
       for (let tries = 0; tries < 20; tries++) {
         const x = tile.col * tileW + Math.random() * tileW;
         const y = tile.row * tileH + Math.random() * tileH;
-        const [cx, cy] = collideWalls(wallGrid, x, y, 40);
+        const [cx, cy] = collider.collideCircle(x, y, 40);
         if (Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01) {
           p.x = x; p.y = y; p.hp = p.maxHp; p.alive = true; p.statsDirty = true;
           return;
@@ -1166,7 +1540,7 @@ export class GameServer {
     for (let tries = 0; tries < 60; tries++) {
       const x = 200 + Math.random() * (map.width - 400);
       const y = 200 + Math.random() * (map.height - 400);
-      const [cx, cy] = collideWalls(wallGrid, x, y, 40);
+      const [cx, cy] = collider.collideCircle(x, y, 40);
       if (Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01) { p.x = x; p.y = y; break; }
       p.x = x; p.y = y;
     }
@@ -1175,7 +1549,7 @@ export class GameServer {
 
   private spawnMob(mapId: number) {
     const map = MAPS[mapId];
-    const wallGrid = this.wallGrids[mapId];
+    const collider = this.wallColliders[mapId];
     const type = map.mobs[(Math.random() * map.mobs.length) | 0];
     let rarity = 0, x = 0, y = 0, placed = false;
     for (let tries = 0; tries < 80; tries++) {
@@ -1185,7 +1559,7 @@ export class GameServer {
       if (zone < "A" || zone > "G") continue;
       const cr = rollZoneRarity(zone);
       const crRadius = MOBS[type].radius * mobSizeMult(cr);
-      const [cx, cy] = collideWalls(wallGrid, x, y, crRadius + 6);
+      const [cx, cy] = collider.collideCircle(x, y, crRadius + 6);
       if (Math.abs(cx - x) >= 0.01 || Math.abs(cy - y) >= 0.01) continue;
       rarity = cr; placed = true; break;
     }
@@ -1256,23 +1630,18 @@ export class GameServer {
     for (const c of this.clients.values()) if (c.player) players.push(c.player);
     for (const p of players) this.updatePlayer(p, dt, players);
     for (let m = 0; m < MAPS.length; m++) this.updateWorld(m, dt, players);
-    for (const p of players) {
-      if (!p.alive) continue;
-      const map = MAPS[p.mapId];
-      const wallGrid = this.wallGrids[p.mapId];
-      [p.x, p.y] = collideWalls(wallGrid, p.x, p.y, PLAYER_RADIUS, this.collisionCounter);
-      p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
-      p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
-    }
+    // 玩家墙壁碰撞已移至 wallCollisionBatch() 以 20fps 批量处理
     for (const p of players) this.updatePetals(p, dt);
     for (const p of players) this.pickupDrops(p);
+    // ⭐ 20fps 批量墙壁碰撞（所有实体统一处理，降低 CPU 占用）
+    this.wallCollisionBatch(dt, players);
     for (const c of this.clients.values()) this.sendState(c);
   }
 
   private updatePlayer(p: Player, dt: number, players: Player[]) {
     if (!p.alive) return;
     const map = MAPS[p.mapId];
-    const wallGrid = this.wallGrids[p.mapId];
+    const collider = this.wallColliders[p.mapId];
     let speedBonus = 0;
     for (let i = 0; i < SLOT_COUNT; i++) {
       const cell = p.slots[i];
@@ -1288,7 +1657,7 @@ export class GameServer {
     const ny = mag > 1 ? p.inDy / mag : p.inDy;
     p.vx += (nx * speed - p.vx) * Math.min(1, dt * 9);
     p.vy += (ny * speed - p.vy) * Math.min(1, dt * 9);
-    [p.x, p.y] = moveCircleWithWalls(wallGrid, p.x, p.y, p.vx * dt, p.vy * dt, PLAYER_RADIUS, this.collisionCounter);
+    [p.x, p.y] = collider.moveCircle(p.x, p.y, p.vx * dt, p.vy * dt, PLAYER_RADIUS, this.collisionCounter);
     p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
     p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
     for (const o of players) {
@@ -1303,12 +1672,18 @@ export class GameServer {
         p.y += (dy / d) * push;
       }
     }
-    [p.x, p.y] = collideWalls(wallGrid, p.x, p.y, PLAYER_RADIUS, this.collisionCounter);
     p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
     p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
     p.hurtCd = Math.max(0, p.hurtCd - dt);
     const attack = (p.flags & 1) !== 0;
     const defend = (p.flags & 2) !== 0;
+
+    // Bubble: trigger on rising edge of defend (Shift/Contract key)
+    if (defend && !p.wasDefending) {
+      this.breakBubbles(p);
+    }
+    p.wasDefending = defend;
+
     // Third Eye petals expand the orbit range. The bonus is added to the base
     // target so the smooth interpolation still works with spread/defend modes.
     const eyeBonus = thirdEyeOrbitBonus(p.slots);
@@ -1316,6 +1691,67 @@ export class GameServer {
     p.orbit += (targetOrbit - p.orbit) * Math.min(1, dt * 6);
     p.baseAngle += dt * (attack ? 3.4 : 2.2);
     this.applyLevel(p);
+  }
+
+  /**
+   * Break all active Bubble petals when the player presses Defend (Shift/Contract).
+   * Each bubble applies a rarity-scaled push force away from the player.
+   */
+  private breakBubbles(p: Player) {
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const cell = p.slots[i];
+      if (!cell) continue;
+      const def = ITEMS[cell.item];
+      if (!def || def.name !== "Bubble") continue;
+      const st = p.petals[i];
+      if (!st || !st.alive) continue;
+
+      // Calculate push force based on rarity (mirrors rarityMult scaling)
+      const mult = rarityMult(cell.rarity);
+      const basePush = 800;
+      const pushForce = basePush * Math.min(4.0, mult);
+
+      const dx = p.x - st.x;
+      const dy = p.y - st.y;
+      const dist = Math.hypot(dx, dy);
+
+      let vx: number;
+      let vy: number;
+      if (dist > 0.01) {
+        vx = (dx / dist) * pushForce;
+        vy = (dy / dist) * pushForce;
+      } else {
+        const angle = Math.random() * Math.PI * 2;
+        vx = Math.cos(angle) * pushForce;
+        vy = Math.sin(angle) * pushForce;
+      }
+
+      // Apply impulse to player velocity
+      p.vx += vx;
+      p.vy += vy;
+
+      // Also apply the push to any alive Moon petal. Petals have no velocity
+      // field (they interpolate toward their orbit target), so we apply the
+      // push as a position displacement; the orbit interpolation will spring
+      // the Moon back toward its orbit over the next few frames, producing a
+      // visible "knocked away then returns" effect.
+      for (let j = 0; j < SLOT_COUNT; j++) {
+        if (j === i) continue;
+        const mcell = p.slots[j];
+        if (!mcell) continue;
+        const mdef = ITEMS[mcell.item];
+        if (!mdef || !(mdef.name ?? "").toLowerCase().includes("moon")) continue;
+        const mst = p.petals[j];
+        if (!mst || !mst.alive) continue;
+        mst.x += vx * 0.1;
+        mst.y += vy * 0.1;
+      }
+
+      // Break the bubble: kill petal and start reload
+      st.alive = false;
+      st.hp = 0;
+      st.timer = def.reload > 0 ? def.reload : 0.001;
+    }
   }
 
   private updatePetals(p: Player, dt: number) {
@@ -1327,6 +1763,28 @@ export class GameServer {
       if (!cell) continue;
       if (orbitsAsPetal(ITEMS[cell.item].kind)) liveCount++;
     }
+
+    // -----------------------------------------------------------------
+    // Moon orbit center: if the player has a Moon petal, every other
+    // petal orbits around the Moon instead of around the player body.
+    // The Moon itself still orbits the player. We snapshot the Moon's
+    // current position here (1-frame lag, imperceptible) so the order
+    // in which petals are processed does not matter.
+    // -----------------------------------------------------------------
+    let moonSt: PetalState | null = null;
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const cell = p.slots[i];
+      if (!cell) continue;
+      const def = ITEMS[cell.item];
+      if ((def.name ?? "").toLowerCase().includes("moon")) {
+        moonSt = p.petals[i];
+        break;
+      }
+    }
+    const moonAlive = !!moonSt && moonSt.alive;
+    const orbitCenterX = moonAlive ? moonSt!.x : p.x;
+    const orbitCenterY = moonAlive ? moonSt!.y : p.y;
+
     let index = 0;
     for (let i = 0; i < SLOT_COUNT; i++) {
       const cell = p.slots[i];
@@ -1359,10 +1817,14 @@ export class GameServer {
       // Magnets and summons (eggs) stay close like Rose/Shell — they never
       // spread out no matter the spread flag, so their visual radius stays
       // tight while other petals still fan out on attack.
-      const staysTight = isSummon || (def.name ?? "").toLowerCase().includes("magnet");
+      const staysTight = isSummon || (def.name ?? "").toLowerCase().includes("magnet") || (def.name ?? "").toLowerCase().includes("bubble");
       const orbitRadius = (absorbs || staysTight) ? Math.min(p.orbit, 62) : p.orbit;
-      const tx = p.x + Math.cos(slotAngle) * orbitRadius;
-      const ty = p.y + Math.sin(slotAngle) * orbitRadius;
+      // Moon orbits the player; every other petal orbits the Moon (if alive).
+      const isMoon = (def.name ?? "").toLowerCase().includes("moon");
+      const cx = isMoon ? p.x : orbitCenterX;
+      const cy = isMoon ? p.y : orbitCenterY;
+      const tx = cx + Math.cos(slotAngle) * orbitRadius;
+      const ty = cy + Math.sin(slotAngle) * orbitRadius;
       if (absorbs) {
         const missing = def.heal ? Math.max(0, p.maxHp - p.hp) : Math.max(0, p.maxHp - p.shield);
         st.specialTimer = Math.max(0, st.specialTimer - dt);
@@ -1400,7 +1862,9 @@ export class GameServer {
         if (p.shield < maxShield) { p.shield = Math.min(maxShield, p.shield + def.shieldPerSec * rarityMult(cell.rarity) * dt); p.statsDirty = true; }
       }
       const dmg = def.damage * rarityMult(cell.rarity);
-      const pr = def.radius * (1 + cell.rarity * 0.06);
+      // Moon radius x4: both collision and visual are scaled up 4x.
+      const isMoonRadius = (def.name ?? "").toLowerCase().includes("moon");
+      const pr = def.radius * (1 + cell.rarity * 0.06) * (isMoonRadius ? 4 : 1);
       let targetMob: Mob | null = null;
       let targetDist = Infinity;
       let totalIncoming = 0;
@@ -1491,11 +1955,11 @@ export class GameServer {
 private updateWorld(mapId: number, dt: number, players: Player[]) {
   const map = MAPS[mapId];
   const world = this.worlds[mapId];
-  const wallGrid = this.wallGrids[mapId];
+  const collider = this.wallColliders[mapId];
   const here = players.filter((p) => p.mapId === mapId && p.alive);
 
   // ===== ✅ 视野裁剪范围 =====
-  const VIEW_RADIUS = 2000; // 只处理玩家周围 2000 像素内的生物
+  const VIEW_RADIUS = 1300; // 只处理玩家周围 2000 像素内的生物
   const VIEW_RADIUS_SQ = VIEW_RADIUS * VIEW_RADIUS;
 
   // ===== 构建玩家位置集合（用于快速距离检查） =====
@@ -1617,7 +2081,7 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
     mob.y += mob.vy * dt;
     mob.x = clamp(mob.x, mob.radius, map.width - mob.radius);
     mob.y = clamp(mob.y, mob.radius, map.height - mob.radius);
-    [mob.x, mob.y] = collideWalls(wallGrid, mob.x, mob.y, mob.radius, this.collisionCounter);
+    // Mob 墙壁碰撞已移至 wallCollisionBatch() 以 20fps 批量处理
 
     // ---- 生物间碰撞 ----
     const nearby = getNearby(mob.x, mob.y);
@@ -1699,7 +2163,7 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
               let sy = mob.y + Math.sin(angle) * dist;
               sx = clamp(sx, spawnDef.radius + 4, map.width - spawnDef.radius - 4);
               sy = clamp(sy, spawnDef.radius + 4, map.height - spawnDef.radius - 4);
-              const [rx, ry] = collideWalls(wallGrid, sx, sy, spawnDef.radius + 4);
+              const [rx, ry] = collider.collideCircle(sx, sy, spawnDef.radius + 4);
               world.mobs.push(new Mob(this.nextId++, spawnId, mapId, rx, ry, mob.rarity));
             }
           }
@@ -1928,7 +2392,7 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
         if (!orbitsAsPetal(ITEMS[cell.item].kind)) continue;
         body.u8(ENT.PETAL).u16(st.id).u8(cell.item).u8(cell.rarity)
           .i16(Math.round(st.x)).i16(Math.round(st.y)).u16(0)
-          .u8(Math.round(ITEMS[cell.item].radius * (1 + cell.rarity * 0.06)))
+          .u8(Math.round(ITEMS[cell.item].radius * (1 + cell.rarity * 0.06) * ((ITEMS[cell.item].name ?? "").toLowerCase().includes("moon") ? 4 : 1)))
           .u8(Math.round((st.hp / st.maxHp) * 255));
         count++;
       }
