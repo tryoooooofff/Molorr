@@ -486,6 +486,25 @@ export function drawItemIcon(
       drawHex(0, size * 0.75, size * 0.5, true);
       break;
     }
+case 5: { // Bubble — 透明泡泡
+  const radius = size * 0.9;
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(0, 0, radius, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.25)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+  ctx.lineWidth = Math.max(2, size * 0.2);
+  ctx.stroke();
+  // 高光
+  ctx.beginPath();
+  ctx.arc(-radius * 0.3, -radius * 0.3, radius * 0.2, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.fill();
+  ctx.restore();
+  break;
+}
+
     case 11: { // Clover — three overlapping two-tone leaves around a dark hub
       // Authored with leaf ellipses 40x60 at r=65 plus a r=28 hub. The measured
       // ink box is 203x223 centered on (22.5, -0.5), so scale by its half-height
@@ -518,29 +537,99 @@ export function drawItemIcon(
       ctx.restore();
       break;
     }
-    case 13: { // Corn — a fat kernel-yellow crescent with a thick olive rim
-      // Authored in a 145px-tall space; its true ink center is (77.5, 83.5),
-      // measured from the stroked path, so translate by that to center it.
-      const k = (size * 2.2) / 145;
-      ctx.save();
-      ctx.scale(k, k);
-      ctx.translate(-77.5, -83.5);
-      ctx.beginPath();
-      ctx.moveTo(70, 20);
-      ctx.bezierCurveTo(120, 10, 155, 60, 125, 110);
-      ctx.bezierCurveTo(95, 160, 70, 160, 70, 120);
-      ctx.bezierCurveTo(70, 80, 20, 90, 20, 50);
-      ctx.bezierCurveTo(20, 20, 40, 25, 70, 20);
-      ctx.closePath();
-      ctx.fillStyle = "#eade45";
-      ctx.fill();
-      ctx.lineWidth = 15;
-      ctx.strokeStyle = "#a2901c";
-      ctx.lineJoin = ctx.lineCap = "round";
-      ctx.stroke();
-      ctx.restore();
-      break;
-    }
+case 13: { // Corn — a fat kernel-yellow crescent with a thick olive rim
+  // 使用你提供的 Corn 绘制代码
+  const k = (size * 2) / 100;
+  ctx.save();
+  ctx.scale(k, k);
+  ctx.translate(-150, -150);
+  ctx.beginPath();
+  ctx.lineWidth = 12;
+  ctx.strokeStyle = '#a2901c';
+  ctx.fillStyle = '#eade45';
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.moveTo(100, 130);
+  ctx.quadraticCurveTo(150, 70, 200, 130);
+  ctx.quadraticCurveTo(200, 150, 180, 200);
+  ctx.quadraticCurveTo(150, 160, 120, 200);
+  ctx.quadraticCurveTo(100, 150, 100, 130);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
+  break;
+}
+case 16: { // Heavy — 黑色圆盘带灰色瞳孔
+  const k = size / 55;
+  ctx.save();
+  ctx.scale(k, k);
+  ctx.translate(-100, -90);
+  // 背景擦除（使用画布背景色，这里假设是透明或深色，用 clearRect 或 fillRect 配合背景色）
+  // 由于 drawItemIcon 中已经有画布背景，我们直接绘制
+  ctx.beginPath();
+  ctx.arc(100, 90, 55, 0, Math.PI * 2);
+  ctx.fillStyle = '#2d2d2d';
+  ctx.fill();
+  ctx.strokeStyle = '#131313';
+  ctx.lineWidth = 10;
+  ctx.stroke();
+  // 瞳孔
+  ctx.beginPath();
+  ctx.arc(80, 75, 10, 0, Math.PI * 2);
+  ctx.fillStyle = '#555555';
+  ctx.fill();
+  ctx.restore();
+  break;
+}
+case 17: { // Moon — 灰色星球带陨石坑
+  const radius = size*1.2;
+  const cx = 0, cy = 0;
+  const r = radius;
+  const baseR = r * 0.85;
+
+  ctx.save();
+
+  // 1. 粗的深色外圈
+  ctx.beginPath();
+  ctx.arc(cx, cy, baseR, 0, Math.PI * 2);
+  ctx.lineWidth = Math.max(4, r * 0.12);
+  ctx.strokeStyle = '#4d4d4d';
+  ctx.stroke();
+
+  // 2. 内部灰色填充
+  ctx.beginPath();
+  ctx.arc(cx, cy, baseR - baseR * 0.06, 0, Math.PI * 2);
+  ctx.fillStyle = '#888888';
+  ctx.fill();
+
+  // 3. 陨石坑
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, baseR - baseR * 0.06, 0, Math.PI * 2);
+  ctx.clip();
+
+  const craterScale = r / 170;
+  const craters = [
+    {x: -30 * craterScale, y: -100 * craterScale, r: 55 * craterScale},
+    {x: 60 * craterScale, y: -85 * craterScale, r: 48 * craterScale},
+    {x: 60 * craterScale, y: 0 * craterScale, r: 35 * craterScale},
+    {x: -110 * craterScale, y: 60 * craterScale, r: 45 * craterScale},
+    {x: -50 * craterScale, y: 40 * craterScale, r: 25 * craterScale},
+    {x: 100 * craterScale, y: 80 * craterScale, r: 30 * craterScale},
+  ];
+
+  for (const crater of craters) {
+    ctx.beginPath();
+    ctx.arc(cx + crater.x, cy + crater.y, crater.r, 0, Math.PI * 2);
+    ctx.fillStyle = '#9d9d9d';
+    ctx.fill();
+
+  }
+
+  ctx.restore();
+  ctx.restore();
+  break;
+}
     case 18: { // Pollen — always exactly three yellow balls
       const r = size * 0.5;
       const d = r * 1.05;
@@ -603,6 +692,50 @@ export function drawItemIcon(
       ctx.restore();
       break;
     }
+case 28: {
+  const r = size*0.4;
+  const cx = 0, cy = 0;
+  const spreadRadius = size * 0.8;
+
+  ctx.save();
+
+  // 使用 spin 作为动画时间，让圆点缓慢聚拢/散开
+  const animTime = spin * 0.5; // 用 spin 驱动动画
+  const phase = Math.sin(animTime) * 0.5 + 0.5; // 0-1 之间振荡
+
+  // 聚拢程度：0.3（散开）到 1.0（聚拢）
+  const gather = 0.3 + phase * 0.7;
+  const currentSpread = spreadRadius * (1 - gather * 0.6);
+
+  // 5个圆点的角度偏移
+  const angles = [0, 1.296, 2.513, 3.77, 5.027];
+
+  const dotPositions = angles.map((a, i) => {
+    const angleOffset = spin * 0.3 + i * 1.256;
+    const dist = currentSpread * (0.3 + Math.sin(angleOffset + i) * 0.3 + 0.4);
+    return {
+      x: Math.cos(angleOffset) * dist,
+      y: Math.sin(angleOffset) * dist,
+    };
+  });
+
+  // 绘制灰色连线
+  ctx.beginPath();
+
+  // 绘制5个白色圆点
+  for (const pos of dotPositions) {
+    ctx.beginPath();
+    ctx.arc(cx + pos.x, cy + pos.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = '#ffffff';
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(200,200,200,0.2)';
+    ctx.lineWidth = 0.5;
+    ctx.stroke();
+  }
+
+  ctx.restore();
+  break;
+}
     case 36: { // Iris — a single, notably small purple ball
       ctx.beginPath();
       ctx.arc(0, 0, size * 0.52, 0, Math.PI * 2);
@@ -993,48 +1126,57 @@ export function drawItemIcon(
       ctx.restore();
       break;
     }
-    case 46: { // Orange — three oranges with leaves
-      const R2 = 12;
-      const drawOrangeWithLeaf = (ox2: number, oy2: number, rotation: number) => {
-        ctx.save();
-        ctx.translate(ox2, oy2);
-        ctx.rotate(rotation);
-        ctx.beginPath();
-        ctx.arc(0, 0, R2, 0, Math.PI * 2);
-        ctx.fillStyle = def.color;
-        ctx.fill();
-        ctx.lineWidth = Math.max(2, R2 * 0.3);
-        ctx.strokeStyle = def.outline;
-        ctx.stroke();
-        // Leaf
-        const leafX = -3, leafY = -R2 + 7;
-        ctx.beginPath();
-        ctx.moveTo(leafX, leafY);
-        ctx.quadraticCurveTo(leafX + 6, leafY - 6, leafX + 9, leafY - 1.5);
-        ctx.quadraticCurveTo(leafX + 5, leafY + 3, leafX, leafY);
-        ctx.closePath();
-        ctx.fillStyle = '#4b8b33';
-        ctx.fill();
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = '#2c6214';
-        ctx.stroke();
-        ctx.restore();
-      };
-      const k2 = size * 0.38;
-      ctx.save();
-      ctx.translate(-k2, k2);
-      drawOrangeWithLeaf(0, 0, -2.09);
-      ctx.restore();
-      ctx.save();
-      ctx.translate(k2, k2);
-      drawOrangeWithLeaf(0, 0, 2.09);
-      ctx.restore();
-      ctx.save();
-      ctx.translate(0, -k2);
-      drawOrangeWithLeaf(0, 0, 0);
-      ctx.restore();
-      break;
-    }
+case 46: { // Orange — three oranges with leaves
+  // spin 是旋转角度，世界绘制时 spin 会随时间变化（有数值），卡片绘制时 spin = 0
+  const isWorld = Math.abs(spin) > 0.01;
+
+  const R2 = isWorld ? 8 : 14;
+  const spacing = isWorld ? size * 0.35 : size * 0.5;
+
+  const drawOrangeWithLeaf = (ox2: number, oy2: number, rotation: number) => {
+    ctx.save();
+    ctx.translate(ox2, oy2);
+    ctx.rotate(rotation);
+    ctx.beginPath();
+    ctx.arc(0, 0, R2, 0, Math.PI * 2);
+    ctx.fillStyle = def.color;
+    ctx.fill();
+    ctx.lineWidth = Math.max(2, R2 * 0.18);
+    ctx.strokeStyle = def.outline;
+    ctx.stroke();
+
+    // ===== 叶子也随 R2 缩放 =====
+    const leafScale = R2 / 14;  // 基准 R2=14 时叶子正常
+    const leafX = -3 * leafScale;
+    const leafY = -R2 + 7 * leafScale;
+
+    ctx.beginPath();
+    ctx.moveTo(leafX, leafY);
+    ctx.quadraticCurveTo(leafX + 12 * leafScale, leafY - 12 * leafScale, leafX + 18 * leafScale, leafY - 3 * leafScale);
+    ctx.quadraticCurveTo(leafX + 10 * leafScale, leafY + 6 * leafScale, leafX, leafY);
+    ctx.closePath();
+    ctx.fillStyle = '#4b8b33';
+    ctx.fill();
+    ctx.lineWidth = 3 * leafScale;
+    ctx.strokeStyle = '#2c6214';
+    ctx.stroke();
+    ctx.restore();
+  };
+
+  ctx.save();
+  ctx.translate(-spacing, spacing);
+  drawOrangeWithLeaf(0, 0, -2.09);
+  ctx.restore();
+  ctx.save();
+  ctx.translate(spacing, spacing);
+  drawOrangeWithLeaf(0, 0, 2.09);
+  ctx.restore();
+  ctx.save();
+  ctx.translate(0, -spacing);
+  drawOrangeWithLeaf(0, 0, 0);
+  ctx.restore();
+  break;
+}
     case 48: {
      drawThirdEyeIcon(ctx, 0, 0, size * 0.65, spin);
 
@@ -1052,8 +1194,9 @@ export function drawItemIcon(
       switch (def.shape) {
         case "circle": {
           ctx.beginPath();
-          ctx.arc(0, 0, size*0.9, 0, Math.PI * 2);
+          ctx.arc(0, 0, size, 0, Math.PI * 2);
           ctx.fill();
+          ctx.lineWidth =  size * 0.25;
           ctx.stroke();
           break;
         }
@@ -1340,8 +1483,7 @@ export function drawCard(
     ctx.restore();
   }
 
-  // Reload overlay: darkens the card and drains a clockwise wedge as the petal
-  // (or summon) comes back. Mirrors the classic florr reload sweep.
+
   const reload = opts.reload ?? 1;
   if (reload < 1) {
     ctx.save();
@@ -1497,7 +1639,24 @@ export function drawMob(
 ) {
   const def = MOBS[type];
   if (!def || radius <= 0) return;
+ const game = (window as any).gameInstance;
+  const isPotato = game?.settings?.photoHardware === true;
 
+  if (isPotato) {
+    // Potato模式：只绘制灰色圆
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fillStyle = friendly ? 'rgba(100, 180, 100, 0.7)' : 'rgba(51, 51, 51, 0.7)';
+    ctx.fill();
+    if (friendly) {
+      ctx.strokeStyle = 'rgba(100, 180, 100, 0.5)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+    }
+    ctx.restore();
+    return;
+  }
   const css = (rgb: readonly number[] | string) => {
     if (typeof rgb === "string") return rgb;
     if (rgb.length >= 4) return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${rgb[3]})`;
@@ -1634,7 +1793,7 @@ export function drawMob(
     ctx.fillStyle = BODY;
     ctx.fill();
     ctx.strokeStyle = STROKE;
-    ctx.lineWidth = 5 * scale;
+    ctx.lineWidth = 6 * scale;
     ctx.stroke();
     const pr = 13 * scale;
     const pd = 20 * scale;
@@ -1773,7 +1932,7 @@ export function drawMob(
     bodyPath(hw, hh);
     ctx.fill();
     ctx.fillStyle = css(BODY);
-    bodyPath(hw - 3.5 * vf, hh - 3.5 * vf);
+    bodyPath(hw - 4 * vf, hh - 4 * vf);
     ctx.fill();
     ctx.strokeStyle = css(SEAM);
     ctx.lineWidth = 5 * vf;
@@ -2411,7 +2570,7 @@ const drawSoldierAnt = () => {
   };
 
   const drawStarfish = () => {
-    const baseScale = radius * 2.5;
+    const baseScale = radius * 3;
     const lightColor = friendly ? "rgb(255, 235, 120)" : "rgb(255, 150, 80)";
     const darkColor = friendly ? "rgb(255, 215, 0)" : "rgb(200, 90, 40)";
     ctx.save();
@@ -2929,33 +3088,37 @@ export function drawMobHealthLabel(
   viewScale: number,
   info: MobHealthLabelInfo,
 ) {
+  const game = (window as any).gameInstance;
+  const showEnhanced = game?.settings?.showEnhancedHealthBar !== false;
+  const showRarity = game?.settings?.showRarity !== false;
+  const isPotato = game?.settings?.photoHardware === true;
+
   const zoom = viewScale > 0 ? viewScale : 1;
   const rarityIndex = Math.max(0, Math.min(RARITIES.length - 1, info.rarity | 0));
   const rarity = RARITIES[rarityIndex];
 
-  const healthWidth = 60 + rarityIndex * 5;
-  const healthHeight = 16;
+  // 增强模式：大血条，普通模式：小血条
+  const healthHeight = showEnhanced ? 16 : 6;
   const pillRadius = healthHeight / 2;
+  const healthWidth = 60 + rarityIndex * 5;
 
   ctx.save();
-  // Re-anchor on the mob's screen position, then undo the camera zoom so
-  // every size below is expressed in fixed screen pixels.
   ctx.translate(worldX, worldY);
   ctx.scale(1 / zoom, 1 / zoom);
 
   const healthX = -healthWidth / 2;
   const healthY = radius * zoom + 10;
 
-  // Name label.
+  // 名字（Potato模式用小字体）
   const fullName = info.name;
-  let nameFontSize = 13;
+  const nameFontSize = isPotato ? 10 : 13;
   ctx.font = `${nameFontSize}px ${FONT_FAMILY}`;
   ctx.textAlign = "left";
   ctx.textBaseline = "bottom";
   const maxNameWidth = healthWidth;
   if (ctx.measureText(fullName).width > maxNameWidth) {
-    nameFontSize = Math.max(7, nameFontSize * (maxNameWidth / ctx.measureText(fullName).width));
-    ctx.font = `${nameFontSize}px ${FONT_FAMILY}`;
+    const adjustedSize = Math.max(7, nameFontSize * (maxNameWidth / ctx.measureText(fullName).width));
+    ctx.font = `${adjustedSize}px ${FONT_FAMILY}`;
   }
   ctx.strokeStyle = "#000000";
   ctx.lineWidth = 2;
@@ -2963,15 +3126,15 @@ export function drawMobHealthLabel(
   ctx.fillStyle = "#FFFFFF";
   ctx.fillText(fullName, healthX, healthY - 2);
 
-  // Health bar background.
+  // 血条背景
   roundRect(ctx, healthX, healthY, healthWidth, healthHeight, pillRadius);
   ctx.fillStyle = "#000000";
   ctx.fill();
   ctx.strokeStyle = "#000000";
-  ctx.lineWidth = 5;
+  ctx.lineWidth = 4;
   ctx.stroke();
 
-  // Fill layers, clipped to the capsule shape.
+  // 血条内容
   ctx.save();
   roundRect(ctx, healthX, healthY, healthWidth, healthHeight, pillRadius);
   ctx.clip();
@@ -2979,13 +3142,13 @@ export function drawMobHealthLabel(
   const bufferPct = Math.max(0, Math.min(1, info.displayHpPct));
   const actualPct = Math.max(0, Math.min(1, info.hpPct));
 
-  // Lagging red buffer (shows the chunk of health just lost).
+  // 缓冲层（受击红色）
   if (bufferPct > 0) {
     ctx.fillStyle = "#ff4444";
     roundRect(ctx, healthX, healthY, healthWidth * bufferPct, healthHeight, pillRadius);
     ctx.fill();
   }
-  // Current health.
+  // 当前血量
   if (actualPct > 0) {
     ctx.fillStyle = info.friendly ? "#FFD700" : "#7cfc00";
     roundRect(ctx, healthX, healthY, healthWidth * actualPct, healthHeight, pillRadius);
@@ -2993,40 +3156,44 @@ export function drawMobHealthLabel(
   }
   ctx.restore();
 
-  // Percentage readout.
-  const pct = Math.round(actualPct * 100);
-  ctx.font = `11px ${FONT_FAMILY}`;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.strokeStyle = "#000000";
-  ctx.lineWidth = 2.5;
-  ctx.lineJoin = "round";
-  ctx.strokeText(`${pct}%`, 0, healthY + healthHeight / 2);
-  ctx.fillStyle = "white";
-  ctx.fillText(`${pct}%`, 0, healthY + healthHeight / 2);
-
-  // Rarity tag, centered under the bar (shrinks to fit / never overflows it).
-  const rarityY = healthY + healthHeight + 2;
-  const baseFontSize = 11;
-  ctx.textAlign = "left";
-  ctx.textBaseline = "top";
-  ctx.lineJoin = "round";
-  ctx.font = `${baseFontSize}px ${FONT_FAMILY}`;
-  let textWidth = ctx.measureText(rarity.name).width;
-  let fontSize = baseFontSize;
-  if (textWidth > healthWidth) {
-    fontSize = Math.max(8, baseFontSize * (healthWidth / textWidth));
-    ctx.font = `${fontSize}px ${FONT_FAMILY}`;
+  // 百分比文字（仅在增强模式且非Potato时显示）
+  if (showEnhanced && !isPotato) {
+    const pct = Math.round(actualPct * 100);
+    ctx.font = `11px ${FONT_FAMILY}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = 2.5;
+    ctx.lineJoin = "round";
+    ctx.strokeText(`${pct}%`, 0, healthY + healthHeight / 2);
+    ctx.fillStyle = "white";
+    ctx.fillText(`${pct}%`, 0, healthY + healthHeight / 2);
   }
-  textWidth = ctx.measureText(rarity.name).width;
-  const maxX = healthWidth / 2;
-  const minX = -healthWidth / 2;
-  const finalX = Math.min(Math.max(0, minX), maxX - textWidth);
-  ctx.strokeStyle = rarity.border;
-  ctx.lineWidth = 2;
-  ctx.strokeText(rarity.name, finalX, rarityY);
-  ctx.fillStyle = rarity.color;
-  ctx.fillText(rarity.name, finalX, rarityY);
+
+  // 稀有度标签（仅在显示稀有度且非Potato时显示）
+  if (showRarity && !isPotato) {
+    const rarityY = healthY + healthHeight + 2;
+    const baseFontSize = 11;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.lineJoin = "round";
+    ctx.font = `${baseFontSize}px ${FONT_FAMILY}`;
+    let textWidth = ctx.measureText(rarity.name).width;
+    let fontSize = baseFontSize;
+    if (textWidth > healthWidth) {
+      fontSize = Math.max(8, baseFontSize * (healthWidth / textWidth));
+      ctx.font = `${fontSize}px ${FONT_FAMILY}`;
+    }
+    textWidth = ctx.measureText(rarity.name).width;
+    const maxX = healthWidth / 2;
+    const minX = -healthWidth / 2;
+    const finalX = Math.min(Math.max(0, minX), maxX - textWidth);
+    ctx.strokeStyle = rarity.border;
+    ctx.lineWidth = 2;
+    ctx.strokeText(rarity.name, finalX, rarityY);
+    ctx.fillStyle = rarity.color;
+    ctx.fillText(rarity.name, finalX, rarityY);
+  }
 
   ctx.restore();
 }
