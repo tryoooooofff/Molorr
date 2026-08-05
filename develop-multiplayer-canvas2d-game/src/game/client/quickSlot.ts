@@ -192,14 +192,11 @@ export class QuickSlot {
       if (hovered && cell && !dragging) hoverCell = cell;
       drawCard(ctx, r, cell, {
         hovered,
-        empty: `${i + 1}`,
+        empty: '',
         dim: dragFrom === i ? 0.35 : 1,
         reload: this.host.reloadProgress(i),
         hp: this.host.slotHp(i),
       });
-      if (cell && ITEMS[cell.item]?.kind === "summon") {
-        text(ctx, "SUMMON", r.x + r.w / 2, r.y + 12, 9, "#ffe763");
-      }
     });
 
     // ── Secondary row ──
