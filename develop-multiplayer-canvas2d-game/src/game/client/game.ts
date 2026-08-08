@@ -21,6 +21,7 @@ import {
   ITEMS,
   MAPS,
   MAX_CRAFT_RARITY,
+  MAX_RARITY,
   MOBS,
   ORACLE_SKIP,
   RARITIES,
@@ -150,6 +151,8 @@ interface SaveData {
   craftCrafted?: number;
   craftBurned?: number;
   craftAttempts?: number;
+  /** 商店星星(⭐)货币。旧存档没有此字段时默认 10。 */
+  stars?: number;
 }
 
 const SAVE_KEY = "petalia.save";
@@ -234,6 +237,9 @@ class SettingsSystem {
     showProjectileHitbox: boolean = false;
     showAdvancedDPS: boolean = false;
     showMovementHelper: boolean = true;  // 移动指示器
+    /** Manual override: force the canvas virtual keyboard on any touch device
+     *  even when auto-detection (detectMobile) misses it. */
+    virtualKeyboard: boolean = false;
     /** Debug overlay (ping, throughput, object count, FPS, collision checks) in the bottom-right corner. */
     showDebugInfo: boolean = false;
     maxMagicAnts: number = 20;
@@ -442,6 +448,7 @@ class SettingsSystem {
                 this.showMovementHelper = data.showMovementHelper !== undefined ? data.showMovementHelper : true;
                 this.showDebugInfo = data.showDebugInfo !== undefined ? data.showDebugInfo : false;
                 this.cacheCanvas = data.cacheCanvas !== undefined ? data.cacheCanvas : false;
+                this.virtualKeyboard = data.virtualKeyboard !== undefined ? data.virtualKeyboard : false;
             }
         } catch(e) {}
         this._forceRedraw();
@@ -468,7 +475,8 @@ class SettingsSystem {
                 performanceMode: this.performanceMode,
                 showMovementHelper: this.showMovementHelper,
                 showDebugInfo: this.showDebugInfo,
-                cacheCanvas: this.cacheCanvas
+                cacheCanvas: this.cacheCanvas,
+                virtualKeyboard: this.virtualKeyboard
             }));
         } catch(e) {}
         this._forceRedraw();
@@ -590,7 +598,7 @@ class SettingsSystem {
         this.panelOriginX = panelX;
         this.panelOriginY = panelY;
 
-        const totalContentHeight = 920;
+        const totalContentHeight = 952;
         const contentY = panelY + 70;
         const contentH = panelH - 90;
         this.maxScrollOffset = Math.max(0, totalContentHeight - contentH);
@@ -606,7 +614,7 @@ class SettingsSystem {
         ctx.translate(-panelX, -panelY);
 
         // 背景
-        ctx.fillStyle = 'rgba(180, 180, 180, 0.95)';
+        ctx.fillStyle = '#B4B4B4';
         ctx.beginPath();
         if (ctx.roundRect) {
             ctx.roundRect(panelX, panelY, panelW, panelH, 5);
@@ -660,10 +668,10 @@ class SettingsSystem {
         const items = ['showHitbox', 'showRarity', 'showDamageNumbers', 'showParticles',
                        'showEnhancedHealthBar', 'showEnemyPanel', 'showFPS',
                        'showProjectileHitbox', 'showAdvancedDPS', 'photoHardware',
-                       'showMovementHelper','lowQualityWall','showDebugInfo','cacheCanvas'];
+                       'showMovementHelper','lowQualityWall','showDebugInfo','cacheCanvas','virtualKeyboard'];
         const labels = ['Show Hitbox', 'Show Rarity', 'Show Damage', 'Show Particles',
                         'Health Bar', 'Enemy Panel', 'Show FPS', 'Show Projectile Hitbox',
-                        'Show Advanced DPS', 'Potato Hardware', 'Movement Helper','Low Quality Wall','Debug Info','Cache Canvas'];
+                        'Show Advanced DPS', 'Potato Hardware', 'Movement Helper','Low Quality Wall','Debug Info','Cache Canvas','Virtual Keyboard'];
 
         items.forEach((item, i) => {
             const itemY = curY + i * 32;
@@ -788,7 +796,7 @@ class SettingsSystem {
         drawStrokeText('Version 0.3.2', panelX + panelW / 2, curY + 10, 16, 'center');
         curY += 40;
 
-        const aboutText = "Hi there! Welcome to Flwrr.pro, a game inspired by zorr.pro, which is developed since November 2025. Welcome to give advise by multi-player mode or just tell me directly.";
+        const aboutText = "This is a game which inspire by Zorr.pro. Special thanks: flower1998  cbx12345.";
 
         const maxWidth = panelW - 50;
         const lineHeight = 23;
@@ -869,7 +877,7 @@ class SettingsSystem {
         ctx.strokeStyle = '#000000';
         ctx.lineWidth = 2;
         ctx.stroke();
-        drawStrokeText('×', closeX + 12, closeY + 13, 18);
+        drawStrokeText('×', closeX + 12.5, closeY + 18, 18);
 
         ctx.restore();
     }
@@ -930,7 +938,7 @@ class SettingsSystem {
         const items = ['showHitbox', 'showRarity', 'showDamageNumbers', 'showParticles',
                        'showEnhancedHealthBar', 'showEnemyPanel', 'showFPS',
                        'showProjectileHitbox', 'showAdvancedDPS', 'photoHardware',
-                       'showMovementHelper','lowQualityWall','showDebugInfo','cacheCanvas'];
+                       'showMovementHelper','lowQualityWall','showDebugInfo','cacheCanvas','virtualKeyboard'];
 
         for (let i = 0; i < items.length; i++) {
             const itemY = checkYStart + i * itemH - this.scrollOffset;
@@ -1501,8 +1509,8 @@ class TooltipSystem {
  */
 class VirtualKeyboard {
   active = false;
-  /** Which input to feed: 'bagSearch' | 'craftSearch' | 'chat' */
-  target: 'bagSearch' | 'craftSearch' | 'chat' = 'bagSearch';
+  /** Which input to feed: 'bagSearch' | 'craftSearch' | 'chat' | 'redeem' | 'shopSearch' */
+  target: 'bagSearch' | 'craftSearch' | 'chat' | 'redeem' | 'shopSearch' | 'playerName' | 'accountInput' = 'bagSearch';
   numMode = false;
 
   private readonly keysNormal = [
@@ -1798,6 +1806,8 @@ export class AccountSystem {
     for (const k of Object.keys(this.inputs)) { this.inputs[k].value = ""; this.inputs[k].focused = false; }
     this.showPassLogin = this.showPassReg = this.showPassConfirm = false;
     (window as any).hideMobileKeyboard?.();
+    const game: any = (window as any).gameInstance;
+    if (game?.vk) game.vk.active = false;
   }
 
   _focusInput(key: string | null) {
@@ -1807,8 +1817,17 @@ export class AccountSystem {
       this._justFocusedAt = Date.now();
       const inp = this.inputs[key];
       (window as any).showMobileKeyboard?.(inp.value, (val: string) => { inp.value = val; });
+      // Activate the canvas virtual keyboard on mobile / when forced via settings
+      const game: any = (window as any).gameInstance;
+      if (game && (game.isMobile || game.settings?.virtualKeyboard)) {
+        game.vk.active = true;
+        game.vk.target = 'accountInput';
+        game.vk.numMode = false;
+      }
     } else {
       (window as any).hideMobileKeyboard?.();
+      const game: any = (window as any).gameInstance;
+      if (game?.vk) game.vk.active = false;
     }
   }
 
@@ -2201,20 +2220,9 @@ export class AccountSystem {
     ctx.restore();
   }
 
-  _drawStar(ctx: CanvasRenderingContext2D, cx: number, cy: number, spikes: number, outer: number, inner: number, color: string) {
-    let rot = Math.PI / 2 * 3;
-    const step = Math.PI / spikes;
-    ctx.save();
-    ctx.lineJoin = "miter"; ctx.miterLimit = 10;
-    ctx.beginPath(); ctx.moveTo(cx, cy - outer);
-    for (let i = 0; i < spikes; i++) {
-      ctx.lineTo(cx + Math.cos(rot) * outer, cy + Math.sin(rot) * outer); rot += step;
-      ctx.lineTo(cx + Math.cos(rot) * inner, cy + Math.sin(rot) * inner); rot += step;
-    }
-    ctx.closePath();
-    ctx.fillStyle = color; ctx.fill();
-    ctx.strokeStyle = "#D10000"; ctx.lineWidth = 3; ctx.stroke();
-    ctx.restore();
+  _drawStar(ctx: CanvasRenderingContext2D, cx: number, cy: number, _spikes: number, outer: number, inner: number, _color: string) {
+    // 统一为金铜色五角星样式(参考 drawStarIcon)。
+    drawStarIcon(ctx, cx, cy, outer, inner);
   }
 
   _drawInput(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, key: string, isPassword: boolean, showPlain = false, toggleId: string | null = null) {
@@ -2404,6 +2412,21 @@ export class AccountSystem {
     if (e.key === "Backspace") { this.inputs[focused].value = this.inputs[focused].value.slice(0, -1); return true; }
     if (e.key.length === 1 && this.inputs[focused].value.length < 24) { this.inputs[focused].value += e.key; return true; }
     return false;
+  }
+
+  /** Process a single key from the virtual keyboard (canvas VK, not a DOM KeyboardEvent). */
+  handleKeyDownChar(key: string) {
+    if (!this.panelOpen) return;
+    const focused = this._focusedKey();
+    if (!focused) return;
+    if (key === "Backspace") {
+      this.inputs[focused].value = this.inputs[focused].value.slice(0, -1);
+    } else if (key === "Enter") {
+      const btnId = this.screen === "login" ? "do_login" : this.screen === "register" ? "do_register" : null;
+      if (btnId) { const btn = this._btns.find(b => b.id === btnId); if (btn) this.handleClick(btn.x + 1, btn.y + 1); }
+    } else if (key.length === 1 && this.inputs[focused].value.length < 24) {
+      this.inputs[focused].value += key;
+    }
   }
 
   // ====================================================================
@@ -2814,7 +2837,9 @@ class ChangelogPanel {
     {
       date: "8th October 2026",
       entries: [
-        "- Add achievement system",
+        "- Added achievement system",
+        "- Added shop system and redeem code system",
+        "- Updated mobile input feeling",
       ]
     },
     {
@@ -3380,7 +3405,7 @@ class AchievementSystem {
     const shop = (window as any).gameInstance?.shopSystem;
     if (shop) shop.addStars(ach.stars, true);
     this.pendingPopups.push(ach);
-    console.log(`🏆 Achievement unlocked: ${ach.title} (+${ach.stars}⭐)`);
+    console.log(`Achievement unlocked: ${ach.title} (+${ach.stars}⭐)`);
   }
 
   update(dt: number) {
@@ -3455,7 +3480,8 @@ class AchievementSystem {
     this.drawStrokedText(ctx, 'Achievement Unlocked!', px + 80, py + 20, 10, 'left', 'rgba(255,215,0,0.9)');
     this.drawStrokedText(ctx, ach.title, px + 80, py + 40, 15, 'left', 'white');
     this.drawStrokedText(ctx, ach.desc, px + 80, py + 57, 9, 'left', 'rgba(200,200,200,0.85)');
-    this.drawStrokedText(ctx, `+${this._fmtNum(ach.stars)}⭐`, px + PW - 12, py + 40, 13, 'right', '#ffd700');
+    this.drawStrokedText(ctx, `+${this._fmtNum(ach.stars)}`, px + PW - 26, py + 40, 13, 'right', '#ffd700');
+    drawStarIcon(ctx, px + PW - 16, py + 40, 7);
     ctx.restore();
   }
 
@@ -3694,16 +3720,17 @@ class AchievementSystem {
       // 标题
       this.drawStrokedText(ctx, ach.title, ix + 12, iy + 20, 15, 'left');
 
-      // 星星
+      // 星星(金铜色图标 + 数量)
       this.drawStrokedText(
         ctx,
-        `${this._fmtNum(ach.stars)} ⭐`,
-        ix + itemW - 10,
+        `${this._fmtNum(ach.stars)}`,
+        ix + itemW - 24,
         iy + 20,
         13,
         'right',
         '#FFD700'
       );
+      drawStarIcon(ctx, ix + itemW - 14, iy + 20, 7);
 
       // 描述
       ctx.fillStyle = 'rgba(0,0,0,0.6)';
@@ -3809,6 +3836,1235 @@ class AchievementSystem {
   }
 
   togglePanel() { this.panelOpen = !this.panelOpen; }
+}
+
+// =====================================================================
+// Shop System — 商店(参考 Pasted text(26) 的 ShopSystem / RedeemSystem)
+// ---------------------------------------------------------------------
+// 适配说明：本项目是多人在线游戏,物品/背包由服务器权威管理,但服务器信任
+// 客户端上报的进度(与 xp/背包 JOIN 上报一致)。因此商店保持纯客户端实现:
+//  - 星星(⭐)是玩家货币,存入本地存档 SaveData.stars;
+//  - 物品购买/兑换码奖励直接写入本地背包 this.bag —— 主菜单场景的背包就是
+//    本地存档,点击 PLAY 时随 JOIN 同步到服务器;
+//  - 会员存 localStorage,纯本地生效(ruby 会员同步主菜单 Extra Bonus 面板)。
+// 入口：主菜单顶部 Shop 图标(top_shop)。
+// =====================================================================
+
+type RGB = [number, number, number];
+
+interface MembershipTier {
+  id: string;
+  label: string;
+  price: number;
+  color: RGB;
+  bonusMinutes: number;
+  xpMult: number;
+  dropRate: number;
+  bonusBuff: number;
+  extraBonus: boolean;
+  desc: string[];
+}
+
+interface ShopListEntry {
+  item: number;
+  basePrice: number;
+}
+
+interface ShopDiscount {
+  type: string;
+  discountPercent: number;
+  multiplier: number;
+  omegaOriginalPrice: number;
+  omegaDiscountedPrice: number;
+  eternalOriginalPrice: number;
+  eternalDiscountedPrice: number;
+}
+
+interface RedeemReward {
+  /** 物品名称(映射到 ITEMS;本游戏没有的物品自动跳过)。 */
+  type?: string;
+  rarity?: string;
+  count?: number;
+  /** 星星奖励。 */
+  stars?: number;
+  /** 会员档位 id。 */
+  membership?: string;
+  /** 会员时长(天)。 */
+  duration?: number;
+}
+
+interface RedeemCodeDef {
+  items: RedeemReward[];
+  expires: number;
+  maxUses: number;
+}
+
+function rgbArr(c: RGB): string {
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+/**
+ * 金色五角星图标(全游戏统一星星样式,参考 starCanvas 绘制):
+ * 暖金 #f5c542 填充 + 深铜 #b07c2b 描边(描边宽 = 外半径/6),圆角连接,尖角朝上。
+ */
+function drawStarIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number, outerRadius: number, innerRadius?: number) {
+  const outer = Math.max(1, outerRadius);
+  const inner = innerRadius ?? outer * 0.5;
+  const startAngle = -Math.PI / 2;
+  const step = Math.PI / 5;
+  ctx.beginPath();
+  ctx.moveTo(cx + outer * Math.cos(startAngle), cy + outer * Math.sin(startAngle));
+  for (let i = 1; i < 10; i++) {
+    const radius = i % 2 === 0 ? outer : inner;
+    const angle = startAngle + i * step;
+    ctx.lineTo(cx + radius * Math.cos(angle), cy + radius * Math.sin(angle));
+  }
+  ctx.closePath();
+  ctx.fillStyle = '#f5c542';
+  ctx.fill();
+  ctx.lineWidth = outer / 6;
+  ctx.strokeStyle = '#b07c2b';
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  ctx.stroke();
+}
+
+class ShopSystem {
+  game: GameClient;
+  visible = false;
+  currentTab: "buy" | "membership" | "redeem" = "buy";
+
+  message = "";
+  messageTimer = 0;
+  mouseX = 0;
+  mouseY = 0;
+
+  // ---- 滚动 ----
+  scrollOffset = 0; // buy 页签
+  membershipScrollOffset = 0;
+
+  // ---- 筛选 ----
+  filterSearch = "";
+  filterSearchActive = false;
+  // ---- 兑换 ----
+  redeemInputActive = false;
+  redeemText = "";
+  private codes = new Map<string, RedeemCodeDef>();
+  private usedRecords = new Map<string, boolean>();
+  private readonly REDEEM_STORAGE_KEY = "redeem_used_records";
+
+  // ---- 会员 ----
+  activeMembership: { tierId: string; purchasedAt: number; expiresAt: number } | null = null;
+  private readonly MEMBERSHIP_STORAGE_KEY = "flwrr_membership";
+
+  // ---- 布局(设计坐标,绘制时整体缩放) ----
+  private readonly PW = 760;
+  private readonly PH = 600;
+  private panelScale = 1;
+  private screenRectVal: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private closeBtn: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private tabRects: Record<string, Rect> = {};
+  /** 每张商品卡当前选择的稀有度(itemId → RARITIES 下标,重绘不丢)。 */
+  private cardRarities = new Map<number, number>();
+  private _shopCardRects: { entry: ShopListEntry; rarity: number; rect: Rect; buyRect: Rect; prevRect: Rect; nextRect: Rect }[] = [];
+  private _membershipRects: { tier: MembershipTier; rect: Rect }[] = [];
+
+  // ---- 商店数据(参考 Pasted text(26) 的 MEMBERSHIP_TIERS / BASE_PRICES) ----
+  readonly MEMBERSHIP_TIERS: MembershipTier[] = [
+    { id: "bronze", label: "Bronze", price: 10000, color: [176, 106, 52], bonusMinutes: 15, xpMult: 1.05, dropRate: 0, bonusBuff: 0, extraBonus: false, desc: ["+15 min bonus time/day", "×1.05 XP"] },
+    { id: "silver", label: "Silver", price: 90000, color: [160, 160, 175], bonusMinutes: 30, xpMult: 1.1, dropRate: 0.02, bonusBuff: 0, extraBonus: false, desc: ["+30 min bonus time/day", "×1.1 XP", "+2% drop rate"] },
+    { id: "gold", label: "Gold", price: 200000, color: [220, 180, 40], bonusMinutes: 60, xpMult: 1.3, dropRate: 0.05, bonusBuff: 0, extraBonus: false, desc: ["+1 h bonus time/day", "×1.3 XP", "+5% drop rate"] },
+    { id: "platinum", label: "Platinum", price: 900000, color: [100, 210, 230], bonusMinutes: 90, xpMult: 1.4, dropRate: 0.075, bonusBuff: 0, extraBonus: false, desc: ["+1.5 h bonus time/day", "×1.4 XP", "+7.5% drop rate"] },
+    { id: "diamond", label: "Diamond", price: 20000000, color: [140, 230, 255], bonusMinutes: 120, xpMult: 1.5, dropRate: 0.1, bonusBuff: 1, extraBonus: false, desc: ["+2 h bonus time/day", "×1.5 XP", "+10% drop rate", "+1 Bonus Buff (3x→4x, base 3x)"] },
+    { id: "ruby", label: "Ruby", price: 200000000, color: [220, 40, 80], bonusMinutes: 0, xpMult: 1.7, dropRate: 0.15, bonusBuff: 2, extraBonus: true, desc: ["×1.7 XP", "+15% drop rate", "+2 Bonus Buff (3x→5x)", "Extra Bonus: 1 month"] },
+  ];
+
+  /** 与 RARITIES 对齐的稀有度价格倍率(参考 PRICE_MULTIPLIERS)。 */
+  private readonly PRICE_MULTIPLIERS: number[] = [1, 2, 3, 4, 5, 100, 2500, 50000, 1500000, 37500000, 37500000];
+
+  /** 本游戏 ITEMS 的基准价格(参考 BASE_PRICES;未列出的物品默认 10)。 */
+  private readonly BASE_PRICES: Record<string, number> = {
+    Basic: 1, Leaf: 3, Stinger: 8, Rock: 5, Sand: 3, Bubble: 10, Pearl: 5,
+    Wing: 5, Stick: 18, Coin: 2, Clover: 5, Corn: 8, Heavy: 5, Moon: 250,
+    Pollen: 3, Honey: 3, Starfish: 5, Salt: 3, Jelly: 3, Lightning: 10,
+    Claw: 7, Powder: 6, Rose: 8, Light: 8, Glass: 10, Bone: 7, Pincer: 8,
+    Iris: 2, Shell: 3, Magnet: 10, Cactus: 4, Antennae: 12, Soil: 6,
+    Fang: 5, Orange: 12, "Third Eye": 15, Faster: 12, Missile: 5,
+    "Ladybug Egg": 12, "Soldier Ant Egg": 12, "Worker Ant Egg": 10, "Rock Egg": 12,
+    "Bee Egg": 12, "Starfish Egg": 15, "Jellyfish Egg": 18, "Crab Egg": 18,
+    "Beetle Egg": 15, "Scorpion Egg": 10, "Shell Egg": 22, "Cactus Egg": 12,
+    "Ant Hole Egg": 42, "Hornet Egg": 13, "Spider Egg": 12,
+  };
+
+  shopItems: ShopListEntry[] = [];
+  discountItems: ShopDiscount[] = [];
+  private discountEndTime = 0;
+  private discountUpdateTime = 0;
+
+  constructor(game: GameClient) {
+    this.game = game;
+    this.activeMembership = this.loadMembership();
+    if (this.activeMembership && this.activeMembership.tierId === "ruby" && this.activeMembership.expiresAt > Date.now()) {
+      this.game.setRubyMembership(this.activeMembership.expiresAt);
+    }
+    for (const def of ITEMS) {
+      if (!def) continue;
+      this.shopItems.push({ item: def.id, basePrice: this.BASE_PRICES[def.name] ?? 10 });
+    }
+    this.shopItems.sort((a, b) => a.basePrice - b.basePrice);
+    this.refreshDailyDiscounts();
+    this.registerCodes();
+    this.loadUsedRecords();
+  }
+
+  // ===================== 星星 =====================
+  addStars(n: number, showAnimation = false) {
+    this.game.addStars(n);
+    if (n > 0 && showAnimation) this.showMessage(`+${n} Stars`);
+    return this.game.stars;
+  }
+
+  // ===================== 价格 =====================
+  private itemBasePrice(itemId: number): number {
+    const def = ITEMS[itemId];
+    if (!def) return 10;
+    return this.BASE_PRICES[def.name] ?? 10;
+  }
+
+  getItemPrice(itemId: number, rarity: number): number {
+    const mult = rarity >= 0 && rarity < this.PRICE_MULTIPLIERS.length ? this.PRICE_MULTIPLIERS[rarity] : 1;
+    return Math.max(1, Math.round(this.itemBasePrice(itemId) * mult));
+  }
+
+  getDiscountedPrice(itemId: number, rarity: number): number {
+    if (rarity === 8 || rarity === 9) {
+      const def = ITEMS[itemId];
+      const d = def ? this.discountItems.find(dd => dd.type === def.name) : undefined;
+      if (d) return rarity === 8 ? d.omegaDiscountedPrice : d.eternalDiscountedPrice;
+    }
+    return this.getItemPrice(itemId, rarity);
+  }
+
+  formatPrice(p: number): string {
+    if (p >= 1e12) return (p / 1e12).toFixed(2) + "T";
+    if (p >= 1e9) return (p / 1e9).toFixed(2) + "B";
+    if (p >= 1e6) return (p / 1e6).toFixed(2) + "M";
+    if (p >= 1e3) return (p / 1e3).toFixed(2) + "K";
+    return p.toString();
+  }
+
+  // ===================== 每日折扣 =====================
+  private hashCode(str: string): number {
+    let h = 0;
+    for (let i = 0; i < str.length; i++) {
+      h = (h << 5) - h + str.charCodeAt(i);
+      h = h & h;
+    }
+    return Math.abs(h);
+  }
+
+  private seededRandom(seed: number): () => number {
+    let s = seed;
+    return () => {
+      s = (s * 9301 + 49297) % 233280;
+      return s / 233280;
+    };
+  }
+
+  refreshDailyDiscounts() {
+    this.discountItems = [];
+    const seed = this.hashCode(new Date().toDateString());
+    const random = this.seededRandom(seed);
+    const candidates = this.shopItems.filter(
+      i => this.getItemPrice(i.item, 8) > 1000 || this.getItemPrice(i.item, 9) > 1000,
+    );
+    if (!candidates.length) return;
+    const count = Math.min(7, candidates.length);
+    const chosen: number[] = [];
+    while (chosen.length < count) {
+      const idx = Math.floor(random() * candidates.length);
+      if (!chosen.includes(idx)) chosen.push(idx);
+    }
+    for (const idx of chosen) {
+      const entry = candidates[idx];
+      const def = ITEMS[entry.item];
+      if (!def) continue;
+      const pct = 5 + Math.floor(random() * 26);
+      const mul = (100 - pct) / 100;
+      this.discountItems.push({
+        type: def.name,
+        discountPercent: pct,
+        multiplier: mul,
+        omegaOriginalPrice: this.getItemPrice(entry.item, 8),
+        omegaDiscountedPrice: Math.floor(this.getItemPrice(entry.item, 8) * mul),
+        eternalOriginalPrice: this.getItemPrice(entry.item, 9),
+        eternalDiscountedPrice: Math.floor(this.getItemPrice(entry.item, 9) * mul),
+      });
+    }
+    this.discountEndTime = Date.now() + 24 * 60 * 60 * 1000;
+    this.discountUpdateTime = Date.now();
+  }
+
+  private checkDiscountUpdate() {
+    const now = Date.now();
+    if (now > this.discountEndTime) {
+      this.refreshDailyDiscounts();
+      return;
+    }
+    if (new Date(this.discountUpdateTime).toDateString() !== new Date().toDateString()) {
+      this.refreshDailyDiscounts();
+    }
+  }
+
+  // ===================== Buy =====================
+  getFilteredItems(): ShopListEntry[] {
+    const q = this.filterSearch.trim().toLowerCase();
+    return this.shopItems.filter(entry => {
+      if (q) {
+        const name = ITEMS[entry.item]?.name ?? "";
+        if (!name.toLowerCase().includes(q)) return false;
+      }
+      return true;
+    });
+  }
+
+  buyItem(entry: ShopListEntry, rarity: number) {
+    if (!entry || rarity < 0 || rarity >= this.PRICE_MULTIPLIERS.length) return;
+    const price = this.getDiscountedPrice(entry.item, rarity);
+    if (this.game.stars < price) {
+      this.showMessage(`❌ Need ${this.formatPrice(price)} Stars`);
+      return;
+    }
+    this.game.addStars(-price);
+    if (!this.game.grantShopItems(entry.item, rarity, 1)) {
+      this.game.addStars(price);
+      this.showMessage("❌ Bag full!");
+      return;
+    }
+    this.showMessage(`✅ Purchased: ${RARITIES[rarity]?.name ?? "?"} ${ITEMS[entry.item]?.name ?? "?"}`);
+    this.game.saveNow();
+  }
+
+  typeSearch(key: string) {
+    if (key === "Backspace") {
+      this.filterSearch = this.filterSearch.slice(0, -1);
+    } else if (key === "Escape" || key === "Enter") {
+      this.filterSearchActive = false;
+    } else if (key.length === 1 && this.filterSearch.length < 24) {
+      this.filterSearch += key;
+    }
+    this.scrollOffset = 0;
+  }
+
+  // ===================== Membership =====================
+  private loadMembership(): { tierId: string; purchasedAt: number; expiresAt: number } | null {
+    try {
+      const raw = localStorage.getItem(this.MEMBERSHIP_STORAGE_KEY);
+      if (!raw) return null;
+      const m = JSON.parse(raw) as { tierId: string; purchasedAt: number; expiresAt: number };
+      if (m.expiresAt && Date.now() > m.expiresAt) return null;
+      return m;
+    } catch {
+      return null;
+    }
+  }
+
+  private saveMembership(tierId: string, durationDays: number) {
+    const m = { tierId, purchasedAt: Date.now(), expiresAt: Date.now() + durationDays * 24 * 60 * 60 * 1000 };
+    try {
+      localStorage.setItem(this.MEMBERSHIP_STORAGE_KEY, JSON.stringify(m));
+    } catch {
+      /* ignore */
+    }
+    this.activeMembership = m;
+  }
+
+  getMembershipTier(): MembershipTier | null {
+    if (!this.activeMembership) return null;
+    return this.MEMBERSHIP_TIERS.find(t => t.id === this.activeMembership?.tierId) ?? null;
+  }
+
+  private purchaseMembership(tier: MembershipTier) {
+    if (this.game.stars < tier.price) {
+      this.showMessage(`❌ Need ${this.formatPrice(tier.price)} Stars for ${tier.label}`);
+      return;
+    }
+    const cur = this.getMembershipTier();
+    if (cur) {
+      const ci = this.MEMBERSHIP_TIERS.findIndex(t => t.id === cur.id);
+      const ni = this.MEMBERSHIP_TIERS.findIndex(t => t.id === tier.id);
+      if (ni <= ci) {
+        this.showMessage(`❌ Already have ${cur.label} or higher`);
+        return;
+      }
+    }
+    this.game.addStars(-tier.price);
+    this.saveMembership(tier.id, 30);
+    this.showMessage(`✅ ${tier.label} Membership activated! (30 days)`);
+    if (tier.id === "ruby" && this.activeMembership) this.game.setRubyMembership(this.activeMembership.expiresAt);
+    this.game.saveNow();
+  }
+
+  // ===================== Redeem =====================
+  private registerCodes() {
+    const add = (code: string, items: RedeemReward[], expireDays = 30) => {
+      this.codes.set(code.toUpperCase(), {
+        items,
+        expires: Date.now() + expireDays * 24 * 60 * 60 * 1000,
+        maxUses: 1,
+      });
+    };
+    add("THANKS", [{ type: "Wing", rarity: "Super", count: 1 }, { type: "Magnet", rarity: "Ultra", count: 1 }, { type: "Pearl", rarity: "Ultra", count: 2 }, { stars: 10000 }], 30);
+    add("WELCOME", [{ type: "Wing", rarity: "Epic", count: 5 }, { type: "Leaf", rarity: "Legendary", count: 3 }, { stars: 50 }], 30);
+    add("1354679", [{ membership: "ruby", duration: 10, stars: 5000 }], 30);
+    add("MMMMMM", [{ membership: "platinum", duration: 20, stars: 5000 }], 30);
+    add("12354", [{ membership: "diamond", duration: 30, stars: 2000 }], 30);
+    add("9178", [{ membership: "diamond", duration: 20, stars: 78 }], 30);
+    add("114514", [{ membership: "silver", duration: 30, stars: 200 }], 30);
+    add("GOLD2029", [{ membership: "gold", duration: 15, stars: 500 }], 30);
+    add("TEST", [{ membership: "Ruby", duration: 5, stars: 100 }], 30);
+  }
+
+  private loadUsedRecords() {
+    try {
+      const saved = localStorage.getItem(this.REDEEM_STORAGE_KEY);
+      this.usedRecords = saved ? new Map(Object.entries(JSON.parse(saved) as Record<string, boolean>)) : new Map();
+    } catch {
+      this.usedRecords = new Map();
+    }
+  }
+
+  private saveUsedRecords() {
+    try {
+      localStorage.setItem(this.REDEEM_STORAGE_KEY, JSON.stringify(Object.fromEntries(this.usedRecords)));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private itemIdByName(name: string): number {
+    for (const def of ITEMS) {
+      if (def && def.name === name) return def.id;
+    }
+    return -1;
+  }
+
+  private rarityIndexByName(name: string): number {
+    const idx = RARITIES.findIndex(r => r.name === name);
+    return idx >= 0 ? idx : 0;
+  }
+
+  redeem(code: string) {
+    const upper = code.toUpperCase().trim();
+    const def = this.codes.get(upper);
+    if (!def) {
+      this.showMessage("❌ Invalid code", 3000);
+      return;
+    }
+    if (Date.now() > def.expires) {
+      this.codes.delete(upper);
+      this.showMessage("❌ Code expired", 3000);
+      return;
+    }
+    const playerId = this.game.playerIdentity();
+    const key = `${upper}_${playerId}`;
+    if (this.usedRecords.has(key)) {
+      this.showMessage("❌ You already used this code", 3000);
+      return;
+    }
+    let totalUsed = 0;
+    for (const k of this.usedRecords.keys()) {
+      if (k.startsWith(upper + "_")) totalUsed++;
+    }
+    if (totalUsed >= def.maxUses) {
+      this.showMessage("❌ Code used up", 3000);
+      return;
+    }
+
+    const rewards: string[] = [];
+    let totalStars = 0;
+    let membershipTier: string | null = null;
+    let membershipDuration = 30;
+
+    for (const rw of def.items) {
+      if (rw.stars) totalStars += rw.stars;
+      if (rw.membership) {
+        membershipTier = rw.membership.toLowerCase();
+        membershipDuration = rw.duration || 30;
+      }
+      if (rw.type) {
+        const itemId = this.itemIdByName(rw.type);
+        if (itemId < 0) continue; // 本游戏没有的物品,跳过
+        const rarity = Math.min(this.rarityIndexByName(rw.rarity ?? "Common"), MAX_RARITY);
+        const count = Math.max(1, Math.min(99, rw.count || 1));
+        if (this.game.grantShopItems(itemId, rarity, count)) {
+          rewards.push(`${count} ${RARITIES[rarity]?.name ?? "?"} ${rw.type}`);
+        }
+      }
+    }
+    if (totalStars > 0) {
+      this.game.addStars(totalStars);
+      rewards.push(`${totalStars} Stars`);
+    }
+    if (membershipTier) {
+      const tier = this.MEMBERSHIP_TIERS.find(t => t.id === membershipTier);
+      if (tier) {
+        this.saveMembership(tier.id, membershipDuration);
+        if (tier.id === "ruby" && this.activeMembership) this.game.setRubyMembership(this.activeMembership.expiresAt);
+        rewards.push(`${tier.label} membership ${membershipDuration}d`);
+      }
+    }
+
+    this.usedRecords.set(key, true);
+    this.saveUsedRecords();
+    this.game.saveNow();
+    this.showMessage(`✅ Got: ${rewards.length ? rewards.join(", ") : "nothing"}`, 5000);
+  }
+
+  typeRedeem(key: string) {
+    if (key === "Backspace") {
+      this.redeemText = this.redeemText.slice(0, -1);
+    } else if (key === "Enter") {
+      const code = this.redeemText;
+      this.redeemText = "";
+      this.redeemInputActive = false;
+      this.redeem(code);
+    } else if (key === "Escape") {
+      this.redeemInputActive = false;
+      this.redeemText = "";
+    } else if (key.length === 1 && /[a-zA-Z0-9]/.test(key) && this.redeemText.length < 16) {
+      this.redeemText += key.toUpperCase();
+    }
+  }
+
+  // ===================== 消息 =====================
+  showMessage(msg: string, duration = 3) {
+    this.message = msg;
+    this.messageTimer = duration;
+  }
+
+  /** 更新鼠标位置(用于卡片 hover 效果;由 GameClient renderMenu 每帧传入)。 */
+  setMouse(mx: number, my: number) {
+    this.mouseX = mx;
+    this.mouseY = my;
+  }
+
+  // ===================== 布局 =====================
+  layout(W: number, H: number) {
+    const scale = Math.min(1, W / (this.PW + 40), H / (this.PH + 40));
+    this.panelScale = scale;
+    this.screenRectVal = {
+      x: W / 2 - (this.PW * scale) / 2,
+      y: H / 2 - (this.PH * scale) / 2,
+      w: this.PW * scale,
+      h: this.PH * scale,
+    };
+    const px = W / 2 - this.PW / 2; // 设计坐标
+    const py = H / 2 - this.PH / 2;
+    this.closeBtn = { x: px + this.PW - 46, y: py + 8, w: 36, h: 36 };
+    const tabW = 148;
+    const tabH = 36;
+    const gap = 8;
+    const tabX = px + 20;
+    const tabY = py + 62;
+    this.tabRects = {
+      buy: { x: tabX, y: tabY, w: tabW, h: tabH },
+      membership: { x: tabX + tabW + gap, y: tabY, w: tabW, h: tabH },
+      redeem: { x: tabX + (tabW + gap) * 2, y: tabY, w: tabW, h: tabH },
+    };
+    return { scale, px, py };
+  }
+
+  screenRect(): Rect {
+    return this.screenRectVal;
+  }
+
+  private hitRect(r: Rect, x: number, y: number): boolean {
+    return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  }
+
+  // ===================== 交互 =====================
+  handleClick(mx: number, my: number, W: number, H: number): boolean {
+    if (!this.visible) return false;
+    this.layout(W, H);
+    const s = this.panelScale;
+    const dx = W / 2 + (mx - W / 2) / s;
+    const dy = H / 2 + (my - H / 2) / s;
+    const px = W / 2 - this.PW / 2;
+    const py = H / 2 - this.PH / 2;
+
+    // 点击面板外关闭
+    if (dx < px || dx > px + this.PW || dy < py || dy > py + this.PH) {
+      this.close();
+      return false;
+    }
+
+    // 关闭按钮
+    if (this.hitRect(this.closeBtn, dx, dy)) {
+      this.close();
+      return true;
+    }
+
+    // 页签
+    for (const [tabName, r] of Object.entries(this.tabRects)) {
+      if (this.hitRect(r, dx, dy)) {
+        this.currentTab = tabName as ShopSystem["currentTab"];
+        this.scrollOffset = 0;
+        this.membershipScrollOffset = 0;
+        this.redeemInputActive = false;
+        this.filterSearchActive = false;
+        return true;
+      }
+    }
+
+    if (this.currentTab === "buy") {
+      // 搜索框
+      if (dx >= px + 20 && dx <= px + 370 && dy >= py + 116 && dy <= py + 146) {
+        this.filterSearchActive = true;
+        return true;
+      }
+      // 商品卡:◀▶ 切换稀有度,购买按钮直接购买
+      for (const c of this._shopCardRects) {
+        if (this.hitRect(c.prevRect, dx, dy)) {
+          this.cardRarities.set(c.entry.item, (c.rarity + 9) % 10);
+          return true;
+        }
+        if (this.hitRect(c.nextRect, dx, dy)) {
+          this.cardRarities.set(c.entry.item, (c.rarity + 1) % 10);
+          return true;
+        }
+        if (this.hitRect(c.buyRect, dx, dy)) {
+          this.buyItem(c.entry, c.rarity);
+          return true;
+        }
+      }
+      return true;
+    }
+
+    if (this.currentTab === "membership") {
+      for (const m of this._membershipRects) {
+        if (this.hitRect(m.rect, dx, dy)) {
+          this.purchaseMembership(m.tier);
+          return true;
+        }
+      }
+      return true;
+    }
+
+    if (this.currentTab === "redeem") {
+      const boxW = Math.min(420, this.PW - 120);
+      const boxX = px + this.PW / 2 - boxW / 2;
+      const boxY = py + 112 + 130;
+      const boxH = 44;
+      if (dx >= boxX && dx <= boxX + boxW && dy >= boxY && dy <= boxY + boxH) {
+        this.redeemInputActive = true;
+        return true;
+      }
+      const btnW = 140;
+      const btnH = 40;
+      const btnX = px + this.PW / 2 - btnW / 2;
+      const btnY = boxY + boxH + 30;
+      if (dx >= btnX && dx <= btnX + btnW && dy >= btnY && dy <= btnY + btnH) {
+        const code = this.redeemText;
+        this.redeemText = "";
+        this.redeemInputActive = false;
+        this.redeem(code);
+        return true;
+      }
+      return true;
+    }
+
+    return true;
+  }
+
+  handleWheel(deltaY: number, W: number, H: number) {
+    if (!this.visible) return;
+    this.layout(W, H);
+    const step = deltaY > 0 ? 36 : -36;
+    if (this.currentTab === "buy") {
+      const rows = Math.ceil(this.getFilteredItems().length / 3);
+      const maxOff = Math.max(0, rows * 202 - 2 * 202);
+      this.scrollOffset = Math.max(0, Math.min(maxOff, this.scrollOffset + step));
+    } else if (this.currentTab === "membership") {
+      const rows = Math.ceil(this.MEMBERSHIP_TIERS.length / 2);
+      const maxOff = Math.max(0, rows * 364 - (this.PH - 132));
+      this.membershipScrollOffset = Math.max(0, Math.min(maxOff, this.membershipScrollOffset + step));
+    }
+  }
+
+  update(dt: number) {
+    if (this.messageTimer > 0) {
+      this.messageTimer -= dt;
+      if (this.messageTimer <= 0) this.message = "";
+    }
+  }
+
+  open() {
+    this.visible = true;
+    this.scrollOffset = 0;
+    this.membershipScrollOffset = 0;
+    this.redeemInputActive = false;
+    this.filterSearchActive = false;
+  }
+
+  close() {
+    this.visible = false;
+    this.redeemInputActive = false;
+    this.filterSearchActive = false;
+  }
+
+  toggle() {
+    if (this.visible) this.close();
+    else this.open();
+  }
+
+  // ===================== 绘制 =====================
+  private drawStrokedText(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    x: number,
+    y: number,
+    fontSize = 14,
+    textAlign: CanvasTextAlign = "center",
+    fillColor = "white",
+    strokeWidth = 3,
+  ) {
+    ctx.save();
+    ctx.font = ` ${fontSize}px ${FONT_FAMILY}`;
+    ctx.textAlign = textAlign;
+    ctx.textBaseline = "middle";
+    ctx.strokeStyle = "black";
+    ctx.lineWidth = strokeWidth;
+    ctx.lineJoin = "round";
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = fillColor;
+    ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  private drawStyledButton(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    rect: [number, number, number, number],
+    baseColor: RGB,
+    fontSize = 16,
+  ) {
+    const [x, y, w, h] = rect;
+    const adj = (rgb: RGB, f: number) => rgb.map(c => Math.min(255, Math.max(0, Math.floor(c * f))));
+    const darkColor = `rgb(${adj(baseColor, 0.85).join(",")})`;
+    const lightColor = `rgb(${baseColor.join(",")})`;
+    const strokeColor = `rgb(${adj(baseColor, 0.5).join(",")})`;
+
+    ctx.beginPath();
+    roundRect(ctx, x, y, w, h, 8);
+    ctx.fillStyle = lightColor;
+    ctx.fill();
+
+    ctx.save();
+    ctx.beginPath();
+    roundRect(ctx, x, y, w, h, 8);
+    ctx.clip();
+    ctx.fillStyle = darkColor;
+    ctx.fillRect(x, y, w, h / 2);
+    ctx.restore();
+
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    roundRect(ctx, x, y, w, h, 8);
+    ctx.stroke();
+
+    if (text) {
+      ctx.font = ` ${fontSize}px ${FONT_FAMILY}`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.strokeStyle = "black";
+      ctx.lineWidth = 3;
+      ctx.lineJoin = "round";
+      ctx.strokeText(text, x + w / 2, y + h / 2);
+      ctx.fillStyle = "white";
+      ctx.fillText(text, x + w / 2, y + h / 2);
+    }
+  }
+
+  /** 带金铜色星星图标的按钮(价格按钮统一用这个,替代 "⭐价格" 文本)。 */
+  private drawPriceButton(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    rect: [number, number, number, number],
+    baseColor: RGB,
+    fontSize = 13,
+    starSize = 9,
+  ) {
+    this.drawStyledButton(ctx, "", rect, baseColor, fontSize);
+    const [x, y, w, h] = rect;
+    ctx.font = ` ${fontSize}px ${FONT_FAMILY}`;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    const tw = ctx.measureText(text).width;
+    const gap = starSize * 2 + 4;
+    const starCX = x + w / 2 - (tw + gap) / 2 + starSize;
+    drawStarIcon(ctx, starCX, y + h / 2, starSize);
+    const tx = starCX + starSize + 2;
+    ctx.strokeStyle = "black";
+    ctx.lineWidth = 2.5;
+    ctx.lineJoin = "round";
+    ctx.strokeText(text, tx, y + h / 2);
+    ctx.fillStyle = "white";
+    ctx.fillText(text, tx, y + h / 2);
+  }
+
+private drawStarShape(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  spikes: number,
+  outerRadius: number,
+  innerRadius: number,
+  color: string,
+) {
+  let rot = (Math.PI / 2) * 3;
+  const step = Math.PI / spikes;
+
+  ctx.beginPath();
+  ctx.moveTo(cx, cy - outerRadius);
+  for (let i = 0; i < spikes; i++) {
+    ctx.lineTo(
+      cx + Math.cos(rot) * outerRadius,
+      cy + Math.sin(rot) * outerRadius,
+    );
+    rot += step;
+    ctx.lineTo(
+      cx + Math.cos(rot) * innerRadius,
+      cy + Math.sin(rot) * innerRadius,
+    );
+    rot += step;
+  }
+  ctx.closePath();
+
+  // fill 用原色
+  ctx.fillStyle = color;
+  ctx.fill();
+
+  // stroke 用加深后的颜色
+  ctx.strokeStyle = this.darkenColor(color, 25); // 加深 25%，可调
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = innerRadius / 4;
+  ctx.stroke();
+}
+
+/**
+ * 将任意 CSS 颜色字符串加深指定百分比
+ * 支持 hex / rgb / hsl / 命名色
+ */
+private darkenColor(color: string, percent: number): string {
+  // 借助浏览器原生解析：写入临时 canvas 取 rgba
+  const tmp = document.createElement('canvas');
+  tmp.width = tmp.height = 1;
+  const tCtx = tmp.getContext('2d')!;
+  tCtx.fillStyle = color;
+  tCtx.fillRect(0, 0, 1, 1);
+  const [r, g, b] = tCtx.getImageData(0, 0, 1, 1).data;
+
+  const factor = 1 - percent / 100;
+  return `rgb(${Math.round(r * factor)},${Math.round(g * factor)},${Math.round(b * factor)})`;
+}
+
+  draw(ctx: CanvasRenderingContext2D, W: number, H: number) {
+    if (!this.visible) return;
+    this.checkDiscountUpdate();
+    const { scale, px, py } = this.layout(W, H);
+    // 鼠标坐标转设计坐标(供商品卡 hover 判断;setMouse 传入的是屏幕坐标)。
+    this.mouseX = W / 2 + (this.mouseX - W / 2) / scale;
+    this.mouseY = H / 2 + (this.mouseY - H / 2) / scale;
+
+    ctx.save();
+    if (scale < 1) {
+      ctx.translate(W / 2, H / 2);
+      ctx.scale(scale, scale);
+      ctx.translate(-W / 2, -H / 2);
+    }
+
+    // 主背景(参考 ShopSystem.draw 的青色主题)
+    ctx.fillStyle = "#22C1E9";
+    ctx.beginPath();
+    roundRect(ctx, px, py, this.PW, this.PH, 12);
+    ctx.fill();
+    ctx.strokeStyle = "#0B7894";
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    roundRect(ctx, px, py, this.PW, this.PH, 12);
+    ctx.stroke();
+
+    // 标题 + 星星(金铜色五角星图标 + 数量文本)
+    this.drawStrokedText(ctx, "Shop", px + this.PW / 2, py + 30, 26, "center", "#ffffff");
+    drawStarIcon(ctx, px + this.PW - 118, py + 30, 13);
+    this.drawStrokedText(ctx, this.formatPrice(this.game.stars), px + this.PW - 140, py + 30, 24, "right", "#ffd700");
+
+    // 关闭按钮
+    ctx.fillStyle = "#c0392b";
+    ctx.beginPath();
+    roundRect(ctx, this.closeBtn.x, this.closeBtn.y, this.closeBtn.w, this.closeBtn.h, 6);
+    ctx.fill();
+    this.drawStrokedText(ctx, "✕", this.closeBtn.x + this.closeBtn.w / 2, this.closeBtn.y + this.closeBtn.h / 2, 18, "center", "#ffffff");
+
+    // 页签
+    const tabs: [string, ShopSystem["currentTab"]][] = [
+      ["Buy", "buy"],
+      ["Memberships", "membership"],
+      ["Redeem", "redeem"],
+    ];
+    for (const [label, tabName] of tabs) {
+      const r = this.tabRects[tabName];
+      const active = this.currentTab === tabName;
+      const base: RGB =
+        tabName === "redeem"
+          ? active ? [155, 89, 182] : [108, 52, 131]
+          : active ? [255, 215, 0] : [30, 48, 80];
+      this.drawStyledButton(ctx, label, [r.x, r.y, r.w, r.h], base, 15);
+    }
+
+    if (this.currentTab === "buy") this.drawBuyTab(ctx, px, py);
+    else if (this.currentTab === "membership") this.drawMembershipTab(ctx, px, py);
+    else this.drawRedeemTab(ctx, px, py);
+
+    // 消息
+    if (this.messageTimer > 0) {
+      const color = this.message.includes("✅") ? "#2ecc71" : this.message.includes("❌") ? "#e74c3c" : "#ffd700";
+      this.drawStrokedText(ctx, this.message, px + this.PW / 2, py + this.PH - 18, 15, "center", color);
+    }
+
+    ctx.restore();
+  }
+
+  private drawBuyTab(ctx: CanvasRenderingContext2D, px: number, py: number) {
+    const sx = px;
+    const sw = this.PW;
+
+    // 搜索框(稀有度筛选下拉已移除;卡片上 ◀▶ 切换稀有度)
+    const srchX = sx + 20;
+    const srchY = py + 116;
+    const srchW = 350;
+    const srchH = 30;
+    ctx.fillStyle = this.filterSearchActive ? "#d2d2d2" : "#ffffff";
+    ctx.beginPath();
+    roundRect(ctx, srchX, srchY, srchW, srchH, 5);
+    ctx.fill();
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    roundRect(ctx, srchX, srchY, srchW, srchH, 5);
+    ctx.stroke();
+    ctx.font = `15px ${FONT_FAMILY}`;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = this.filterSearch ? "#000" : "#556677";
+    ctx.fillText(this.filterSearch || "Search...", srchX + 8, srchY + srchH / 2);
+
+    const filtered = this.getFilteredItems();
+    this.drawStrokedText(ctx, `${filtered.length} items`, sx + sw - 20, py + 132, 14, "right", "#ffffff");
+
+    // 物品卡片网格(用 drawCard 绘制物品卡;卡上 ◀▶ 切换稀有度,购买按钮直接购买)
+    const COLS = 3;
+    const SLOT_W = 190;
+    const SLOT_H = 190;
+    const GAP = 12;
+    const gridW = COLS * SLOT_W + (COLS - 1) * GAP;
+    const gStartX = sx + (sw - gridW) / 2;
+    const gStartY = py + 158;
+    const viewRows = 2;
+    const contentH = viewRows * (SLOT_H + GAP);
+    const totalRows = Math.ceil(filtered.length / COLS);
+    const totalHeight = totalRows * (SLOT_H + GAP);
+    const maxOff = Math.max(0, totalHeight - contentH);
+    this.scrollOffset = Math.max(0, Math.min(maxOff, this.scrollOffset));
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(sx, gStartY, sw, contentH);
+    ctx.clip();
+    ctx.translate(0, -this.scrollOffset);
+    this._shopCardRects = [];
+    for (let i = 0; i < filtered.length; i++) {
+      const entry = filtered[i];
+      const col = i % COLS;
+      const row = Math.floor(i / COLS);
+      const gx = gStartX + col * (SLOT_W + GAP);
+      const gy = gStartY + row * (SLOT_H + GAP);
+      const def = ITEMS[entry.item];
+      const rarity = Math.min(9, Math.max(0, this.cardRarities.get(entry.item) ?? 0));
+      this.cardRarities.set(entry.item, rarity);
+      const isDisc = (rarity === 8 || rarity === 9) && def
+        ? this.discountItems.some(d => d.type === def.name)
+        : false;
+      const price = this.getDiscountedPrice(entry.item, rarity);
+      const cardScreenRect: Rect = { x: gx, y: gy - this.scrollOffset, w: SLOT_W, h: SLOT_H };
+      const hovered = this.hitRect(cardScreenRect, this.mouseX, this.mouseY);
+
+      // 卡片背景
+      ctx.fillStyle = "#78B8C9";
+      ctx.beginPath();
+      roundRect(ctx, gx, gy, SLOT_W, SLOT_H, 8);
+      ctx.fill();
+      ctx.strokeStyle = isDisc ? "#ffd700" : "#1a3050";
+      ctx.lineWidth = isDisc ? 4 : 2;
+      ctx.beginPath();
+      roundRect(ctx, gx, gy, SLOT_W, SLOT_H, 8);
+      ctx.stroke();
+
+      // 物品卡(drawCard 绘制:稀有度颜色边框 + 图标)
+      if (def) {
+        drawCard(
+          ctx,
+          { x: gx + (SLOT_W - 96) / 2, y: gy + 8, w: 96, h: 96 },
+          { item: entry.item, rarity, count: 1 },
+          { hovered },
+        );
+      }
+
+      // 名称
+      this.drawStrokedText(ctx, def?.name ?? "?", gx + SLOT_W / 2, gy + 116, 12, "center", "#ffffff", 2);
+
+      // 稀有度切换行(◀ 稀有度名 ▶)
+      const rowY = gy + 130;
+      ctx.fillStyle = "rgba(0,0,0,0.25)";
+      ctx.beginPath();
+      roundRect(ctx, gx + 14, rowY, 24, 22, 5);
+      ctx.fill();
+      ctx.beginPath();
+      roundRect(ctx, gx + SLOT_W - 38, rowY, 24, 22, 5);
+      ctx.fill();
+      this.drawStrokedText(ctx, "◀", gx + 26, rowY + 11, 13, "center", "#ffffff");
+      this.drawStrokedText(ctx, "▶", gx + SLOT_W - 26, rowY + 11, 13, "center", "#ffffff");
+      const rname = RARITIES[rarity]?.name ?? "?";
+      ctx.font = `12px ${FONT_FAMILY}`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.strokeStyle = "black";
+      ctx.lineWidth = 2.5;
+      ctx.lineJoin = "round";
+      ctx.strokeText(rname, gx + SLOT_W / 2, rowY + 11);
+      ctx.fillStyle = RARITIES[rarity]?.color ?? "#ffffff";
+      ctx.fillText(rname, gx + SLOT_W / 2, rowY + 11);
+
+      // 折扣角标
+      if (isDisc && def) {
+        const d = this.discountItems.find(dd => dd.type === def.name);
+        if (d) {
+          ctx.fillStyle = "#e74c3c";
+          ctx.beginPath();
+          roundRect(ctx, gx + SLOT_W - 30, gy + 3, 26, 14, 4);
+          ctx.fill();
+          ctx.font = "9px sans-serif";
+          ctx.fillStyle = "#fff";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(`-${d.discountPercent}%`, gx + SLOT_W - 17, gy + 10);
+        }
+      }
+
+      // 购买按钮(点击直接购买该稀有度的物品,钱够即买)
+      const buyRect: Rect = { x: gx + 10, y: gy + 158, w: SLOT_W - 20, h: 26 };
+      this.drawPriceButton(ctx, this.formatPrice(price), [buyRect.x, buyRect.y, buyRect.w, buyRect.h], [253, 63, 63], 12, 8);
+
+      this._shopCardRects.push({
+        entry,
+        rarity,
+        rect: cardScreenRect,
+        buyRect: { x: buyRect.x, y: buyRect.y - this.scrollOffset, w: buyRect.w, h: buyRect.h },
+        prevRect: { x: gx + 14, y: rowY - this.scrollOffset, w: 24, h: 22 },
+        nextRect: { x: gx + SLOT_W - 38, y: rowY - this.scrollOffset, w: 24, h: 22 },
+      });
+    }
+    ctx.restore();
+
+    // 滚动条
+    if (maxOff > 0) {
+      const barX = sx + sw - 12;
+      const barY = gStartY;
+      const barH = contentH;
+      const thumbH = Math.max(24, barH * (contentH / totalHeight));
+      const thumbY = barY + (this.scrollOffset / maxOff) * (barH - thumbH);
+      ctx.fillStyle = "rgba(255,255,255,0.25)";
+      ctx.beginPath();
+      roundRect(ctx, barX, barY, 6, barH, 3);
+      ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.7)";
+      ctx.beginPath();
+      roundRect(ctx, barX, thumbY, 6, thumbH, 3);
+      ctx.fill();
+    }
+
+  }
+
+  private renderMemberCard(ctx: CanvasRenderingContext2D, tier: MembershipTier, cx: number, cy: number, cardW: number, cardH: number) {
+    const themeColor = rgbArr(tier.color);
+    const active = this.getMembershipTier()?.id === tier.id;
+
+    ctx.fillStyle = "#7EE39B";
+    ctx.beginPath();
+    roundRect(ctx, cx, cy, cardW, cardH, 15);
+    ctx.fill();
+    if (active) {
+      ctx.strokeStyle = "#ffd700";
+      ctx.lineWidth = 4;
+      ctx.beginPath();
+      roundRect(ctx, cx, cy, cardW, cardH, 15);
+      ctx.stroke();
+    }
+
+    // 星星装饰
+    const starCenterY = cy + 58;
+    this.drawStarShape(ctx, cx + cardW / 2 - 45, starCenterY + 20, 5, 32, 16, themeColor);
+    this.drawStarShape(ctx, cx + cardW / 2 + 45, starCenterY + 20, 5, 32, 16, themeColor);
+    this.drawStarShape(ctx, cx + cardW / 2, starCenterY, 5, 50, 25, themeColor);
+    this.drawStrokedText(ctx, tier.label, cx + cardW / 2, starCenterY + 14, 26, "center", "#ffffff");
+
+    // 价格(无粉色标签背景;星星用会员主题色绘制)
+    const priceY = cy + 128;
+    const priceText = `${this.formatPrice(tier.price)}/mo`;
+    ctx.font = `17px ${FONT_FAMILY}`;
+    const priceTw = ctx.measureText(priceText).width;
+    this.drawStarShape(ctx, cx + cardW / 2 - priceTw / 2 - 12, priceY + 22, 5, 9, 4.5, themeColor);
+    this.drawStrokedText(ctx, priceText, cx + cardW / 2 + 2, priceY + 22, 17, "center", "#ffffff");
+
+    // 描述
+    const descY = priceY + 48;
+    ctx.fillStyle = "rgba(255,255,255,0.3)";
+    ctx.beginPath();
+    roundRect(ctx, cx + 10, descY, cardW - 20, 104, 10);
+    ctx.fill();
+    tier.desc.forEach((line, i) => {
+      this.drawStrokedText(ctx, line, cx + cardW / 2, descY + 22 + i * 22, 13, "center", "#ffffff");
+    });
+
+    // 购买按钮
+    const btnW = 140;
+    const btnH = 34;
+    const btnX = cx + cardW / 2 - btnW / 2;
+    const btnY = cy + cardH - 48;
+    if (active) {
+      ctx.fillStyle = "rgba(255,215,0,0.35)";
+      ctx.beginPath();
+      roundRect(ctx, btnX, btnY, btnW, btnH, 8);
+      ctx.fill();
+      ctx.strokeStyle = "#ffd700";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      roundRect(ctx, btnX, btnY, btnW, btnH, 8);
+      ctx.stroke();
+      this.drawStrokedText(ctx, "ACTIVE", btnX + btnW / 2, btnY + btnH / 2, 13, "center", "#ffd700");
+    } else {
+      this.drawStyledButton(ctx, `⭐${this.formatPrice(tier.price)}`, [btnX, btnY, btnW, btnH], [253, 63, 63], 13);
+    }
+  }
+
+  private drawMembershipTab(ctx: CanvasRenderingContext2D, px: number, py: number) {
+    const contentY = py + 112;
+    const contentH = this.PH - 132;
+    const COLS = 2;
+    const CARD_W = 320;
+    const CARD_H = 340;
+    const GAP = 24;
+    const gridX = px + (this.PW - (COLS * CARD_W + (COLS - 1) * GAP)) / 2;
+    const gridStartY = contentY + 6;
+    const rows = Math.ceil(this.MEMBERSHIP_TIERS.length / COLS);
+    const totalHeight = rows * (CARD_H + GAP);
+    const maxOff = Math.max(0, totalHeight - contentH);
+    this.membershipScrollOffset = Math.max(0, Math.min(maxOff, this.membershipScrollOffset));
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px + 8, contentY, this.PW - 16, contentH);
+    ctx.clip();
+    ctx.translate(0, -this.membershipScrollOffset);
+    this._membershipRects = [];
+    for (let i = 0; i < this.MEMBERSHIP_TIERS.length; i++) {
+      const tier = this.MEMBERSHIP_TIERS[i];
+      const col = i % COLS;
+      const row = Math.floor(i / COLS);
+      const cx = gridX + col * (CARD_W + GAP);
+      const cy = gridStartY + row * (CARD_H + GAP);
+      this.renderMemberCard(ctx, tier, cx, cy, CARD_W, CARD_H);
+      this._membershipRects.push({ tier, rect: { x: cx, y: cy - this.membershipScrollOffset, w: CARD_W, h: CARD_H } });
+    }
+    ctx.restore();
+
+    const cur = this.getMembershipTier();
+    this.drawStrokedText(
+      ctx,
+      cur ? `Active: ${cur.label} membership` : "Scroll to see more · Upgrading replaces current tier",
+      px + this.PW / 2,
+      py + this.PH - 14,
+      12,
+      "center",
+      "#ffffff",
+    );
+
+    if (maxOff > 0) {
+      const barX = px + this.PW - 12;
+      const barY = contentY;
+      const barH = contentH;
+      const thumbH = Math.max(24, barH * (contentH / totalHeight));
+      const thumbY = barY + (this.membershipScrollOffset / maxOff) * (barH - thumbH);
+      ctx.fillStyle = "rgba(255,255,255,0.25)";
+      ctx.beginPath();
+      roundRect(ctx, barX, barY, 6, barH, 3);
+      ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.7)";
+      ctx.beginPath();
+      roundRect(ctx, barX, thumbY, 6, thumbH, 3);
+      ctx.fill();
+    }
+  }
+
+  private drawRedeemTab(ctx: CanvasRenderingContext2D, px: number, py: number) {
+    const contentY = py + 112;
+    const contentH = this.PH - 132;
+
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.15)";
+    ctx.beginPath();
+    roundRect(ctx, px + 10, contentY, this.PW - 20, contentH, 12);
+    ctx.fill();
+    ctx.restore();
+
+    this.drawStrokedText(ctx, "Redeem a Code", px + this.PW / 2, contentY + 50, 26, "center", "#ffffff");
+    this.drawStrokedText(ctx, "Enter your code below to claim rewards", px + this.PW / 2, contentY + 84, 15, "center", "#dfe6ee");
+
+    const boxW = Math.min(420, this.PW - 120);
+    const boxX = px + this.PW / 2 - boxW / 2;
+    const boxY = contentY + 130;
+    const boxH = 44;
+    ctx.fillStyle = this.redeemInputActive ? "#ffffff" : "#e8f0f4";
+    ctx.beginPath();
+    roundRect(ctx, boxX, boxY, boxW, boxH, 8);
+    ctx.fill();
+    ctx.strokeStyle = this.redeemInputActive ? "#0B7894" : "#9ab3bf";
+    ctx.lineWidth = this.redeemInputActive ? 3 : 2;
+    ctx.beginPath();
+    roundRect(ctx, boxX, boxY, boxW, boxH, 8);
+    ctx.stroke();
+
+    ctx.font = `20px ${FONT_FAMILY}`;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    if (this.redeemText.length === 0 && !this.redeemInputActive) {
+      ctx.fillStyle = "#7f8c8d";
+      ctx.fillText("enter the code", boxX + 14, boxY + boxH / 2);
+    } else {
+      ctx.fillStyle = "#000000";
+      const shown = this.redeemText + (this.redeemInputActive && Date.now() % 1000 < 500 ? "|" : "");
+      ctx.fillText(shown, boxX + 14, boxY + boxH / 2);
+    }
+
+    const btnW = 140;
+    const btnH = 40;
+    const btnX = px + this.PW / 2 - btnW / 2;
+    const btnY = boxY + boxH + 30;
+    this.drawStyledButton(ctx, "Confirm", [btnX, btnY, btnW, btnH], [100, 146, 158], 16);
+  }
 }
 
 export class GameClient {
@@ -4078,6 +5334,10 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
 
   // Dual-row quick-slot bar (main + secondary)
   quickSlot: QuickSlot;
+  /** 商店系统(主菜单 Shop 图标打开;星星/会员/皮肤/兑换均本地持久化)。 */
+  shopSystem: ShopSystem;
+  /** 商店星星(⭐)货币,存入本地存档 SaveData.stars。 */
+  stars = 10;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -4091,6 +5351,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     if (typeof window !== "undefined") {
       (window as any).gameInstance = this;
     }
+    this.shopSystem = new ShopSystem(this);
     this.achievements = new AchievementSystem(this);
     this.loadLocal();
   }
@@ -4113,6 +5374,75 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       requestSwapAll: () => this.sendSwapRow(SWAP_ROW_ALL),
       drawTooltip: (cell: Cell, x: number, y: number) => this.tooltip(cell, x, y),
     };
+  }
+
+  // ------------------------------------------------------------- shop API
+  /** 增减星星(下限 0),返回最新值。 */
+  addStars(n: number): number {
+    this.stars = Math.max(0, this.stars + n);
+    this.saveDirty = true;
+    return this.stars;
+  }
+
+  /**
+   * 商店/兑换码发放物品：直接写入本地背包。主菜单场景的背包就是本地存档,
+   * 点击 PLAY 时随 JOIN 同步到服务器。背包满返回 false。
+   */
+  grantShopItems(item: number, rarity: number, count: number): boolean {
+    if (item < 0 || item >= ITEMS.length || rarity < 0 || rarity > MAX_RARITY || count <= 0) return false;
+    let left = count;
+    for (const cell of this.bag) {
+      if (left <= 0) break;
+      if (cell && cell.item === item && cell.rarity === rarity && cell.count < 999) {
+        const put = Math.min(999 - cell.count, left);
+        cell.count += put;
+        left -= put;
+      }
+    }
+    while (left > 0) {
+      let idx = this.bag.indexOf(null);
+      if (idx < 0) {
+        if (this.bag.length >= BAG_MAX) return false;
+        idx = this.bag.length;
+        this.bag.push(null);
+      }
+      const put = Math.min(999, left);
+      this.bag[idx] = { item, rarity, count: put };
+      left -= put;
+    }
+    this.saveDirty = true;
+    return true;
+  }
+
+  /** Ruby 会员同步主菜单 Extra Bonus 面板状态。 */
+  setRubyMembership(expiresAt: number) {
+    this.rubyMembershipActive = true;
+    this.extraBonusActive = true;
+    this.extraBonusExpireTime = expiresAt;
+  }
+
+  /** 立即写盘(商店购买/兑换后调用;主菜单没有周期存档)。 */
+  saveNow() {
+    this.persist();
+  }
+
+  /** 兑换码玩家标识：登录账号或设备指纹。 */
+  playerIdentity(): string {
+    if (this.accountSystem.currentUser) return "account_" + this.accountSystem.currentUser;
+    let id = localStorage.getItem("device_id");
+    if (!id) {
+      id = "dev_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+      localStorage.setItem("device_id", id);
+    }
+    return "device_" + id;
+  }
+
+  private typeIntoShopSearch(key: string) {
+    this.shopSystem.typeSearch(key);
+  }
+
+  private typeIntoRedeem(key: string) {
+    this.shopSystem.typeRedeem(key);
   }
 
   /**
@@ -4188,13 +5518,21 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   /** 统一的手机检测：窗口宽度 / UA / 触摸能力 / 全屏（进入全屏视为最精确的手机信号）。 */
   private detectMobile(): boolean {
     if (typeof window === "undefined") return false;
+    const hasTouch = "ontouchstart" in window || (navigator.maxTouchPoints || 0) > 0;
+    const uaMobile = /Mobi|Android|iPhone|iPad|iPod|webOS|BlackBerry|Opera Mini|IEMobile|Tablet|SM-T|Kindle|Silk/i.test(navigator.userAgent);
     return (
       window.innerWidth <= 900 ||
-      /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
-      "ontouchstart" in window ||
-      // 全屏检测：手机端玩家通常进入全屏游玩，命中即视为手机版
+      uaMobile ||
+      hasTouch ||
       (typeof document !== "undefined" && !!document.fullscreenElement)
     );
+  }
+
+  /** Whether the canvas virtual keyboard should appear for text inputs.
+   *  True on auto-detected mobile devices OR when the user manually enables
+   *  the "Virtual Keyboard" setting as a fallback. */
+  private showVirtualKeyboard(): boolean {
+    return this.isMobile || this.settings.virtualKeyboard;
   }
 
   /** 全屏状态变化（进入/退出全屏）→ 重新检测设备并刷新移动端布局。 */
@@ -4308,6 +5646,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.craftLogCrafted = data.craftCrafted || 0;
     this.craftLogBurned = data.craftBurned || 0;
     this.craftLogAttempts = data.craftAttempts || 0;
+    this.stars = data.stars ?? 10;
   }
 
   private currentSave(): SaveData {
@@ -4323,6 +5662,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       craftCrafted: this.craftLogCrafted,
       craftBurned: this.craftLogBurned,
       craftAttempts: this.craftLogAttempts,
+      stars: this.stars,
     };
   }
 
@@ -4961,6 +6301,7 @@ private handlePacket(data: Uint8Array) {
     } else {
       // 主菜单:只推进弹窗计时,不累计游玩时长
       this.achievements._tickPopups(dt);
+      this.shopSystem.update(dt);
     }
   }
 
@@ -5836,6 +7177,24 @@ private bagLayout() {
       e.preventDefault();
       return;
     }
+    // Shop panel (menu): Escape closes; redeem/search input captures keys.
+    if (this.scene === "menu" && this.shopSystem.visible) {
+      if (e.code === "Escape") {
+        this.shopSystem.close();
+        e.preventDefault();
+        return;
+      }
+      if (this.shopSystem.redeemInputActive) {
+        e.preventDefault();
+        this.typeIntoRedeem(e.key);
+        return;
+      }
+      if (this.shopSystem.filterSearchActive) {
+        e.preventDefault();
+        this.typeIntoShopSearch(e.key);
+        return;
+      }
+    }
     if (this.scene === "menu" && this.mobGallery.handleKey(e.key)) {
       e.preventDefault();
       return;
@@ -5989,7 +7348,7 @@ private bagLayout() {
     this.my = p.y;
 
     // Virtual keyboard (mobile) — intercept clicks when active
-    if (this.isMobile && this.vk.active) {
+    if (this.showVirtualKeyboard() && this.vk.active) {
       const vkResult = this.vk.handleClick(p.x, p.y);
       if (vkResult.handled) {
         if (vkResult.key) {
@@ -6000,6 +7359,14 @@ private bagLayout() {
             this.typeIntoCraftSearch(vkResult.key);
           } else if (this.vk.target === 'chat') {
             this.typeIntoChat(vkResult.key);
+          } else if (this.vk.target === 'redeem') {
+            this.typeIntoRedeem(vkResult.key);
+          } else if (this.vk.target === 'shopSearch') {
+            this.typeIntoShopSearch(vkResult.key);
+          } else if (this.vk.target === 'playerName') {
+            this.typeInto(vkResult.key);
+          } else if (this.vk.target === 'accountInput') {
+            this.accountSystem.handleKeyDownChar(vkResult.key);
           }
         }
         return;
@@ -6019,7 +7386,7 @@ private bagLayout() {
       return;
     }
     // Mobile: clicking the chatbox triggers the keyboard (check BEFORE joystick)
-    if (this.isMobile && this.scene === "game" && this.bagAnim < 0.2 && this.craftAnim < 0.2) {
+    if (this.showVirtualKeyboard() && this.scene === "game" && this.bagAnim < 0.2 && this.craftAnim < 0.2) {
       const chatLift = this.isMobile || this.w < 640 ? 76 : 50;
       const chatScreenHeight = this.h - this.hotbarHeight() + chatLift;
       if (this.chat.handleClick(p.x, p.y, chatScreenHeight)) {
@@ -6124,6 +7491,7 @@ private bagLayout() {
         !this.settings.panelOpen &&
         !this.accountSystem.panelOpen &&
         !this.achievements.panelOpen &&
+        !this.shopSystem.visible &&
         this.changelog.beginTouch(p.x, p.y, this.w, this.h)
       ) return;
       this.menuClick(p.x, p.y);
@@ -6217,6 +7585,17 @@ private bagLayout() {
       e.stopPropagation();
       this.achievements.handleScroll(e.deltaY);
       return;
+    }
+    // Shop panel (menu): scroll the active tab (only while the cursor is
+    // over the panel so the wheel keeps working elsewhere).
+    if (this.scene === "menu" && this.shopSystem.visible) {
+      const shopR = this.shopSystem.screenRect();
+      if (shopR && this.mx >= shopR.x && this.mx <= shopR.x + shopR.w && this.my >= shopR.y && this.my <= shopR.y + shopR.h) {
+        e.preventDefault();
+        e.stopPropagation();
+        this.shopSystem.handleWheel(e.deltaY, this.w, this.h);
+        return;
+      }
     }
     if (this.scene === "menu" && this.changelog.visible) {
       this.changelog.handleWheel(e.deltaY);
@@ -6734,7 +8113,7 @@ private bagLayout() {
     // Bonus 面板常驻主菜单：面板区域内的点击一律由面板处理并吞掉，
     // 不会穿透到下方的按钮（防止点开其它面板）。
     // 其它模态面板（画廊/日志/账号/设置/背包/合成）打开时不触发 bonus。
-    if (!this.mobGallery.visible && !this.changelog.visible && !this.accountSystem.panelOpen && !this.settings.panelOpen && !this.achievements.panelOpen && this.bagAnim < 0.4 && this.craftAnim < 0.4) {
+    if (!this.mobGallery.visible && !this.changelog.visible && !this.accountSystem.panelOpen && !this.settings.panelOpen && !this.achievements.panelOpen && !this.shopSystem.visible && this.bagAnim < 0.4 && this.craftAnim < 0.4) {
       if (this.hitArr(this.extraBonusButton, mx, my)) {
         if (this.hitArr(this._bonusClaimRect, mx, my)) {
           if (this.bonus.canClaim() && this.bonus.claim()) this.sendBonusStatus();
@@ -6757,6 +8136,17 @@ private bagLayout() {
     if (this.achievements.panelOpen) {
       if (this.achievements.handleClick(mx, my)) return;
       this.achievements.panelOpen = false;
+      return;
+    }
+    if (this.shopSystem.visible) {
+      if (this.shopSystem.handleClick(mx, my, this.w, this.h)) {
+        // 手机端：点击搜索框/兑换输入框时唤起虚拟键盘
+        if (this.showVirtualKeyboard() && (this.shopSystem.filterSearchActive || this.shopSystem.redeemInputActive)) {
+          this.vk.active = true;
+          this.vk.target = this.shopSystem.filterSearchActive ? 'shopSearch' : 'redeem';
+          this.vk.numMode = false;
+        }
+      }
       return;
     }
     if (this.mobGallery.visible) {
@@ -6819,19 +8209,41 @@ private bagLayout() {
       this.achievements.togglePanel();
       return;
     }
+    // 商店：主菜单 Shop 图标打开商店面板(参考 ShopSystem)。
+    if (actions.top_shop && hit(actions.top_shop, mx, my)) {
+      this.focus = null;
+      this.bagOpen = false;
+      this.craftOpen = false;
+      this.settings.close();
+      if (this.mobGallery.visible) this.mobGallery.close();
+      this.changelog.close();
+      this.achievements.panelOpen = false;
+      this.shopSystem.toggle();
+      return;
+    }
     // 尚未实现的按钮：先绘制，点击返回 "Coming soon"（暂无实际功能代码）。
-    for (const id of ['top_shop', 'top_hunting_quest', 'top_talent']) {
+    for (const id of ['top_hunting_quest', 'top_talent']) {
       if (actions[id] && hit(actions[id], mx, my)) { this.showMenuToast('Coming soon'); return; }
     }
 
-    // Name field (above biome buttons)
+    // Name field (above biome buttons) — use same dimensions as draw code
     const layout = this.menuLayout();
-    const nameFieldW = Math.min(300, this.w * 0.4);
-    const nameFieldH = 42;
+    const isMobileLayout = this.isMobile || this.w < 640;
+    const nameFieldW = isMobileLayout ? Math.min(260, this.w * 0.8) : Math.min(300, this.w * 0.4);
+    const nameFieldH = isMobileLayout ? 36 : 42;
     const nameFieldX = this.w / 2 - nameFieldW / 2;
-    const nameFieldY = layout.gridY - 70;
+    const nameFieldY = isMobileLayout ? (layout.gridY - 48) : (layout.gridY - 70);
     const nameRect = { x: nameFieldX, y: nameFieldY, w: nameFieldW, h: nameFieldH };
-    this.focus = hit(nameRect, mx, my) ? "name" : null;
+    if (hit(nameRect, mx, my)) {
+      this.focus = "name";
+      if (this.showVirtualKeyboard()) {
+        this.vk.active = true;
+        this.vk.target = 'playerName';
+        this.vk.numMode = false;
+      }
+    } else {
+      this.focus = null;
+    }
 
     // Biome buttons
     const biomeButtons = this.menuBiomeButtons();
@@ -6875,6 +8287,7 @@ private bagLayout() {
       // an invisible panel for the whole match.
       this.settings.close();
       this.mobGallery.close();
+      this.shopSystem.close();
       this.updateMobileLayout();
       this.connect();
     };
@@ -6896,6 +8309,7 @@ private bagLayout() {
       this.craftOpen = false;
       this.craftSearchActive = false;
       this.craftBiomeOpen = false;
+      this.shopSystem.close();
       this.updateMobileLayout();
     };
   }
@@ -6964,7 +8378,7 @@ private bagLayout() {
 
 
     // Mobile: clicking the chatbox triggers the keyboard
-    if (this.isMobile) {
+    if (this.showVirtualKeyboard()) {
       const chatLift = this.isMobile || this.w < 640 ? 76 : 50;
       const chatScreenHeight = this.h - this.hotbarHeight() + chatLift;
       if (this.chat.handleClick(mx, my, chatScreenHeight)) {
@@ -7064,7 +8478,7 @@ private bagLayout() {
     if (hit(layout.barRect, mx, my)) {
       this.craftSearchActive = true;
       this.craftBiomeOpen = false;
-      if (this.isMobile) {
+      if (this.showVirtualKeyboard()) {
         this.vk.active = true;
         this.vk.target = 'craftSearch';
         this.vk.numMode = false;
@@ -7308,7 +8722,7 @@ private bagLayout() {
     if (hit(barRect, mx, my)) {
       this.bagSearchActive = true;
       this.bagBiomeOpen = false;
-      if (this.isMobile) {
+      if (this.showVirtualKeyboard()) {
         this.vk.active = true;
         this.vk.target = 'bagSearch';
         this.vk.numMode = false;
@@ -7747,6 +9161,10 @@ private bagLayout() {
     else if (this.hitArr(this._bonusExtraRect, this.mx, this.my)) this.hoveredButton = 'bonus_extra';
     this._drawBonusPanel(ctx, isMobileLayout ? 12 : 12);
     this.settings.draw(ctx, W / 2, H / 2);
+        // Craft / Inventory panels can be opened right from the main menu, reusing
+    // the same in-game panel drawers.
+    this.renderCraft();
+    this.renderBag();
 if (this.drag) {
   const size = 60;
   // 摆动动画：使用正弦波产生左右摆动
@@ -7775,10 +9193,10 @@ if (this.drag) {
 
   ctx.restore();
 }
-    // Craft / Inventory panels can be opened right from the main menu, reusing
-    // the same in-game panel drawers.
-    this.renderBag();
-    this.renderCraft();
+
+    // 商店面板(绘制在最上层)。
+    this.shopSystem.setMouse(this.mx, this.my);
+    this.shopSystem.draw(ctx, W, H);
     // Bonus 面板（常驻主菜单，无按钮；参考 MainMenu._drawBonusPanel）。
     // 桌面/手机版都在右上角（顶部栏已移到左上角，右上角空闲）。
     // 面板区域点击不穿透（见 menuClick）。
@@ -7915,17 +9333,9 @@ if (this.drag) {
     const titleY = drawPy + (isMobile ? 12 : 18);
     this.drawStrokedText(ctx, `Daily Streak #${streakDays}`, drawPx + drawPw / 2, titleY, titleFs, 'center', 'white');
 
-    // 星星和倍数
+    // 星星和倍数(金铜色五角星图标 + 倍数文本)
     const starY = drawPy + (isMobile ? 32 : 48);
-    const starSize = isMobile ? 14 : 20;
-    ctx.font = `${Math.floor(isMobile ? starSize : starSize + 12)}px ${FONT_FAMILY}`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.strokeStyle = 'black';
-    ctx.lineWidth = isMobile ? 2 : 3;
-    ctx.strokeText('⭐', drawPx + drawPw / 2 - (isMobile ? 14 : 20), starY);
-    ctx.fillStyle = 'white';
-    ctx.fillText('⭐', drawPx + drawPw / 2 - (isMobile ? 14 : 20), starY);
+    drawStarIcon(ctx, drawPx + drawPw / 2 - (isMobile ? 16 : 22), starY, isMobile ? 10 : 14);
     this.drawStrokedText(ctx, `${nextMult}x`, drawPx + drawPw / 2 + (isMobile ? 12 : 18), starY, multFs, 'center', 'white');
 
     // 按钮尺寸
@@ -8115,12 +9525,13 @@ if (this.drag) {
       ctx.restore();
       text(ctx, map.name, this.w / 2, this.h / 2 - 120, 44 + (1 - this.mapFlash) * 6, "#ffffff");
     }
-    // Chat system overlay (bottom-left, above hotbar)
+
+    this.renderHud();
+        // Chat system overlay (bottom-left, above hotbar)
     this.chat.width = Math.min(400, this.w * 0.35);
     // 手机版：再往上抬一点（在快捷栏上面一点点）
     const chatLift = this.isMobile || this.w < 640 ? 76 : 50;
     this.chat.draw(this.ctx, this.h - this.hotbarHeight() + chatLift);
-    this.renderHud();
     this.renderBag();
     this.renderCraft();
 
