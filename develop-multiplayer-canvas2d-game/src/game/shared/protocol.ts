@@ -64,6 +64,7 @@ export const ENT = {
   MOB: 1,
   PETAL: 2,
   DROP: 3,
+  PROJECTILE: 4,
 } as const;
 
 export const TEAM = {

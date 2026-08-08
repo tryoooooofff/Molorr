@@ -296,7 +296,7 @@ export const ITEMS: ItemDef[] = [
   { id: 2, name: "Stinger", kind: "petal", color: "#333333", outline: "#111111", shape: "triangle", radius: 6, damage: 100, health: 1, reload: 8.0, dropFactor: 0.6, desc: "Hurts a lot, breaks fast." },
   { id: 3, name: "Rock", kind: "petal", color: "#8d8d8d", outline: "#6a6a6a", shape: "square", radius: 10, damage: 15, health: 55, reload: 3.0, dropFactor: 0.7, desc: "Heavy and very sturdy." },
   { id: 4, name: "Sand", kind: "petal", color: "#e0c068", outline: "#b89b45", shape: "circle", radius: 10, damage: 14, health: 16, reload: 1.0, dropFactor: 0.65, desc: "Gritty desert clump." },
-  { id: 5, name: "Bubble", kind: "petal", color: "#bfe9ff", outline: "#84c9ee", shape: "circle", radius: 10, damage: 3, health: 1, reload: 2.6, speed: 9, dropFactor: 0.8, desc: "Makes you swim faster." },
+  { id: 5, name: "Bubble", kind: "petal", color: "#bfe9ff", outline: "#84c9ee", shape: "circle", radius: 10, damage: 3, health: 1, reload: 2.6, speed: 2, dropFactor: 0.8, desc: "Makes you swim faster." },
   { id: 6, name: "Pearl", kind: "petal", color: "#e6dcc4", outline: "#a89c80", shape: "circle", radius: 15, damage: 20, health: 25, reload: 3.5, dropFactor: 0.65, desc: "Shiny treasure of the sea." },
   { id: 7, name: "Wing", kind: "petal", color: "#f3f3ff", outline: "#c3c3e0", shape: "triangle", radius: 10, damage: 14, health: 9, reload: 1.1, speed: 5, dropFactor: 0.7, desc: "Flaps around, light and quick." },
   { id: 8, name: "Ladybug Egg", kind: "summon", color: "#fff1cf", outline: "#e0c48a", shape: "egg", radius: 10, damage: 4, health: 20, reload: 3.0, petMob: 0, dropFactor: 0.6, desc: "Hatches a friendly ladybug." },
@@ -318,15 +318,15 @@ export const ITEMS: ItemDef[] = [
   { id: 20, name: "Bee Egg", kind: "summon", color: "#fff0a8", outline: "#b59a1e", shape: "egg", radius: 10, damage: 5, health: 22, reload: 3.4, petMob: 1, dropFactor: 0.55, desc: "Hatches a buzzing bee." },
   // ── Starfish drops ──────────────────────────────────────────────────────
   { id: 21, name: "Starfish", kind: "petal", color: "#f2799e", outline: "#bc4c72", shape: "star", radius: 10, damage: 11, health: 15, reload: 1.2, healPerSec: 5, healPerSecThreshold: 0.75, dropFactor: 0.65, desc: "A tough star from the seafloor." },
-  { id: 22, name: "Salt", kind: "petal", color: "#ffffff", outline: "#c4c4c4", shape: "circle", radius: 7, damage: 10, health: 9, reload: 1.0, dropFactor: 0.6, desc: "Crystalline sea salt." },
+  { id: 22, name: "Salt", kind: "petal", color: "#ffffff", outline: "#c4c4c4", shape: "circle", radius: 10, damage: 10, health: 9, reload: 1.0, dropFactor: 0.6, desc: "Crystalline sea salt." },
   { id: 23, name: "Starfish Egg", kind: "summon", color: "#f8b6c8", outline: "#bc4c72", shape: "egg", radius: 10, damage: 4, health: 24, reload: 3.6, petMob: 9, dropFactor: 0.55, desc: "Hatches a starfish." },
   // ── Jellyfish drops ─────────────────────────────────────────────────────
   { id: 24, name: "Jelly", kind: "petal", color: "#d3a0ec", outline: "#7d40a8", shape: "circle", radius: 8, damage: 8, health: 12, reload: 1.1, dropFactor: 0.7, desc: "Wobbles gelatinously." },
   { id: 25, name: "Lightning", kind: "petal", color: "#53E5E8", outline: "#4ADEDE", shape: "star", radius: 7, damage: 30, health: 6, reload: 1.4, dropFactor: 0.6, desc: "Zaps hard, fades fast." },
   { id: 26, name: "Jellyfish Egg", kind: "summon", color: "#cfb0ec", outline: "#7d40a8", shape: "egg", radius: 10, damage: 5, health: 20, reload: 3.5, petMob: 7, dropFactor: 0.55, desc: "Hatches a jellyfish." },
   // ── Crab drops ──────────────────────────────────────────────────────────
-  { id: 27, name: "Claw", kind: "petal", color: "#ef7d3b", outline: "#7a3008", shape: "triangle", radius: 10, damage: 22, health: 12, reload: 3.5, dropFactor: 0.6, desc: "Snippy little claw." },
-  { id: 28, name: "Powder", kind: "petal", color: "#e6dcc4", outline: "#a89c80", shape: "circle", radius: 8, damage: 9, health: 11, reload: 3.0, dropFactor: 0.65, desc: "A puff of fine powder." },
+  { id: 27, name: "Claw", kind: "petal", color: "#ef7d3b", outline: "#7a3008", shape: "triangle", radius: 11, damage: 22, health: 12, reload: 3.5, dropFactor: 0.6, desc: "Snippy little claw." },
+  { id: 28, name: "Powder", kind: "petal", color: "#e6dcc4", outline: "#a89c80", shape: "circle", radius: 8, damage: 9, health: 11, reload: 3.0, speed: 10, dropFactor: 0.65, desc: "A puff of fine powder." },
   { id: 29, name: "Crab Egg", kind: "summon", color: "#f5a06b", outline: "#b2541f", shape: "egg", radius: 10, damage: 6, health: 26, reload: 8.0, petMob: 8, dropFactor: 0.55, desc: "Hatches a crab." },
   // ── Ladybug drops ───────────────────────────────────────────────────────
   { id: 30, name: "Rose", kind: "petal", color: "#d6354a", outline: "#8a1f2c", shape: "circle", radius: 12, damage: 1, health: 5, reload: 3.5, heal: 7.5, dropFactor: 0.7, desc: "Absorbs into an injured flower, heals once, then reloads." },
@@ -335,11 +335,11 @@ export const ITEMS: ItemDef[] = [
   // Stick (id 9) and Sand (id 4) are reused from the existing item list.
   { id: 32, name: "Glass", kind: "petal", color: "#c8e6f5", outline: "#6f9bb0", shape: "square", radius: 8, damage: 12, health: 8, reload: 2.5, dropFactor: 0.55, desc: "A sharp shard of glass." },
   // ── Beetle drops ────────────────────────────────────────────────────────
-  { id: 33, name: "Bone", kind: "petal", color: "#ece4d0", outline: "#9a8a6a", shape: "square", radius: 9, damage: 14, health: 18, reload: 1.5, dropFactor: 0.6, desc: "A bleached bone chip." },
+  { id: 33, name: "Bone", kind: "petal", color: "#ece4d0", outline: "#9a8a6a", shape: "square", radius: 10, damage: 14, health: 18, reload: 1.5, dropFactor: 0.6, desc: "A bleached bone chip." },
   { id: 34, name: "Beetle Egg", kind: "summon", color: "#e3c490", outline: "#9c7532", shape: "egg", radius: 11, damage: 6, health: 28, reload: 5.0, petMob: 6, dropFactor: 0.55, desc: "Hatches a beetle." },
   // ── Shared (Beetle / Scorpion) and Scorpion drops ──────────────────────
-  { id: 35, name: "Pincer", kind: "petal", color: "#8a4a18", outline: "#3e1e08", shape: "triangle", radius: 8, damage: 20, health: 11, reload: 3.0, dropFactor: 0.6, desc: "A wicked little pincer." },
-  { id: 36, name: "Iris", kind: "petal", color: "#5b3aa0", outline: "#2c1a5e", shape: "circle", radius: 10, damage: 10, health: 12, reload: 2.5, dropFactor: 0.6, desc: "A deep-purple iris." },
+  { id: 35, name: "Pincer", kind: "petal", color: "#8a4a18", outline: "#3e1e08", shape: "triangle", radius: 8, damage: 20, health: 11, reload: 3.0, poisonDamage: 8,poisonDuration: 3000,poisonInitialMult: 1.3,poisonStableMult: 0.5,poisonCanStack: false,dropFactor: 0.6, desc: "A wicked little pincer. Inflicts poison on your enemies." },
+  { id: 36, name: "Iris", kind: "petal", color: "#5b3aa0", outline: "#2c1a5e", shape: "circle", radius: 10, damage: 10, health: 12, reload: 2.5,poisonDamage: 10,poisonDuration: 2000,poisonInitialMult: 1.1,poisonStableMult: 0.8,poisonCanStack: false,dropFactor: 0.6, desc: "A deep-purple iris. Its petals carry a potent venom." },
   { id: 37, name: "Scorpion Egg", kind: "summon", color: "#d9924a", outline: "#8c4718", shape: "egg", radius: 10, damage: 7, health: 26, reload: 4.5, petMob: 5, dropFactor: 0.55, desc: "Hatches a scorpion." },
   // ── Shell drops (ocean) ──────────────────────────────────────────────────
   { id: 38, name: "Shell", kind: "petal", color: "#f2d96e", outline: "#c8a030", shape: "circle", radius: 16, damage: 6, health: 20, reload: 3.5, shield: 12, dropFactor: 0.7, desc: "Absorbs into its flower, plates it with shield, then reloads." },
@@ -358,6 +358,7 @@ export const ITEMS: ItemDef[] = [
   { id: 49, name: "Hornet Egg", kind: "summon", color: "#859809", outline: "#647300", shape: "egg", radius: 14, damage: 1, health: 10, reload: 5.5, petMob: 16,dropFactor: 0.7, desc: "spawn something interesting" },
   { id: 50, name: "Faster", kind: "petal", color: "#e0e0e0", outline: "#c0c0c0", shape: "circle", radius: 10, damage: 10, health: 10, reload: 2.5, speed: 10, dropFactor: 0.55, desc: "Increase your maximum speed" },
   { id: 51, name: "Spider Egg", kind: "summon", color: "#663300", outline: "#331900", shape: "egg", radius: 12, damage: 1, health: 10, reload: 8, petMob: 17,dropFactor: 0.7, desc: "spawn something interesting" },
+  { id: 52, name: "Missile", kind: "petal", color: "#3a3a3a", outline: "#1a1a1a", shape: "triangle", radius: 10, damage: 15, health: 10, reload: 2.0, dropFactor: 0.5, desc: "Fires a homing projectile at nearby enemies when spread is held." },
 ];
 
 /** Item ids that Oracle/Trade may hand back — never dropped by mobs, never craftable by combining. */
@@ -436,7 +437,7 @@ export const MOBS: MobDef[] = [
   { id: 12, name: "Shell", color: "#f2d96e", outline: "#c8a030", shape: "rock", radius: 22, health: 100, damage: 14, speed: 18, xp: 16, drops: [{ item: 38, chance: 0.7 }, { item: 39, chance: 0.7 }, { item: 6, chance: 0.7 }, { item: 40, chance: 0.07 }] },
   // Garden nest: spawns 1 Worker Ant + 1 Soldier Ant at each threshold.
   { id: 13, name: "Ant Hole", color: "#4a3520", outline: "#2e1f10", shape: "rock", radius: 30, health: 650, damage: 8, speed: 0, xp: 60,
-    drops: [{ item: 11, chance: 0.55 }, { item: 12, chance: 0.05 }, { item: 13, chance: 0.55 }, { item: 14, chance: 0.05 }, { item: 47, chance: 0.04 }],
+    drops: [{ item: 44, chance: 0.55 },{ item: 47, chance: 0.55 }, { item: 31, chance: 0.05 }, { item: 39, chance: 0.04 }],
     spawner: spawner([0.85, 0.60, 0.35, 0.10], 10, 3) },
   // Ocean nest: spawns 2 Crabs at each threshold.
   { id: 14, name: "Crab Cave", color: "#6b3a1f", outline: "#4a2510", shape: "rock", radius: 30, health: 350, damage: 20, speed: 0, xp: 35,
@@ -447,7 +448,7 @@ export const MOBS: MobDef[] = [
     drops: [{ item: 2, chance: 0.55 }, { item: 18, chance: 0.55 }, { item: 19, chance: 0.55 }, { item: 20, chance: 0.05 }],
     spawner: spawner([0.85, 0.60, 0.35, 0.10], 1, 1) },
   { id: 16, name: "Hornet", color: "#353535", outline: "#000000", shape: "leech", radius: 16, health: 80, damage: 22, speed: 50, xp: 18,
-  drops: [{ item: 43, chance: 0.7 }, { item: 46, chance: 0.7 }, { item: 49, chance: 0.7 }] },
+  drops: [{ item: 43, chance: 0.7 }, { item: 46, chance: 0.7 }, { item: 49, chance: 0.7 }, { item: 52, chance: 0.5 }] },
     { id: 17, name: "Spider", color: "#353535", outline: "#000000", shape: "spider", radius: 18, health: 80, damage: 22, speed: 50, xp: 18,
   drops: [{ item:51, chance: 0.7 }, { item: 45, chance: 0.7 }, { item: 50, chance: 0.7 },{ item: 48, chance: 0.01 }] },
 ];
@@ -1436,3 +1437,60 @@ export const ENEMY_DROP_TABLE: Record<string, MobDef> = (() => {
   for (const m of MOBS) out[m.name] = m;
   return out;
 })();
+
+// =====================================================================
+// 生物生成权重表 — 每个地图每种生物的生成概率 = 该生物权重 / 该地图所有生物权重之和
+// 权重越大，生成概率越高。
+// =====================================================================
+export const SPAWN_WEIGHTS: Record<number, Record<number, number>> = {
+  // Garden
+  0: {
+    0: 30,   // Ladybug
+    1: 50,   // Bee
+    2: 10,   // Rock
+    3: 50,   // Soldier Ant
+    10: 40,  // Worker Ant
+    13: 5,   // Ant Hole
+    15: 5,   // Hive
+    16: 10,  // Hornet
+    17: 40,  // Spider
+  },
+  // Desert
+  1: {
+    4: 30,   // Cactus
+    5: 40,   // Scorpion
+    6: 50,   // Beetle
+    2: 15,   // Rock
+    11: 20,  // Sandstorm
+  },
+  // Ocean
+  2: {
+    7: 40,   // Jellyfish
+    8: 50,   // Crab
+    9: 40,   // Starfish
+    12: 30,  // Shell
+    14: 5,   // Crab Cave
+  },
+};
+
+/** 从权重表中按概率选择一种生物类型。返回 mob type id。 */
+export function pickWeightedMob(mapId: number, defaultMobs: number[]): number {
+  const weights = SPAWN_WEIGHTS[mapId];
+  if (!weights) {
+    // 没有权重表时回退到均匀随机
+    return defaultMobs[(Math.random() * defaultMobs.length) | 0];
+  }
+  // 计算该地图所有生物的总权重
+  let totalWeight = 0;
+  for (const mobType of defaultMobs) {
+    totalWeight += weights[mobType] ?? 1;
+  }
+  // 按权重随机选择
+  let r = Math.random() * totalWeight;
+  for (const mobType of defaultMobs) {
+    const w = weights[mobType] ?? 1;
+    r -= w;
+    if (r <= 0) return mobType;
+  }
+  return defaultMobs[defaultMobs.length - 1];
+}

@@ -26,6 +26,7 @@ import {
   MAGIC_CORE_ITEM,
   MAGIC_ITEM_MAP,
   MAX_DROPPED_CARDS,
+  MAP_GRIDS,
   cloverDnaBonus,
   mapRarityToSummonRarity,
   mobSizeMult,
@@ -60,6 +61,7 @@ import {
   rollZoneRarity,
   findSpawnTiles,
   thirdEyeOrbitBonus,
+  pickWeightedMob,
 } from "./defs";
 import { C2S, ENT, EVT, Reader, S2C, SWAP_ROW_ALL, TEAM, Writer } from "./protocol";
 
@@ -112,6 +114,16 @@ interface PetalState {
   specialTimer: number;
   /** Remaining travel time while a Rose is being absorbed by its owner. */
   absorbTimer: number;
+  /** 目标搜索降频计时（帧）：每隔几帧才重新寻找攻击目标。 */
+  targetCheckTimer: number;
+  /** 上次搜索锁定的目标 mob id（降频帧间复用，0 = 无目标）。 */
+  targetId: number;
+  /** 该花瓣对应的物品ID，用于检测槽位是否变化 */
+  item: number;
+  /** 该花瓣对应的稀有度，用于检测槽位是否变化 */
+  rarity: number;
+  /** 弹射物发射计时器（秒）：Missile 等远程花瓣用，<=0 时可发射。 */
+  fireTimer: number;
 }
 
 export interface PlayerSave {
@@ -140,6 +152,9 @@ export class Player {
   xp = 0;
   level = 1;
   alive = true;
+  /** 死亡时的位置，用于死亡后仍然更新该位置周围的生物 */
+  deathX = 0;
+  deathY = 0;
   respawnIn = 0;
   inDx = 0;
   inDy = 0;
@@ -207,10 +222,26 @@ export class Mob {
   lastHitBy = 0;
   /** Seconds of post-spawn invulnerability. Freshly hatched pets get a moment to get clear. */
   spawnProtection = 0;
+  /** 卡墙弹开冷却（秒）：弹开后短时间内不再触发，防止被反复弹飞/抖动。 */
+  pushOutCooldown = 0;
   /** HP-fraction thresholds that have already released their minions (spawner mobs only). */
   spawnedThresholds: Set<number> = new Set();
   /** Accumulated damage dealt by each player (petal + friendly mob damage). */
   damageByPlayer: Map<number, number> = new Map();
+  /** 思考计时器（秒）：降频至每 MOB_THINK_INTERVAL 秒才更新一次决策 */
+  thinkTimer = 0;
+  /** 缓存目标坐标（降频帧间复用） */
+  cachedTargetX = 0;
+  cachedTargetY = 0;
+  /** 弹射物发射计时器（秒）：Hornet 等远程生物用，<=0 时可发射。 */
+  missileTimer = 0;
+  /**
+   * 生物间碰撞/生物-玩家碰撞倒计时（秒）。
+   *  - 静止生物（speed === 0）会用一个极大的值，使其永远跳过生物间碰撞；
+   *  - 慢速生物每 0.1s 一次，快速生物每帧一次。
+   * 计数归零后才执行一次完整碰撞检查，然后按生物速度重置。
+   */
+  collisionTimer = 0;
 
   constructor(
     id: number,
@@ -251,6 +282,10 @@ export class Mob {
 export class Drop {
   /** Set of playerIds allowed to loot this drop. null = anyone, empty = no one (unlootable). */
   allowedPlayerIds: Set<number> | null = null;
+  /** 地面停留计时器（秒），初始 0.8，期间 magnet 不生效 */
+  groundTimer: number;
+  /** 快速吸取计时器（秒），>0 表示正在快速飞向玩家 */
+  suctionTimer: number;
   constructor(
     public id: number,
     public mapId: number,
@@ -262,12 +297,522 @@ export class Drop {
     public ttl = 45,
     /** Cards merged into one card. Nearby identical drops stack instead of littering. */
     public count = 1
-  ) {}
+  ) {
+    this.groundTimer = 0.8;
+    this.suctionTimer = 0;
+  }
+}
+interface DormantMob {
+  type: number;
+  rarity: number;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  health: number;
+  maxHealth: number;
+  lastHitBy: number;
+  damageByPlayer: Array<[number, number]>;
+  spawnedThresholds: number[];
+}
+
+/**
+ * 弹射物（Projectile）—— 生物与花瓣共用的远程攻击逻辑。
+ *
+ * 设计目标：
+ *  - Hornet 朝玩家发射导弹（身体随之转向目标）；
+ *  - 玩家装备 Missile 花瓣后按 spread(attack) 发射导弹；
+ *  - 后续可扩展更多远程物品/生物，只需复用本类与 updateProjectiles。
+ *
+ * 字段说明：
+ *  - team: TEAM.HOSTILE（生物发射，命中玩家）或 TEAM.FRIENDLY（玩家发射，命中敌对生物）；
+ *  - ownerId: 发射者 ID（mob.id 或 player.id），用于伤害归属与经验计算；
+ *  - sourceType: 发射来源类型（mob.type 或 item id），客户端据此渲染外观；
+ *  - rarity: 稀有度，影响伤害/大小；
+ *  - ttl: 存活时间（秒），到时自动销毁；
+ *  - hitCd: 命中冷却（秒），防止穿透多个目标时同一帧重复判定。
+ */
+export class Projectile {
+  id: number;
+  mapId: number;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  angle: number;
+  radius: number;
+  damage: number;
+  hp: number;
+  maxHp: number;
+  team: number;
+  ownerId: number;
+  sourceType: number;
+  rarity: number;
+  ttl: number;
+  hitCd: number;
+  /** 是否穿透墙壁与目标（命中后不销毁，扣减自身 hp）。 */
+  isPiercing: boolean;
+  /** 最大飞行距离（像素），0 表示无限制。 */
+  maxDistance: number;
+  /** 已飞行距离（像素）。 */
+  distanceTraveled: number;
+
+  constructor(
+    id: number,
+    mapId: number,
+    x: number,
+    y: number,
+    angle: number,
+    speed: number,
+    damage: number,
+    team: number,
+    ownerId: number,
+    sourceType: number,
+    rarity: number,
+    radius = 10,
+    isPiercing = false,
+    maxDistance = 0,
+    projHp = 1,
+  ) {
+    this.id = id;
+    this.mapId = mapId;
+    this.x = x;
+    this.y = y;
+    this.vx = Math.cos(angle) * speed;
+    this.vy = Math.sin(angle) * speed;
+    this.angle = angle;
+    this.radius = radius;
+    this.damage = damage;
+    this.hp = 1;
+    this.maxHp = 1;
+    this.team = team;
+    this.ownerId = ownerId;
+    this.sourceType = sourceType;
+    this.rarity = rarity;
+    this.ttl = PROJECTILE_TTL;
+    this.hitCd = 0;
+    this.isPiercing = isPiercing;
+    this.maxDistance = maxDistance;
+    this.distanceTraveled = 0;
+    this.hp = projHp;
+    this.maxHp = projHp;
+  }
+}
+
+// =====================================================================
+// Poison system (DoT)
+// =====================================================================
+
+/** 毒伤伤害来源(谁施加的毒)。 */
+export interface PoisonSource {
+  /** 伤害类型标签,固定 "poison"。 */
+  type: "poison";
+  /** 标记为持续伤害(DoT),便于客户端飘字染色。 */
+  isDoT: true;
+  /** 真正的施法者 id(可空,例如环境毒)。 */
+  owner: number | null;
+}
+
+/** 当前活跃毒伤的统计信息,供调试/UI 读取。 */
+export interface PoisonStats {
+  active: boolean;
+  baseDamage: number;
+  currentDamage: number;
+  totalDamage: number;
+  tickCount: number;
+  remainingTime: number;
+  stage: "decay" | "stable" | "ended";
+}
+
+/** 单条毒伤的状态机。 */
+export class PoisonSystem {
+  /** 伤害来源(可空)。 */
+  source: PoisonSource | null;
+  /** 当前基础伤害(已叠加层数后的值)。 */
+  baseDamage: number;
+  /** 总持续时间(毫秒)。 */
+  duration: number;
+  /** 初始倍率(默认 1.5)。 */
+  initialMultiplier: number;
+  /** 稳定倍率(默认 0.5)。 */
+  stableMultiplier: number;
+
+  /** 毒伤是否仍处于活跃状态。 */
+  active: boolean;
+  /** 起始时间(毫秒,Date.now())。 */
+  startTime: number;
+  /** 上次 tick 的时间(毫秒,Date.now()),用于控制 tick 节奏。 */
+  lastTickTime: number;
+  /** tick 间隔(毫秒,默认 100ms)。 */
+  tickInterval: number;
+  /** 当前叠加层数。 */
+  stackCount: number;
+  /** 最大叠加层数。 */
+  maxStack: number;
+
+  /** 衰减阶段时长(毫秒),默认占 30%。 */
+  decayDuration: number;
+  /** 稳定阶段时长(毫秒),默认占 70%。 */
+  stableDuration: number;
+
+  /** 当前帧应输出的伤害(由 getCurrentDamage 维护)。 */
+  currentDamage: number;
+
+  /** 累计造成伤害(用于 stack 时的合并统计)。 */
+  totalDamageDealt: number;
+  /** 已 tick 次数。 */
+  tickCount: number;
+
+  constructor(
+    source: PoisonSource | null,
+    baseDamage: number,
+    duration: number = 5000,
+    initialMultiplier: number = 1.5,
+    stableMultiplier: number = 0.5,
+  ) {
+    this.source = source;
+    this.baseDamage = baseDamage;
+    this.duration = duration;
+    this.initialMultiplier = initialMultiplier;
+    this.stableMultiplier = stableMultiplier;
+
+    // 毒伤状态
+    this.active = true;
+    this.startTime = Date.now();
+    this.lastTickTime = Date.now();
+    this.tickInterval = 100;
+    this.stackCount = 1;
+    this.maxStack = 10;
+
+    // 计算各阶段参数
+    this.decayDuration = duration * 0.3;
+    this.stableDuration = duration * 0.7;
+
+    // 当前伤害值
+    this.currentDamage = baseDamage * initialMultiplier;
+
+    // 统计
+    this.totalDamageDealt = 0;
+    this.tickCount = 0;
+  }
+
+  /**
+   * 获取当前应该造成的伤害(按时间分阶段)。
+   *  - 超过总时长:毒伤结束,返回 0;
+   *  - 衰减阶段:在 initialMultiplier 与 stableMultiplier 之间线性插值;
+   *  - 稳定阶段:始终输出 baseDamage * stableMultiplier。
+   */
+  getCurrentDamage(): number {
+    const now = Date.now();
+    const elapsed = now - this.startTime;
+
+    // 毒伤结束
+    if (elapsed >= this.duration) {
+      this.active = false;
+      this.currentDamage = 0;
+      return 0;
+    }
+
+    // 衰减阶段
+    if (elapsed < this.decayDuration) {
+      const progress = elapsed / this.decayDuration;
+      const damage =
+        this.baseDamage * this.initialMultiplier * (1 - progress) +
+        this.baseDamage * this.stableMultiplier * progress;
+      this.currentDamage = damage;
+    } else {
+      // 稳定阶段
+      this.currentDamage = this.baseDamage * this.stableMultiplier;
+    }
+
+    return this.currentDamage;
+  }
+
+  /**
+   * 更新并返回本 tick 应造成的伤害;若未到 tick 间隔则返回 0。
+   *  - 由 PoisonManager.updateAll 周期调用;
+   *  - 副作用:递增 tickCount / totalDamageDealt,推进 lastTickTime。
+   */
+  updateAndTick(): number {
+    if (!this.active) return 0;
+
+    const now = Date.now();
+
+    // 检查是否到达 tick 时间
+    if (now - this.lastTickTime >= this.tickInterval) {
+      const damage = this.getCurrentDamage();
+
+      if (damage > 0) {
+        this.lastTickTime = now;
+        this.tickCount++;
+        this.totalDamageDealt += damage;
+        return damage;
+      } else {
+        this.active = false;
+      }
+    }
+
+    return 0;
+  }
+
+  /** 检查是否还有效(未到期 + active)。 */
+  isActive(): boolean {
+    if (!this.active) return false;
+    const elapsed = Date.now() - this.startTime;
+    return elapsed < this.duration;
+  }
+
+  /**
+   * 获取当前毒伤阶段信息。
+   *  - "decay"  : 仍在衰减阶段(0 ~ 30%);
+   *  - "stable" : 已进入稳定阶段(30% ~ 100%);
+   *  - "ended"  : 已结束。
+   */
+  getStageInfo(): {
+    stage: "decay" | "stable" | "ended";
+    progress: number;
+    currentDamage: number;
+    remainingTime: number;
+  } {
+    const elapsed = Date.now() - this.startTime;
+
+    if (elapsed < this.decayDuration) {
+      return {
+        stage: "decay",
+        progress: elapsed / this.decayDuration,
+        currentDamage: this.currentDamage,
+        remainingTime: this.duration - elapsed,
+      };
+    } else if (elapsed < this.duration) {
+      return {
+        stage: "stable",
+        progress: (elapsed - this.decayDuration) / this.stableDuration,
+        currentDamage: this.currentDamage,
+        remainingTime: this.duration - elapsed,
+      };
+    } else {
+      return {
+        stage: "ended",
+        progress: 1,
+        currentDamage: 0,
+        remainingTime: 0,
+      };
+    }
+  }
+
+  /** 重置时间(但不改变层数/伤害)—— 用于被新毒伤"刷新"时复用同一实例。 */
+  reset(): void {
+    this.startTime = Date.now();
+    this.lastTickTime = Date.now();
+    this.active = true;
+    this.currentDamage = this.baseDamage * this.initialMultiplier;
+  }
+
+  /**
+   * 将另一条毒伤的伤害合并到本条:
+   *  - 已达最大层数 → 只刷新时间,不叠加伤害(原参考行为);
+   *  - 否则:层数 +1,基础伤害累加,伤害统计累加,并 reset 时间。
+   */
+  stack(newPoison: PoisonSystem): void {
+    if (this.stackCount >= this.maxStack) {
+      this.reset();
+      return;
+    }
+
+    this.stackCount++;
+    this.baseDamage += newPoison.baseDamage;
+    this.currentDamage = this.baseDamage * this.initialMultiplier;
+    this.totalDamageDealt += newPoison.totalDamageDealt;
+    this.reset();
+  }
+
+  /** 获取毒伤统计快照。 */
+  getStats(): PoisonStats {
+    return {
+      active: this.active,
+      baseDamage: this.baseDamage,
+      currentDamage: this.currentDamage,
+      totalDamage: this.totalDamageDealt,
+      tickCount: this.tickCount,
+      remainingTime: Math.max(0, this.duration - (Date.now() - this.startTime)),
+      stage: this.getStageInfo().stage,
+    };
+  }
+}
+
+/** 任意可被附加毒伤的目标(玩家或生物)。 */
+interface Poisonable {
+  hp: number;
+  /** 仅 Player 有此字段;Mob 通过 hp <= 0 视为死亡。 */
+  alive?: boolean;
+}
+
+/**
+ * 全局毒伤管理器:为每个目标维护至多一条活跃毒伤。
+ *  - 目标死亡时自动清除(防止引用泄漏);
+ *  - tick 节奏由 GameServer 主循环驱动,每 tick 调用一次 updateAll。
+ */
+export class PoisonManager {
+  /** 当前活跃毒伤,key = 目标引用。 */
+  private activePoisons: Map<Poisonable, PoisonSystem> = new Map();
+
+  /**
+   * 对目标施加毒伤。
+   *  - 目标为空或已死亡 → 静默失败;
+   *  - canStack=true → 在已有毒伤上调 stack();
+   *  - canStack=false → 新伤害更高则替换,否则只 reset() 已有毒伤。
+   * @returns 是否成功施加/叠加。
+   */
+  applyPoison(
+    target: Poisonable,
+    source: PoisonSource | null,
+    baseDamage: number,
+    duration: number = 3000,
+    initialMultiplier: number = 1.2,
+    stableMultiplier: number = 0.5,
+    canStack: boolean = false,
+  ): boolean {
+    if (!target) return false;
+    // Player: 用 alive 标记;Mob: 用 hp <= 0 推断死亡
+    if (target.alive === false || target.hp <= 0) return false;
+
+    const newPoison = new PoisonSystem(
+      source,
+      baseDamage,
+      duration,
+      initialMultiplier,
+      stableMultiplier,
+    );
+
+    const existing = this.activePoisons.get(target);
+    if (existing) {
+      if (canStack) {
+        existing.stack(newPoison);
+      } else {
+        if (newPoison.baseDamage > existing.baseDamage) {
+          this.activePoisons.set(target, newPoison);
+        } else {
+          existing.reset();
+        }
+      }
+    } else {
+      this.activePoisons.set(target, newPoison);
+    }
+
+    return true;
+  }
+
+  /**
+   * 每帧调用:对所有活跃毒伤 tick 一次,造成伤害并清理失效条目。
+   * @param gameInstance 用于获取 pushEvent / clientOf 的服务器实例,允许为 null。
+   */
+  updateAll(gameInstance: GameServerLike | null): void {
+    const targetsToRemove: Poisonable[] = [];
+
+    for (const [target, poison] of this.activePoisons) {
+      if (!target) {
+        targetsToRemove.push(target);
+        continue;
+      }
+      // Player: alive === false;Mob: hp <= 0
+      const isDead = target.alive === false || target.hp <= 0;
+      if (isDead) {
+        targetsToRemove.push(target);
+        continue;
+      }
+
+      const damage = poison.updateAndTick();
+      if (damage > 0 && !isDead) {
+        this.applyDamage(target, damage, gameInstance);
+      }
+
+      if (!poison.isActive()) {
+        targetsToRemove.push(target);
+      }
+    }
+
+    for (const target of targetsToRemove) {
+      this.activePoisons.delete(target);
+    }
+  }
+
+  /**
+   * 实际把伤害写到目标上:
+   *  - 优先调用 takeDamage(由 Player/Mob 提供),否则直接扣 hp;
+   *  - 通过 pushEvent(EVT.HIT) 发送飘字,客户端据此渲染 poison 染色。
+   */
+  private applyDamage(
+    target: Poisonable,
+    damage: number,
+    gameInstance: GameServerLike | null,
+  ): void {
+    const candidate = target as unknown as {
+      takeDamage?: (dmg: number, source: PoisonSource) => void;
+      id?: number;
+      x?: number;
+      y?: number;
+    };
+
+    if (typeof candidate.takeDamage === "function") {
+      const src: PoisonSource = { type: "poison", isDoT: true, owner: null };
+      candidate.takeDamage(damage, src);
+    } else {
+      target.hp -= damage;
+    }
+
+    if (gameInstance && typeof candidate.id === "number") {
+      const client = gameInstance.clientOf(candidate.id);
+      if (client && typeof candidate.x === "number" && typeof candidate.y === "number") {
+        gameInstance.pushEvent(
+          client,
+          EVT.HIT,
+          candidate.x,
+          candidate.y,
+          Math.round(damage),
+        );
+      }
+    }
+  }
+
+  /** 查询目标当前毒伤统计;若不存在返回 null。 */
+  getPoisonInfo(target: Poisonable): PoisonStats | null {
+    const poison = this.activePoisons.get(target);
+    return poison ? poison.getStats() : null;
+  }
+
+  /** 主动清除某目标的毒伤(玩家死亡、被净化等场景)。 */
+  clearPoison(target: Poisonable): void {
+    this.activePoisons.delete(target);
+  }
+
+  /** 当前活跃毒伤数量(调试用)。 */
+  getActiveCount(): number {
+    return this.activePoisons.size;
+  }
+}
+
+/**
+ * PoisonManager 所需的 GameServer 最小接口(避免循环依赖,
+ * 也让 PoisonManager 可以在不引入具体类型的情况下被独立测试)。
+ */
+export interface GameServerLike {
+  clientOf(playerId: number): ClientState | null;
+  pushEvent(
+    c: ClientState,
+    kind: number,
+    x: number,
+    y: number,
+    value: number,
+    item?: number,
+    rarity?: number,
+  ): void;
 }
 
 interface World {
   mobs: Mob[];
   drops: Drop[];
+  dormantMobs: DormantMob[];
+  projectiles: Projectile[];
 }
 
 export interface ClientLike {
@@ -298,6 +843,83 @@ function clamp(v: number, a: number, b: number) {
   return v < a ? a : v > b ? b : v;
 }
 
+// ===== 区块生物生成上限 =====
+// 每个区块（按 getBlockAt 返回的字母 A-G）允许的最大同时活跃生物数量
+const ZONE_MOB_LIMITS: Record<string, number> = {
+  A: 3, B: 3, C: 2, D: 2, E: 1, F: 1, G: 1,
+};
+
+/** 区块字母集合（A-G），用于按区块补生。 */
+const ZONE_LETTERS = ["A", "B", "C", "D", "E", "F", "G"];
+
+/** 区块补生检查间隔（秒）。达到上限后不再生成；每 5 秒检查一次，有缺口才补生。 */
+const ZONE_REFILL_INTERVAL = 5;
+
+/** 判定生物"卡入墙内"的最小碰撞修正位移（px）。超过则触发 8 方向弹开。 */
+const PUSH_OUT_THRESHOLD = 6;
+
+/**
+ * 生物墙壁碰撞的墙壁外扩量（px）：生物与墙碰撞时，把每面墙的 AABB
+ * 向外扩张 10px（等效于墙变厚）。玩家与弹射物不膨胀（inflate = 0）。
+ */
+const MOB_WALL_INFLATE = 10;
+
+/** 花瓣重新寻找攻击目标的间隔（帧数），降频以减少每帧距离计算。 */
+const PETAL_TARGET_RECHECK_FRAMES = 3;
+
+/** 生物决策（目标寻找/寻路）间隔（秒）：每 0.2 秒思考一次，其余帧复用缓存目标。 */
+const MOB_THINK_INTERVAL = 0.2;
+
+/**
+ * Missile 物品 ID（Hornet 掉落）。玩家装备后按 spread(attack) 可发射弹射物。
+ * 与 defs.ts 中 ITEMS 数组的 id 保持一致。
+ */
+const MISSILE_ITEM = 52;
+
+/** 弹射物基础存活时间（秒）。 */
+const PROJECTILE_TTL = 5;
+/** 弹射物命中后的冷却（秒），防止同一帧多次命中同一目标。 */
+const PROJECTILE_HIT_CD = 0.3;
+/** Hornet 发射导弹的间隔（秒）。 */
+const HORNET_MISSILE_INTERVAL = 2.0;
+/** Hornet 发射导弹的射程（像素），超出则不发射。 */
+const HORNET_MISSILE_RANGE = 600;
+/** 导弹飞行速度（像素/秒）。 */
+const MISSILE_SPEED = 320;
+
+// ---- Scorpion 毒针配置 ----
+/** Scorpion mob type id（请根据 defs.ts 中 MOBS 数组的实际索引修改）。 */
+const SCORPION_TYPE = 5;
+/** Scorpion 发射毒针的间隔（秒）。 */
+const SCORPION_MISSILE_INTERVAL = 2.5;
+/** Scorpion 发射毒针的射程（像素）。 */
+const SCORPION_MISSILE_RANGE = 500;
+/** Scorpion 毒针最大飞行距离（像素），超过即销毁。 */
+const SCORPION_PROJECTILE_MAX_DISTANCE = 1500;
+/** Scorpion 毒针基础血量（乘以 rarityMult 后作为弹射物总血量）。 */
+const SCORPION_PROJECTILE_BASE_HP = 40;
+/** Scorpion 毒针飞行速度（像素/秒）。 */
+const SCORPION_MISSILE_SPEED = 260;
+
+/**
+ * 生物间碰撞 / 生物-玩家碰撞的频率（基于生物自身速度）：
+ *  - 静止生物（speed === 0，例如 Ant Hole / Crab Cave / Hive 等巢穴）不进行生物间碰撞；
+ *  - 慢速生物：每 SLOW_INTERVAL 秒才做一次；
+ *  - 快速生物：每帧都做。
+ * 这样能显著降低大规模战斗时的 O(n^2) 距离计算开销。
+ */
+const MOB_COLLISION_SLOW_INTERVAL = 0.1;   // 慢速生物：10Hz
+const MOB_COLLISION_FAST_INTERVAL = 1 / 60; // 快速生物：约 60Hz（每帧）
+/** 速度阈值（像素/秒），低于此值视为"慢速"或"无速度"生物。 */
+const MOB_COLLISION_SLOW_SPEED = 30;
+
+/**
+ * 全局碰撞压力阈值：当某一帧的累计碰撞检测次数超过该值时，
+ * 后续帧将"每 4 帧"才做一次生物间碰撞（限流），防止单帧 CPU 尖峰。
+ */
+const MOB_COLLISION_OVERLOAD_THRESHOLD = 10000;
+const MOB_COLLISION_OVERLOAD_SKIP = 4; // 限流时跳过的帧数
+
 /**
  * Mutable counter threaded through the collision helpers below so
  * `GameServer` can report a live "collision checks per tick" debug metric
@@ -307,13 +929,10 @@ export interface CollisionCounter {
   n: number;
 }
 
-// ---------------------------------------------------------------------
-// Spatial Hashing for Walls (Static)
-// ---------------------------------------------------------------------
-
 // =====================================================================
 // Polygon-based Wall Collider with BVH (O(log n) queries)
 // 多边形噪声墙壁 + 层次包围盒碰撞系统
+// —— 用于【玩家】精确碰撞（与客户端渲染的凹凸视觉墙一致）
 // =====================================================================
 
 interface WallEdge {
@@ -654,6 +1273,12 @@ class PolygonWallCollider {
     return [x, y];
   }
 
+  /** 圆是否完全不在任何墙壁内（碰撞修正无位移即视为安全点，用于从墙内弹开）。 */
+  isFree(x: number, y: number, r: number): boolean {
+    const [cx, cy] = this.collideCircle(x, y, r);
+    return Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01;
+  }
+
   /** 带移动步进的圆碰撞（防止高速穿透）。 */
   moveCircle(
     x: number, y: number, dx: number, dy: number, r: number, counter?: CollisionCounter
@@ -688,6 +1313,41 @@ class PolygonWallCollider {
       }
     }
     return Array.from(results);
+  }
+
+  /**
+   * 粗筛：判断圆 (x,y,r) 是否可能与任何墙壁相交。
+   * 用于 wallCollisionBatch 决定是否需要 BVH 高精度碰撞。
+   * 用空间网格（spatialGrid）按 (x,y) 所在的格子取出该格子内的墙边列表，
+   * 然后把圆扩张到 (r + 网格内墙的最大延伸) 做一次 AABB 测试。
+   * 复杂度 O(1)（只查 9 个格子），O(n^2) 永远不会发生。
+   * 返回 true 表示可能相交（需要精确碰撞）；false 表示远离所有墙（可跳过）。
+   */
+  circleNeedsPreciseCheck(x: number, y: number, r: number): boolean {
+    if (this.spatialGrid.size === 0) return false;
+    // 取以 (x,y) 为中心的 3x3 格子集合
+    const cx = Math.floor(x / this.gridCellSize);
+    const cy = Math.floor(y / this.gridCellSize);
+    for (let dy = -1; dy <= 1; dy++) {
+      for (let dx = -1; dx <= 1; dx++) {
+        const cell = this.spatialGrid.get(`${cx + dx},${cy + dy}`);
+        if (!cell) continue;
+        for (const e of cell.edges) {
+          // 圆心到线段最短距离的平方 与 (r+线段端点距圆心最远距离)^2 比较：
+          // 这里用 AABB 快速近似判断线段所在线段包围盒与圆是否相交。
+          const minX = Math.min(e.x1, e.x2);
+          const maxX = Math.max(e.x1, e.x2);
+          const minY = Math.min(e.y1, e.y2);
+          const maxY = Math.max(e.y1, e.y2);
+          const closestX = Math.max(minX, Math.min(x, maxX));
+          const closestY = Math.max(minY, Math.min(y, maxY));
+          const ddx = x - closestX;
+          const ddy = y - closestY;
+          if (ddx * ddx + ddy * ddy <= r * r) return true;
+        }
+      }
+    }
+    return false;
   }
 
   // 8. BVH 查询（核心 O(log n) 路径）
@@ -747,28 +1407,222 @@ class PolygonWallCollider {
   }
 }
 
+// ---------------------------------------------------------------------
+// Array-based Wall Collider (AABB)
+// 基于墙壁数组（Wall[]，x/y/w/h AABB 矩形）的简单碰撞系统：
+//  - 直接使用 defs 中原始的墙壁数组，不做栅格化/轮廓提取/噪声变换，
+//    因此碰撞面是规整的矩形墙，而不是"凹凸的墙壁"；
+//  - 均匀网格分桶（普通数组）快速筛选候选墙壁，避免每帧遍历全部墙；
+//  - 圆 vs AABB 推挤修正，多趟迭代收敛；
+//  - 提供与旧多边形碰撞器相同的接口（collideCircle / isFree /
+//    moveCircle / circleNeedsPreciseCheck / getWallsNear），
+//    并允许每次实体更新（位置积分后）直接调用。
+// ---------------------------------------------------------------------
+
+class ArrayWallCollider {
+  private walls: Wall[];
+  private mapWidth: number;
+  private mapHeight: number;
+  private gridCellSize: number;
+  private cols: number;
+  private rows: number;
+  /** 均匀网格：grid[row * cols + col] = 该格子内的墙壁数组 */
+  private grid: Wall[][];
+
+  /** 兼容旧字段（旧多边形碰撞器用它记录噪声抖动幅度，这里恒为 0）。 */
+  wallMaxJitterPx = 0;
+
+  constructor(
+    walls: Wall[],
+    mapWidth: number,
+    mapHeight: number,
+    gridResolution: number = 256,
+  ) {
+    this.walls = walls;
+    this.mapWidth = mapWidth;
+    this.mapHeight = mapHeight;
+    this.gridCellSize = Math.max(mapWidth, mapHeight) / gridResolution;
+    this.cols = Math.max(1, Math.ceil(mapWidth / this.gridCellSize));
+    this.rows = Math.max(1, Math.ceil(mapHeight / this.gridCellSize));
+    this.grid = [];
+
+    // 预处理：把每面墙登记到它覆盖的所有格子中（服务器启动时一次性完成）
+    for (const w of walls) {
+      const x0 = Math.max(0, Math.floor(w.x / this.gridCellSize));
+      const y0 = Math.max(0, Math.floor(w.y / this.gridCellSize));
+      const x1 = Math.min(this.cols - 1, Math.floor((w.x + w.w) / this.gridCellSize));
+      const y1 = Math.min(this.rows - 1, Math.floor((w.y + w.h) / this.gridCellSize));
+      for (let gy = y0; gy <= y1; gy++) {
+        for (let gx = x0; gx <= x1; gx++) {
+          const idx = gy * this.cols + gx;
+          let bucket = this.grid[idx];
+          if (!bucket) {
+            bucket = [];
+            this.grid[idx] = bucket;
+          }
+          bucket.push(w);
+        }
+      }
+    }
+  }
+
+  /** 收集与圆可能相交的候选墙壁（圆所在及覆盖的格子；inflate 额外扩大搜索范围）。 */
+  private candidates(x: number, y: number, r: number, inflate = 0): Wall[] {
+    const out: Wall[] = [];
+    const rr = r + inflate;
+    const gx0 = Math.max(0, Math.floor((x - rr) / this.gridCellSize));
+    const gy0 = Math.max(0, Math.floor((y - rr) / this.gridCellSize));
+    const gx1 = Math.min(this.cols - 1, Math.floor((x + rr) / this.gridCellSize));
+    const gy1 = Math.min(this.rows - 1, Math.floor((y + rr) / this.gridCellSize));
+    for (let gy = gy0; gy <= gy1; gy++) {
+      for (let gx = gx0; gx <= gx1; gx++) {
+        const bucket = this.grid[gy * this.cols + gx];
+        if (bucket) out.push(...bucket);
+      }
+    }
+    return out;
+  }
+
+  /** 圆 vs AABB 推挤：若相交则把圆心沿最短推出方向移到墙外，否则原样返回。 */
+  private pushOutOfWall(cx: number, cy: number, r: number, w: Wall, inflate = 0): [number, number] {
+    // inflate > 0 时墙的碰撞范围向外扩张（等效于墙变厚），生物用 +10px
+    const minX = w.x - inflate;
+    const minY = w.y - inflate;
+    const maxX = w.x + w.w + inflate;
+    const maxY = w.y + w.h + inflate;
+    const closestX = Math.max(minX, Math.min(cx, maxX));
+    const closestY = Math.max(minY, Math.min(cy, maxY));
+    const dx = cx - closestX;
+    const dy = cy - closestY;
+    const dist2 = dx * dx + dy * dy;
+    if (dist2 >= r * r) return [cx, cy];
+
+    if (dist2 < 0.0001) {
+      // 圆心在墙内部：沿最近的边推出去
+      const left = cx - minX;
+      const right = maxX - cx;
+      const top = cy - minY;
+      const bottom = maxY - cy;
+      const minD = Math.min(left, right, top, bottom);
+      if (minD === left) return [minX - r, cy];
+      if (minD === right) return [maxX + r, cy];
+      if (minD === top) return [cx, minY - r];
+      return [cx, maxY + r];
+    }
+
+    const dist = Math.sqrt(dist2);
+    const push = r - dist;
+    return [cx + (dx / dist) * push, cy + (dy / dist) * push];
+  }
+
+  /**
+   * 圆与墙壁数组碰撞（主 API）：多趟推挤，平均 O(候选墙数)。
+   * @param inflate 墙壁外扩量（px）。生物传 MOB_WALL_INFLATE=10；玩家/弹射物默认 0。
+   */
+  collideCircle(x: number, y: number, r: number, counter?: CollisionCounter, inflate = 0): [number, number] {
+    for (let pass = 0; pass < 3; pass++) {
+      let moved = false;
+      for (const w of this.candidates(x, y, r, inflate)) {
+        if (counter) counter.n++;
+        const [nx, ny] = this.pushOutOfWall(x, y, r, w, inflate);
+        if (nx !== x || ny !== y) {
+          moved = true;
+          x = nx;
+          y = ny;
+        }
+      }
+      if (!moved) break;
+    }
+    return [x, y];
+  }
+
+  /** 圆是否完全不在任何墙壁内（碰撞修正无位移即视为安全点，用于从墙内弹开）。 */
+  isFree(x: number, y: number, r: number, inflate = 0): boolean {
+    const [cx, cy] = this.collideCircle(x, y, r, undefined, inflate);
+    return Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01;
+  }
+
+  /** 带移动步进的圆碰撞（防止高速穿透）。 */
+  moveCircle(
+    x: number, y: number, dx: number, dy: number, r: number, counter?: CollisionCounter, inflate = 0
+  ): [number, number] {
+    const dist = Math.hypot(dx, dy);
+    const maxStep = Math.max(4, r * 0.45);
+    const steps = Math.max(1, Math.ceil(dist / maxStep));
+    const sx = dx / steps;
+    const sy = dy / steps;
+    for (let i = 0; i < steps; i++) {
+      x += sx;
+      y += sy;
+      [x, y] = this.collideCircle(x, y, r, counter, inflate);
+    }
+    return [x, y];
+  }
+
+  /**
+   * 粗筛：圆附近（含 r 半径范围）是否存在墙壁。
+   * 用于快速跳过远离所有墙的实体，避免不必要的推挤。
+   */
+  circleNeedsPreciseCheck(x: number, y: number, r: number, inflate = 0): boolean {
+    return this.candidates(x, y, r, inflate).length > 0;
+  }
+
+  /** 获取某位置附近的墙壁（空间网格查询，兼容旧接口，返回墙数组）。 */
+  getWallsNear(x: number, y: number, radius: number, inflate = 0): Wall[] {
+    return this.candidates(x, y, radius, inflate);
+  }
+}
+
 interface GameServerOptions {
   mobCapScale?: number;
+  /**
+   * 视野缩放因子（viewScale）。客户端渲染时使用的相机缩放比例。
+   * 服务器端的视野裁剪半径 VIEW_RADIUS 需要除以 viewScale，
+   * 以保证视野范围与客户端实际可见区域一致。
+   * 默认 1（无缩放）。例如 viewScale=2 时，视野半径减半。
+   */
+  viewScale?: number;
 }
 
 export class GameServer {
   private nextId = 1;
   private clients = new Map<number, ClientState>();
-  private worlds: World[] = MAPS.map(() => ({ mobs: [], drops: [] }));
+  private worlds: World[] = MAPS.map(() => ({ mobs: [], drops: [], dormantMobs: [], projectiles: [] }));
 
-  // Pre-computed wall grids for each map
-  private wallColliders: PolygonWallCollider[] = [];
+  // 生物墙壁碰撞：数组 AABB（直接使用墙壁数组，无噪声多边形；碰撞时墙向外 +10px）
+  private wallColliders: ArrayWallCollider[] = [];
+  // 玩家墙壁碰撞：凹凸多边形 + BVH 精确碰撞（与客户端渲染的视觉墙一致）
+  private playerWallColliders: PolygonWallCollider[] = [];
 
   private tickCount = 0;
   private mobCapScale: number;
+  /** 区块补生计时器（秒），累计满 ZONE_REFILL_INTERVAL 后执行一次补生检查。 */
+  private zoneRefillTimer = 0;
+  /** 视野缩放因子，VIEW_RADIUS 会被除以该值。 */
+  private viewScale: number;
 
-  /** 墙壁碰撞累积计时器（秒），用于 20fps 批量碰撞 */
-  private wallCollisionAccumulator = 0;
-  /** 墙壁碰撞间隔：20fps = 50ms */
-  private readonly WALL_COLLISION_INTERVAL = 1 / 20;
+  /**
+   * 全局生物碰撞限流计数器：上一帧碰撞检测次数超过 MOB_COLLISION_OVERLOAD_THRESHOLD
+   * 时设置此值；之后 MOB_COLLISION_OVERLOAD_SKIP 帧内不进行生物间碰撞。
+   *  - 0 = 正常每帧执行；
+   *  - >0 = 当前处于限流冷却中，剩余多少帧需要跳过。
+   */
+  private mobCollisionSkipFrames = 0;
 
   /** All active squads, keyed by their 6-character code. */
   private squads = new Map<string, Squad>();
+
+  /**
+   * 全局毒伤管理器:由 update() 每帧驱动,所有 Scorpion 毒针
+   * 命中玩家时通过 applyPoison() 注入。
+   */
+  private poisonManager: PoisonManager = new PoisonManager();
+
+  /**
+   * Per-map zone mob counts (A-G), used to enforce ZONE_MOB_LIMITS.
+   * zoneMobCounts[mapId] = Map<zoneLetter, count>
+   */
+  private zoneMobCounts: Map<string, number>[] = MAPS.map(() => new Map());
 
   /**
    * Wall/circle collision tests performed during the most recently completed
@@ -784,13 +1638,26 @@ export class GameServer {
         ? options.mobCapScale ?? 1
         : 1;
 
-    // Build polygon wall colliders with BVH for each map
+    // viewScale：客户端相机缩放因子。VIEW_RADIUS 需要除以该值，
+    // 以匹配客户端实际可见的世界范围。默认 1（无缩放）。
+    this.viewScale =
+      Number.isFinite(options.viewScale) && (options.viewScale ?? 1) > 0
+        ? options.viewScale ?? 1
+        : 1;
+
+    // 玩家：凹凸多边形 + BVH 精确碰撞器（与客户端渲染的视觉墙一致）
     for (const map of MAPS) {
-      this.wallColliders.push(new PolygonWallCollider(map.walls, map.width, map.height, 256));
+      this.playerWallColliders.push(new PolygonWallCollider(map.walls, map.width, map.height, 256));
+    }
+    // 生物：数组 AABB 碰撞器（直接使用墙壁数组，无噪声多边形；碰撞时墙向外 +10px）
+    for (const map of MAPS) {
+      this.wallColliders.push(new ArrayWallCollider(map.walls, map.width, map.height, 256));
     }
 
+    // 全图生物只预生成一次：每个区块按上限减 1 生成（比 limit 略少，留出补生余量）。
+    // 之后的生成全部走 refillZoneMobs() 的视野裁剪：视野外不生成、不更新。
     for (const map of MAPS) {
-      for (let i = 0; i < this.mobCapForMap(map.id); i++) this.spawnMob(map.id);
+      this.preSpawnMap(map.id);
     }
   }
 
@@ -820,6 +1687,65 @@ export class GameServer {
   private mobCapForMap(mapId: number) {
     return Math.max(0, Math.round(MAPS[mapId].mobCap * this.mobCapScale));
   }
+
+  /**
+   * 全图预生成（仅服务器启动时调用一次）：
+   * 每 2 个区块为一组（A+B、C+D、E+F、G），每组只预生成 1 只，
+   * 让初始世界保持稀疏，后续由 refillZoneMobs() 在玩家视野内补生。
+   */
+/**
+ * 预生成地图怪物 - 每个 40x40 block 都生成怪物
+ */
+private preSpawnMap(mapId: number) {
+    const map = MAPS[mapId];
+    if (!map) return;
+
+    // 40x40 的区块网格
+    const BLOCK_SIZE = 40;
+    const cols = Math.ceil(map.width / BLOCK_SIZE);
+    const rows = Math.ceil(map.height / BLOCK_SIZE);
+
+    // 遍历所有区块
+    for (let col = 0; col < cols; col++) {
+        for (let row = 0; row < rows; row++) {
+            // 每个区块生成 1-3 只怪物
+            const count = 1 + Math.floor(Math.random() * 3);
+            for (let i = 0; i < count; i++) {
+                // 计算区块中心位置
+                const centerX = (col + 0.5) * BLOCK_SIZE;
+                const centerY = (row + 0.5) * BLOCK_SIZE;
+
+                // 在区块内随机偏移
+                const offsetX = (Math.random() - 0.5) * BLOCK_SIZE * 0.6;
+                const offsetY = (Math.random() - 0.5) * BLOCK_SIZE * 0.6;
+
+                const x = Math.max(50, Math.min(map.width - 50, centerX + offsetX));
+                const y = Math.max(50, Math.min(map.height - 50, centerY + offsetY));
+
+                // 根据位置决定区块等级 (A-G)
+                const zone = this.getZoneFromPosition(col, row, cols, rows);
+
+                this.spawnMob(mapId, zone, x, y);
+            }
+        }
+    }
+}
+
+private getZoneFromPosition(col: number, row: number, cols: number, rows: number): string {
+    // 计算归一化距离中心的距离 (0-1)
+    const centerCol = cols / 2;
+    const centerRow = rows / 2;
+    const maxDist = Math.max(centerCol, centerRow);
+
+    const dist = Math.sqrt(
+        Math.pow((col - centerCol) / maxDist, 2) +
+        Math.pow((row - centerRow) / maxDist, 2)
+    );
+
+    // 距离越近等级越高 (A近，G远)
+    const zoneIndex = Math.min(6, Math.floor(dist * 7));
+    return String.fromCharCode(65 + zoneIndex); // A=65, B=66, ...
+}
 
   // ---------------------------------------------------------------- clients
   addClient(id: number, send: (data: Uint8Array) => void) {
@@ -888,53 +1814,11 @@ export class GameServer {
   }
 
 
-private wallCollisionBatch(dt: number, players: Player[]) {
-  this.wallCollisionAccumulator += dt;
-  if (this.wallCollisionAccumulator < this.WALL_COLLISION_INTERVAL) return;
-  this.wallCollisionAccumulator -= this.WALL_COLLISION_INTERVAL;
-
-  const VIEW_RADIUS = 1300;
-  const VIEW_RADIUS_SQ = VIEW_RADIUS * VIEW_RADIUS;
-
-  // ---- 玩家墙壁碰撞 ----
-  for (const p of players) {
-    if (!p.alive) continue;
-    // 每个玩家只做自己的碰撞
-    const collider = this.wallColliders[p.mapId];
-    [p.x, p.y] = collider.collideCircle(p.x, p.y, PLAYER_RADIUS, this.collisionCounter);
-  }
-
-  // ---- Mob 墙壁碰撞 ----
-  for (let m = 0; m < MAPS.length; m++) {
-    const map = MAPS[m];
-    const collider = this.wallColliders[m];
-    // 收集该地图的玩家位置
-    const mapPlayers = players.filter(p => p.mapId === m && p.alive);
-    const playerPositions = mapPlayers.map(p => ({ x: p.x, y: p.y }));
-
-    for (const mob of this.worlds[m].mobs) {
-      // 检查是否在玩家视野内
-      let inView = false;
-      if (mob.ownerId !== 0) {
-        inView = true; // 召唤物始终在视野内
-      } else {
-        for (const pos of playerPositions) {
-          const dx = mob.x - pos.x;
-          const dy = mob.y - pos.y;
-          if (dx * dx + dy * dy < VIEW_RADIUS_SQ) {
-            inView = true;
-            break;
-          }
-        }
-      }
-
-      // 不在视野内，跳过墙壁碰撞
-      if (!inView) continue;
-
-      [mob.x, mob.y] = collider.collideCircle(mob.x, mob.y, mob.radius, this.collisionCounter);
-    }
-  }
-}
+/**
+ * 玩家墙壁碰撞：不使用 20fps 批量，而是每帧在 updatePlayer() 中通过
+ * collider.moveCircle() 做精确的圆-AABB 碰撞（高精度、无批处理延迟）。
+ * 生物墙壁碰撞在 updateWorld() 中随更新执行（墙壁向外 +10px）。
+ */
 
   drainKicks(): number[] {
     const ids: number[] = [];
@@ -1521,7 +2405,9 @@ private wallCollisionBatch(dt: number, players: Player[]) {
   // --------------------------------------------------------------- spawning
   private spawnPlayer(p: Player) {
     const map = MAPS[p.mapId];
-    const collider = this.wallColliders[p.mapId];
+    // 出生点校验与玩家碰撞一致：凹凸多边形精确碰撞器
+    const collider = this.playerWallColliders[p.mapId];
+    const spawnR = PLAYER_RADIUS + this.soilRadiusBonusOf(p);
     const spawnTiles = findSpawnTiles(p.mapId);
     if (spawnTiles.length > 0) {
       const tile = spawnTiles[Math.floor(Math.random() * spawnTiles.length)];
@@ -1530,41 +2416,263 @@ private wallCollisionBatch(dt: number, players: Player[]) {
       for (let tries = 0; tries < 20; tries++) {
         const x = tile.col * tileW + Math.random() * tileW;
         const y = tile.row * tileH + Math.random() * tileH;
-        const [cx, cy] = collider.collideCircle(x, y, 40);
+        const [cx, cy] = collider.collideCircle(x, y, spawnR);
         if (Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01) {
           p.x = x; p.y = y; p.hp = p.maxHp; p.alive = true; p.statsDirty = true;
           return;
         }
       }
     }
+    // 兜底：尝试随机位置，优先选择不在墙内的；若全部落在墙内，
+    // 使用最后一次碰撞修正后的位置（已被弹出墙壁）。
+    let fallbackX = 200 + Math.random() * (map.width - 400);
+    let fallbackY = 200 + Math.random() * (map.height - 400);
+    [fallbackX, fallbackY] = collider.collideCircle(fallbackX, fallbackY, spawnR);
     for (let tries = 0; tries < 60; tries++) {
       const x = 200 + Math.random() * (map.width - 400);
       const y = 200 + Math.random() * (map.height - 400);
-      const [cx, cy] = collider.collideCircle(x, y, 40);
+      const [cx, cy] = collider.collideCircle(x, y, spawnR);
       if (Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01) { p.x = x; p.y = y; break; }
-      p.x = x; p.y = y;
+      // 记录最后一次修正后的位置作为兜底（被弹出墙壁）。
+      fallbackX = cx; fallbackY = cy;
+      p.x = fallbackX; p.y = fallbackY;
     }
     p.hp = p.maxHp; p.alive = true; p.statsDirty = true;
   }
 
-  private spawnMob(mapId: number) {
+  /**
+   * 生成一只野生生物。zoneHint 指定后只在该区块内采样（用于补生）；
+   * 未指定则在全图 A-G 区块中随机采样。
+   * 区块达到 ZONE_MOB_LIMITS 上限时不再生成。
+   */
+  private spawnMob(mapId: number, zoneHint = "") {
     const map = MAPS[mapId];
     const collider = this.wallColliders[mapId];
-    const type = map.mobs[(Math.random() * map.mobs.length) | 0];
-    let rarity = 0, x = 0, y = 0, placed = false;
-    for (let tries = 0; tries < 80; tries++) {
-      x = 200 + Math.random() * (map.width - 400);
-      y = 200 + Math.random() * (map.height - 400);
-      const zone = getBlockAt(mapId, x, y);
-      if (zone < "A" || zone > "G") continue;
-      const cr = rollZoneRarity(zone);
-      const crRadius = MOBS[type].radius * mobSizeMult(cr);
-      const [cx, cy] = collider.collideCircle(x, y, crRadius + 6);
-      if (Math.abs(cx - x) >= 0.01 || Math.abs(cy - y) >= 0.01) continue;
-      rarity = cr; placed = true; break;
+    const type = pickWeightedMob(mapId, map.mobs); // 使用权重表选择生物类型
+    const zoneCounts = this.zoneMobCounts[mapId];
+    let rarity = 0, x = 0, y = 0, zone = "", placed = false;
+
+    // 收集候选瓦片：zoneHint 非空时只收集该区块的瓦片，保证补生落在目标区块
+    const grid = MAP_GRIDS[mapId];
+    const tileW = map.width / BLOCK_GRID_COLS;
+    const tileH = map.height / BLOCK_GRID_ROWS;
+    const tiles: { col: number; row: number }[] = [];
+    if (grid) {
+      for (let row = 0; row < BLOCK_GRID_ROWS; row++) {
+        for (let col = 0; col < BLOCK_GRID_COLS; col++) {
+          const ch = grid[row]?.[col] ?? "1";
+          const letter = ch === "2" ? "A" : ch;
+          if (letter === "1") continue;
+          if (zoneHint && letter !== zoneHint) continue;
+          tiles.push({ col, row });
+        }
+      }
     }
+
+    if (tiles.length > 0) {
+      // 优先：按区块瓦片均匀采样（200×200 一格）
+      for (let tries = 0; tries < 60; tries++) {
+        const tile = tiles[(Math.random() * tiles.length) | 0];
+        x = tile.col * tileW + Math.random() * tileW;
+        y = tile.row * tileH + Math.random() * tileH;
+        zone = getBlockAt(mapId, x, y);
+        // 检查该区块是否已达生成上限
+        if (this.zoneFull(mapId, zone)) continue;
+        const cr = rollZoneRarity(zone);
+        const crRadius = MOBS[type].radius * mobSizeMult(cr);
+        // 生成点校验与生物碰撞一致：墙壁向外 +10px
+        const [cx, cy] = collider.collideCircle(x, y, crRadius + 6, undefined, MOB_WALL_INFLATE);
+        if (Math.abs(cx - x) >= 0.01 || Math.abs(cy - y) >= 0.01) continue;
+        rarity = cr; placed = true; break;
+      }
+    } else {
+      // 兜底：无区块网格时按原逻辑随机采样
+      for (let tries = 0; tries < 80; tries++) {
+        x = 200 + Math.random() * (map.width - 400);
+        y = 200 + Math.random() * (map.height - 400);
+        zone = getBlockAt(mapId, x, y);
+        if (zone < "A" || zone > "G") continue;
+        if (zoneHint && zone !== zoneHint) continue;
+        // 检查该区块是否已达生成上限
+        if (this.zoneFull(mapId, zone)) continue;
+        const cr = rollZoneRarity(zone);
+        const crRadius = MOBS[type].radius * mobSizeMult(cr);
+        // 生成点校验与生物碰撞一致：墙壁向外 +10px
+        const [cx, cy] = collider.collideCircle(x, y, crRadius + 6, undefined, MOB_WALL_INFLATE);
+        if (Math.abs(cx - x) >= 0.01 || Math.abs(cy - y) >= 0.01) continue;
+        rarity = cr; placed = true; break;
+      }
+    }
+
     if (!placed) return;
+    // 增加该区块计数
+    zoneCounts.set(zone, (zoneCounts.get(zone) || 0) + 1);
     this.worlds[mapId].mobs.push(new Mob(this.nextId++, type, mapId, x, y, rarity));
+  }
+
+  /** 获取某位置所在区块的字母（A-G），若不在有效区块内返回空字符串。 */
+  private zoneAt(mapId: number, x: number, y: number): string {
+    const z = getBlockAt(mapId, x, y);
+    return (z >= "A" && z <= "G") ? z : "";
+  }
+
+  /** 减少某区块的活跃生物计数（生物死亡/休眠时调用）。 */
+  private decZoneCount(mapId: number, zone: string) {
+    if (!zone) return;
+    const counts = this.zoneMobCounts[mapId];
+    const cur = counts.get(zone) || 0;
+    if (cur > 0) counts.set(zone, cur - 1);
+  }
+
+  /** 增加某区块的活跃生物计数（生物唤醒时调用）。 */
+  private incZoneCount(mapId: number, zone: string) {
+    if (!zone) return;
+    const counts = this.zoneMobCounts[mapId];
+    counts.set(zone, (counts.get(zone) || 0) + 1);
+  }
+
+  /** 区块是否已达到生成上限（达到后不再生成新生物）。 */
+  private zoneFull(mapId: number, zone: string): boolean {
+    if (!zone) return false;
+    const limit = ZONE_MOB_LIMITS[zone];
+    if (limit === undefined) return false;
+    return (this.zoneMobCounts[mapId].get(zone) || 0) >= limit;
+  }
+
+  /**
+   * 区块补生检查（每 ZONE_REFILL_INTERVAL 秒执行一次），带视野裁剪：
+   * 只对进入过玩家视野的区块补生 1 只；视野外的区块不生成、不更新（由休眠系统管理）。
+   * 达到上限的区块不再生成；只有生物减少（死亡/休眠）导致计数低于上限时，才会补生。
+   */
+  private refillZoneMobs(mapId: number, players: Player[]) {
+    let hostiles = 0;
+    for (const m of this.worlds[mapId].mobs) if (!m.friendly) hostiles++;
+    if (hostiles >= this.mobCapForMap(mapId)) return;
+
+    // 收集当前地图的玩家位置（含死亡位置，与 updateWorld 保持一致）
+    const positions: { x: number; y: number }[] = [];
+    for (const p of players) {
+      if (p.mapId !== mapId) continue;
+      positions.push(p.alive ? { x: p.x, y: p.y } : { x: p.deathX, y: p.deathY });
+    }
+    if (positions.length === 0) return; // 地图上无玩家：视野外不生成
+
+    // 标记进入过玩家视野的区块（区块内任一瓦片与任一玩家距离 < 视野半径）
+    const grid = MAP_GRIDS[mapId];
+    if (!grid) return;
+    const map = MAPS[mapId];
+    const tileW = map.width / BLOCK_GRID_COLS;
+    const tileH = map.height / BLOCK_GRID_ROWS;
+    const viewRadius = 1300 / this.viewScale;
+    const viewRadiusSq = viewRadius * viewRadius;
+    const inViewZones = new Set<string>();
+    for (let row = 0; row < BLOCK_GRID_ROWS; row++) {
+      for (let col = 0; col < BLOCK_GRID_COLS; col++) {
+        const ch = grid[row]?.[col] ?? "1";
+        const letter = ch === "2" ? "A" : ch;
+        if (letter === "1" || inViewZones.has(letter)) continue;
+        const tx = (col + 0.5) * tileW;
+        const ty = (row + 0.5) * tileH;
+        for (const pos of positions) {
+          const dx = tx - pos.x;
+          const dy = ty - pos.y;
+          if (dx * dx + dy * dy < viewRadiusSq) { inViewZones.add(letter); break; }
+        }
+      }
+    }
+
+    for (let i = 0; i < ZONE_LETTERS.length; i++) {
+      const zone = ZONE_LETTERS[i];
+      if (!inViewZones.has(zone)) continue; // 视野外不生成
+      if (!this.zoneFull(mapId, zone)) this.spawnMob(mapId, zone);
+    }
+  }
+
+  /**
+   * 生物卡进墙壁时：直接在相同区块（不是出生点）的随机地方刷新。
+   *
+   * 策略：
+   *  1. 先沿 8 个方向由近及远（5~50px 步进）搜索最近的安全位置，
+   *     找到则直接移动过去并施加反向弹力（保留原有"微调弹出"行为，
+   *     适用于只是轻微嵌入墙边的情形）。
+   *  2. 若 8 方向均找不到安全位置（彻底卡死），则在当前所在区块内
+   *     随机选取一个非墙壁瓦片，在该瓦片范围内随机落点并校验碰撞，
+   *     通过则传送过去。这避免了"卡死后传送回出生点"导致生物
+   *     脱离原区块、区块计数错乱的问题。
+   *  3. 仍失败则回退到地图随机出生瓦片（最终兜底）。
+   */
+  private pushOutOfWall(mob: Mob, mapId: number): boolean {
+    const map = MAPS[mapId];
+    const collider = this.wallColliders[mapId];
+    const r = mob.radius;
+    const ox = mob.x;
+    const oy = mob.y;
+    const angles = [0, 45, 90, 135, 180, 225, 270, 315].map((deg) => (deg * Math.PI) / 180);
+
+    // ---- Step 1: 8 方向微调弹出 ----
+    for (let step = 5; step <= 50; step += 5) {
+      for (const angle of angles) {
+        const tx = ox + Math.cos(angle) * step;
+        const ty = oy + Math.sin(angle) * step;
+        if (tx < r || tx > map.width - r || ty < r || ty > map.height - r) continue;
+        if (collider.isFree(tx, ty, r, MOB_WALL_INFLATE)) {
+          mob.x = tx;
+          mob.y = ty;
+          mob.vx = Math.cos(angle + Math.PI) * 5;
+          mob.vy = Math.sin(angle + Math.PI) * 5;
+          return true;
+        }
+      }
+    }
+
+    // ---- Step 2: 在相同区块内随机刷新 ----
+    // 获取当前所在区块字母（A-G），在该区块的所有瓦片中随机选取。
+    const zone = this.zoneAt(mapId, ox, oy);
+    const grid = MAP_GRIDS[mapId];
+    if (grid && zone) {
+      const tileW = map.width / BLOCK_GRID_COLS;
+      const tileH = map.height / BLOCK_GRID_ROWS;
+      // 收集同区块所有可通行瓦片
+      const candidates: { row: number; col: number }[] = [];
+      for (let row = 0; row < BLOCK_GRID_ROWS; row++) {
+        for (let col = 0; col < BLOCK_GRID_COLS; col++) {
+          const ch = grid[row]?.[col] ?? "1";
+          // '2'（出生点）在 getBlockAt 中视为 'A'，此处同样匹配
+          const tileZone = ch === "2" ? "A" : ch;
+          if (tileZone === zone) candidates.push({ row, col });
+        }
+      }
+      // 随机尝试若干个瓦片，每个瓦片内再随机落点
+      for (let tries = 0; tries < 30; tries++) {
+        if (candidates.length === 0) break;
+        const tile = candidates[(Math.random() * candidates.length) | 0];
+        const tx = (tile.col + 0.5) * tileW + (Math.random() - 0.5) * tileW * 0.8;
+        const ty = (tile.row + 0.5) * tileH + (Math.random() - 0.5) * tileH * 0.8;
+        const cx = Math.max(r, Math.min(map.width - r, tx));
+        const cy = Math.max(r, Math.min(map.height - r, ty));
+        if (collider.isFree(cx, cy, r, MOB_WALL_INFLATE)) {
+          mob.x = cx;
+          mob.y = cy;
+          mob.vx = 0;
+          mob.vy = 0;
+          return true;
+        }
+      }
+    }
+
+    // ---- Step 3: 兜底——传送到地图随机出生瓦片 ----
+    const spawnTiles = findSpawnTiles(mapId);
+    if (spawnTiles.length > 0) {
+      const tile = spawnTiles[(Math.random() * spawnTiles.length) | 0];
+      const tx = (tile.col + 0.5) * (map.width / BLOCK_GRID_COLS);
+      const ty = (tile.row + 0.5) * (map.height / BLOCK_GRID_ROWS);
+      const [cx, cy] = collider.collideCircle(tx, ty, r, undefined, MOB_WALL_INFLATE);
+      mob.x = cx;
+      mob.y = cy;
+    }
+    mob.vx = 0;
+    mob.vy = 0;
+    return false;
   }
 
   private healthBonusOf(p: Player): number {
@@ -1574,6 +2682,19 @@ private wallCollisionBatch(dt: number, players: Player[]) {
       if (!cell) continue;
       const def = ITEMS[cell.item];
       if (def?.healthBonus) bonus += def.healthBonus * rarityMult(cell.rarity);
+    }
+    return bonus;
+  }
+
+  private soilRadiusBonusOf(p: Player): number {
+    let bonus = 0;
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const cell = p.slots[i];
+      if (!cell) continue;
+      const def = ITEMS[cell.item];
+      if ((def?.name ?? "").toLowerCase() === "soil") {
+        bonus += 10 + cell.rarity * 2;
+      }
     }
     return bonus;
   }
@@ -1601,22 +2722,54 @@ private wallCollisionBatch(dt: number, players: Player[]) {
   }
 
   private rebuildPetals(p: Player) {
+    const oldPetals = p.petals;
     const petals: PetalState[] = [];
     for (let i = 0; i < SLOT_COUNT; i++) {
-      const old = p.petals[i];
+      const old = oldPetals[i];
       const cell = p.slots[i];
       const def = cell ? ITEMS[cell.item] : null;
       const orbits = !!def && orbitsAsPetal(def.kind);
-      const maxHp = orbits ? def!.health * rarityMult(cell!.rarity) : 1;
-      petals.push({
-        id: old?.id ?? this.nextId++, alive: orbits, hp: maxHp, maxHp, timer: 0,
-        x: p.x, y: p.y, hitCd: 0,
-        specialTimer: cell && isAbsorbItem(cell.item) ? ROSE_HEAL_DELAY : 0, absorbTimer: 0,
-      });
+
+      // 宠物召唤逻辑：无论是否变化都要检查，防止召唤物不一致
       const pets = p.pets[i] || [];
       const sameSummon = !!cell && !!def && def.kind === "summon" &&
         pets.every((pet) => pet.type === def.petMob && pet.sourceItem === cell.item && pet.sourceRarity === cell.rarity);
       if (pets.length > 0 && !sameSummon) this.despawnPets(p, i);
+
+      // 判断槽位内容是否真的变了（物品ID 或稀有度不同，或之前没有状态）
+      const cellChanged =
+        !old ||
+        !cell ||
+        old.item !== cell.item ||
+        old.rarity !== cell.rarity;
+
+      if (!cellChanged) {
+        // 槽位没变：保留旧状态（HP、reload 进度、目标锁定等全部保留）
+        petals.push(old);
+        continue;
+      }
+
+      // 槽位变了：创建新花瓣状态，重置所有计时器
+      const maxHp = orbits ? def!.health * rarityMult(cell!.rarity) : 1;
+      petals.push({
+        id: old?.id ?? this.nextId++,
+        item: cell?.item ?? EMPTY_ITEM,
+        rarity: cell?.rarity ?? 0,
+        alive: orbits,
+        hp: maxHp,
+        maxHp,
+        timer: 0,
+        x: p.x,
+        y: p.y,
+        hitCd: 0,
+        specialTimer: cell && isAbsorbItem(cell.item) ? ROSE_HEAL_DELAY : 0,
+        absorbTimer: 0,
+        // 目标搜索降频：随机初值让各花瓣错开搜索帧
+        targetCheckTimer: (Math.random() * PETAL_TARGET_RECHECK_FRAMES) | 0,
+        targetId: 0,
+        // 弹射物发射计时器：Missile 等远程花瓣用，初始 0 表示可立即发射
+        fireTimer: 0,
+      });
     }
     p.petals = petals;
   }
@@ -1630,18 +2783,29 @@ private wallCollisionBatch(dt: number, players: Player[]) {
     for (const c of this.clients.values()) if (c.player) players.push(c.player);
     for (const p of players) this.updatePlayer(p, dt, players);
     for (let m = 0; m < MAPS.length; m++) this.updateWorld(m, dt, players);
-    // 玩家墙壁碰撞已移至 wallCollisionBatch() 以 20fps 批量处理
+    // 每 5 秒检查一次：只给进入玩家视野的区块补生，视野外不生成、不更新
+    this.zoneRefillTimer += dt;
+    if (this.zoneRefillTimer >= ZONE_REFILL_INTERVAL) {
+      this.zoneRefillTimer = 0;
+      for (let m = 0; m < MAPS.length; m++) this.refillZoneMobs(m, players);
+    }
+    // 玩家墙壁碰撞：updatePlayer() 每帧用 moveCircle 做精确圆-AABB 碰撞（无 20fps 批量）；
+    // 生物墙壁碰撞在 updateWorld() 内随更新执行（墙壁向外 +10px，无凹凸多边形墙）
     for (const p of players) this.updatePetals(p, dt);
-    for (const p of players) this.pickupDrops(p);
-    // ⭐ 20fps 批量墙壁碰撞（所有实体统一处理，降低 CPU 占用）
-    this.wallCollisionBatch(dt, players);
+    for (const p of players) this.pickupDrops(p, dt);
+    // 弹射物系统：生物与花瓣共用的远程攻击更新
+    for (let m = 0; m < MAPS.length; m++) this.updateProjectiles(m, dt, players);
+    // 毒伤系统：所有活跃毒伤按 100ms tick 节奏结算一次伤害
+    this.poisonManager.updateAll(this);
     for (const c of this.clients.values()) this.sendState(c);
   }
 
   private updatePlayer(p: Player, dt: number, players: Player[]) {
     if (!p.alive) return;
     const map = MAPS[p.mapId];
-    const collider = this.wallColliders[p.mapId];
+    // 玩家使用凹凸多边形精确碰撞器（每帧 moveCircle 圆-边精确碰撞）
+    const collider = this.playerWallColliders[p.mapId];
+    const playerRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(p);
     let speedBonus = 0;
     for (let i = 0; i < SLOT_COUNT; i++) {
       const cell = p.slots[i];
@@ -1657,23 +2821,25 @@ private wallCollisionBatch(dt: number, players: Player[]) {
     const ny = mag > 1 ? p.inDy / mag : p.inDy;
     p.vx += (nx * speed - p.vx) * Math.min(1, dt * 9);
     p.vy += (ny * speed - p.vy) * Math.min(1, dt * 9);
-    [p.x, p.y] = collider.moveCircle(p.x, p.y, p.vx * dt, p.vy * dt, PLAYER_RADIUS, this.collisionCounter);
-    p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
-    p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
+    [p.x, p.y] = collider.moveCircle(p.x, p.y, p.vx * dt, p.vy * dt, playerRadius, this.collisionCounter);
+    p.x = clamp(p.x, playerRadius, map.width - playerRadius);
+    p.y = clamp(p.y, playerRadius, map.height - playerRadius);
     for (const o of players) {
       if (o === p || o.mapId !== p.mapId || !o.alive) continue;
       this.collisionCounter.n++;
       const dx = p.x - o.x;
       const dy = p.y - o.y;
       const d = Math.hypot(dx, dy);
-      if (d < PLAYER_RADIUS * 2 && d > 0.001) {
-        const push = (PLAYER_RADIUS * 2 - d) * 0.5;
+      const oRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(o);
+      const minDist = playerRadius + oRadius;
+      if (d < minDist && d > 0.001) {
+        const push = (minDist - d) * 0.5;
         p.x += (dx / d) * push;
         p.y += (dy / d) * push;
       }
     }
-    p.x = clamp(p.x, PLAYER_RADIUS, map.width - PLAYER_RADIUS);
-    p.y = clamp(p.y, PLAYER_RADIUS, map.height - PLAYER_RADIUS);
+    p.x = clamp(p.x, playerRadius, map.width - playerRadius);
+    p.y = clamp(p.y, playerRadius, map.height - playerRadius);
     p.hurtCd = Math.max(0, p.hurtCd - dt);
     const attack = (p.flags & 1) !== 0;
     const defend = (p.flags & 2) !== 0;
@@ -1684,10 +2850,10 @@ private wallCollisionBatch(dt: number, players: Player[]) {
     }
     p.wasDefending = defend;
 
-    // Third Eye petals expand the orbit range. The bonus is added to the base
-    // target so the smooth interpolation still works with spread/defend modes.
+    // Third Eye petals expand the orbit range. The bonus is added to the
+    // spread (attack) target so the smooth interpolation still works with spread/defend modes.
     const eyeBonus = thirdEyeOrbitBonus(p.slots);
-    const targetOrbit = (attack ? 118 : defend ? 34 : 62) + eyeBonus;
+    const targetOrbit = attack ? 118 + eyeBonus : defend ? 34 : 62;
     p.orbit += (targetOrbit - p.orbit) * Math.min(1, dt * 6);
     p.baseAngle += dt * (attack ? 3.4 : 2.2);
     this.applyLevel(p);
@@ -1757,6 +2923,14 @@ private wallCollisionBatch(dt: number, players: Player[]) {
   private updatePetals(p: Player, dt: number) {
     if (!p.alive) return;
     const world = this.worlds[p.mapId];
+
+    // ✅ 视野范围（与 updateWorld 保持一致）
+    const VIEW_RADIUS = 1300 / this.viewScale;
+    const VIEW_RADIUS_SQ = VIEW_RADIUS * VIEW_RADIUS;
+
+    // ✅ 使用空间网格获取视野内的敌对生物（复用 updateWorld 的逻辑）
+    const nearbyHostiles = this.getNearbyHostilesOptimized(p, world, VIEW_RADIUS_SQ);
+
     let liveCount = 0;
     for (let i = 0; i < SLOT_COUNT; i++) {
       const cell = p.slots[i];
@@ -1805,6 +2979,8 @@ private wallCollisionBatch(dt: number, players: Player[]) {
           st.hp = st.maxHp;
           st.specialTimer = isAbsorbItem(cell.item) ? ROSE_HEAL_DELAY : 0;
           st.absorbTimer = 0;
+          st.x = p.x;
+          st.y = p.y;
         }
         continue;
       }
@@ -1868,13 +3044,78 @@ private wallCollisionBatch(dt: number, players: Player[]) {
       let targetMob: Mob | null = null;
       let targetDist = Infinity;
       let totalIncoming = 0;
-      for (const mob of world.mobs) {
-        if (mob.friendly) continue;
-        this.collisionCounter.n++;
-        const d = Math.hypot(mob.x - st.x, mob.y - st.y);
-        if (d >= mob.radius + pr) continue;
-        totalIncoming += mob.damage * 0.5;
-        if (d < targetDist) { targetDist = d; targetMob = mob; }
+
+      // 降频目标搜索：只在 targetCheckTimer <= 0 时重新寻找目标
+      st.targetCheckTimer--;
+      if (st.targetCheckTimer <= 0) {
+        st.targetCheckTimer = 2 + (Math.random() * 2) | 0; // 每 2-3 帧搜索一次
+        st.targetId = 0; // 重置，下面重新寻找
+
+        const searchRadius = pr + 200;
+        const nearbyMobs = this.getMobsInRadius(st.x, st.y, searchRadius, nearbyHostiles);
+
+        for (const mob of nearbyMobs) {
+          if (mob.friendly) continue;
+          this.collisionCounter.n++;
+          const dx = mob.x - st.x;
+          const dy = mob.y - st.y;
+          const rSum = mob.radius + pr;
+          // 先用 dx*dx+dy*dy < rSum*rSum 快速筛选
+          if (dx * dx + dy * dy >= rSum * rSum) continue;
+          const d = Math.hypot(dx, dy);
+          totalIncoming += mob.damage * 0.5;
+          if (d < targetDist) { targetDist = d; targetMob = mob; }
+        }
+        if (targetMob) st.targetId = targetMob.id;
+      } else {
+        // 非搜索帧：使用缓存的 targetId
+        if (st.targetId !== 0) {
+          targetMob = world.mobs.find(m => m.id === st.targetId && m.hp > 0) ?? null;
+          if (targetMob) {
+            targetDist = Math.hypot(targetMob.x - st.x, targetMob.y - st.y);
+            // 如果目标太远，失效
+            if (targetDist > pr + 400) { targetMob = null; st.targetId = 0; }
+          }
+        }
+        // 仍需要计算 incoming damage
+        const searchRadius = pr + 200;
+        const nearbyMobs = this.getMobsInRadius(st.x, st.y, searchRadius, nearbyHostiles);
+        for (const mob of nearbyMobs) {
+          if (mob.friendly) continue;
+          const dx = mob.x - st.x;
+          const dy = mob.y - st.y;
+          const rSum = mob.radius + pr;
+          if (dx * dx + dy * dy >= rSum * rSum) continue;
+          totalIncoming += mob.damage * 0.5;
+        }
+      }
+      // ---- Missile 花瓣：按 spread(attack) 向相对玩家的方向发射导弹 ----
+      // 当玩家装备 Missile (id 52) 且按住 attack(bit0) 时，向花瓣当前所在轨道
+      // 方向发射一枚 TEAM.FRIENDLY 导弹。发射后花瓣立即进入 reload 冷却。
+      if (cell.item === MISSILE_ITEM && (p.flags & 1) !== 0) {
+        // 发射方向 = 花瓣相对玩家的角度（不再自动追踪生物）
+        const missileAngle = Math.atan2(st.y - p.y, st.x - p.x);
+        const muzzleX = st.x + Math.cos(missileAngle) * (pr + 6);
+        const muzzleY = st.y + Math.sin(missileAngle) * (pr + 6);
+        this.fireProjectile(
+          p.mapId,
+          muzzleX,
+          muzzleY,
+          missileAngle,
+          MISSILE_SPEED,
+          dmg * 0.3,
+          TEAM.FRIENDLY,
+          p.id,
+          cell.item,
+          cell.rarity,
+          10,
+        );
+        // 发射后花瓣进入 reload（消失，等待重新生长）
+        st.alive = false;
+        st.hp = 0;
+        st.timer = def.reload;
+        // 远程花瓣不进行近战碰撞/伤害，跳过下面的 targetMob 攻击分支
+        continue;
       }
       if (targetMob && st.hitCd <= 0) {
         targetMob.hp -= dmg;
@@ -1882,7 +3123,7 @@ private wallCollisionBatch(dt: number, players: Player[]) {
         targetMob.targetId = p.id;
         targetMob.addDamage(p.id, dmg);
         st.hp -= totalIncoming;
-        st.hitCd = 0.25;
+        st.hitCd = 0.1;
         const kb = 90 / (targetMob.radius / 20);
         targetMob.vx += ((targetMob.x - st.x) / (targetDist || 1)) * kb;
         targetMob.vy += ((targetMob.y - st.y) / (targetDist || 1)) * kb;
@@ -1893,6 +3134,63 @@ private wallCollisionBatch(dt: number, players: Player[]) {
       }
     }
   }
+/**
+ * 使用空间网格高效获取玩家视野内的敌对生物
+ */
+private getNearbyHostilesOptimized(p: Player, world: World, viewRadiusSq: number): Mob[] {
+    const MOB_CELL_SIZE = 250;
+    const result: Mob[] = [];
+
+    // 使用空间网格快速定位视野内的生物
+    const minX = Math.floor((p.x - Math.sqrt(viewRadiusSq)) / MOB_CELL_SIZE);
+    const maxX = Math.floor((p.x + Math.sqrt(viewRadiusSq)) / MOB_CELL_SIZE);
+    const minY = Math.floor((p.y - Math.sqrt(viewRadiusSq)) / MOB_CELL_SIZE);
+    const maxY = Math.floor((p.y + Math.sqrt(viewRadiusSq)) / MOB_CELL_SIZE);
+
+    // 构建临时网格（如果还没有）
+    const grid = new Map<string, Mob[]>();
+    for (const mob of world.mobs) {
+        if (mob.friendly) continue;
+        const key = `${Math.floor(mob.x / MOB_CELL_SIZE)},${Math.floor(mob.y / MOB_CELL_SIZE)}`;
+        if (!grid.has(key)) grid.set(key, []);
+        grid.get(key)!.push(mob);
+    }
+
+    // 只检查视野范围内的网格单元
+    for (let gx = minX; gx <= maxX; gx++) {
+        for (let gy = minY; gy <= maxY; gy++) {
+            const key = `${gx},${gy}`;
+            const cells = grid.get(key);
+            if (!cells) continue;
+
+            for (const mob of cells) {
+                const dx = mob.x - p.x;
+                const dy = mob.y - p.y;
+                if (dx * dx + dy * dy < viewRadiusSq) {
+                    result.push(mob);
+                }
+            }
+        }
+    }
+
+    return result;
+}
+
+/**
+ * 从候选列表中获取指定半径内的生物（进一步裁剪）
+ */
+private getMobsInRadius(x: number, y: number, radius: number, candidates: Mob[]): Mob[] {
+    const radiusSq = radius * radius;
+    const result: Mob[] = [];
+    for (const mob of candidates) {
+        const dx = mob.x - x;
+        const dy = mob.y - y;
+        if (dx * dx + dy * dy < radiusSq) {
+            result.push(mob);
+        }
+    }
+    return result;
+}
 
   private cleanupPets(p: Player, slot: number) {
     const pets = p.pets[slot] || [];
@@ -1914,12 +3212,28 @@ private wallCollisionBatch(dt: number, players: Player[]) {
     const rarity = this.getSummonRarityWithDna(p, cell);
     const protection = getSpawnProtection(cell.item);
     const map = MAPS[p.mapId];
+    const collider = this.wallColliders[p.mapId];
+    const petRadius = MOBS[def.petMob].radius * friendlyMobSizeMult(rarity);
     for (let i = 0; i < toSpawn; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const dist = 40 + Math.random() * 30;
-      const x = clamp(p.x + Math.cos(angle) * dist, 40, map.width - 40);
-      const y = clamp(p.y + Math.sin(angle) * dist, 40, map.height - 40);
-      const m = new Mob(this.nextId++, def.petMob, p.mapId, x, y, rarity, true);
+      // 尝试多次找到一个不在墙壁内的生成位置；
+      // 若所有尝试都落在墙里，则使用最后一次碰撞修正后的位置（被弹出墙壁）。
+      let sx = p.x, sy = p.y;
+      let placed = false;
+      for (let tries = 0; tries < 12; tries++) {
+        const angle = Math.random() * Math.PI * 2;
+        const dist = 40 + Math.random() * 30;
+        let tx = clamp(p.x + Math.cos(angle) * dist, petRadius + 4, map.width - petRadius - 4);
+        let ty = clamp(p.y + Math.sin(angle) * dist, petRadius + 4, map.height - petRadius - 4);
+        const [rx, ry] = collider.collideCircle(tx, ty, petRadius + 4, undefined, MOB_WALL_INFLATE);
+        // 如果碰撞修正没有移动位置，说明该位置不在墙内，可用。
+        if (Math.abs(rx - tx) < 0.01 && Math.abs(ry - ty) < 0.01) {
+          sx = tx; sy = ty; placed = true; break;
+        }
+        // 记录最后一次修正后的位置作为兜底（被弹出墙壁）。
+        sx = rx; sy = ry;
+      }
+      // placed=true 表示找到了不在墙内的位置；否则 sx/sy 已被弹出墙壁。
+      const m = new Mob(this.nextId++, def.petMob, p.mapId, sx, sy, rarity, true);
       m.ownerId = p.id; m.ownerSlot = slot; m.sourceItem = cell.item; m.sourceRarity = cell.rarity;
       m.maxHp = Math.round(m.maxHp * 1.4); m.hp = m.maxHp;
       if (m.speed > 0) m.speed = Math.max(70, m.speed * 1.5);
@@ -1952,6 +3266,7 @@ private wallCollisionBatch(dt: number, players: Player[]) {
     if (Math.random() < totalChance && mappedRarity < MAX_RARITY) return mappedRarity + 1;
     return mappedRarity;
   }
+
 private updateWorld(mapId: number, dt: number, players: Player[]) {
   const map = MAPS[mapId];
   const world = this.worlds[mapId];
@@ -1959,11 +3274,14 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
   const here = players.filter((p) => p.mapId === mapId && p.alive);
 
   // ===== ✅ 视野裁剪范围 =====
-  const VIEW_RADIUS = 1300; // 只处理玩家周围 2000 像素内的生物
+  // VIEW_RADIUS 需要除以 viewScale，以匹配客户端相机缩放后的实际可见范围。
+  const VIEW_RADIUS = 1300 / this.viewScale; // 只处理玩家视野内的生物
   const VIEW_RADIUS_SQ = VIEW_RADIUS * VIEW_RADIUS;
 
-  // ===== 构建玩家位置集合（用于快速距离检查） =====
-  const playerPositions = here.map(p => ({ x: p.x, y: p.y }));
+  // ===== 构建玩家位置集合（包含死亡的玩家，使死亡位置周围的生物仍能更新） =====
+  const playerPositions = players
+    .filter((p) => p.mapId === mapId)
+    .map((p) => p.alive ? { x: p.x, y: p.y } : { x: p.deathX, y: p.deathY });
 
   // ===== 空间网格 =====
   const MOB_CELL_SIZE = 250;
@@ -1988,12 +3306,11 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
     return r;
   };
 
+  // ===== 休眠系统：将不在任何玩家视野内的生物移入休眠池 =====
+  const toDormant: DormantMob[] = [];
   for (let i = world.mobs.length - 1; i >= 0; i--) {
     const mob = world.mobs[i];
-
-    // ===== ✅ 检查是否在玩家视野内 =====
     let inView = false;
-    // 玩家召唤物始终在视野内
     if (mob.ownerId !== 0) {
       inView = true;
     } else {
@@ -2006,53 +3323,187 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
         }
       }
     }
-
-    // ===== ✅ 如果不在视野内，只做基础更新（不进行碰撞检测） =====
     if (!inView) {
-      // 仍然移动和更新
-      mob.x += mob.vx * dt;
-      mob.y += mob.vy * dt;
-      mob.x = clamp(mob.x, mob.radius, map.width - mob.radius);
-      mob.y = clamp(mob.y, mob.radius, map.height - mob.radius);
-
-
-      // 减少生命值恢复（可选）
-      if (mob.hp < mob.maxHp) {
-        mob.hp = Math.min(mob.maxHp, mob.hp + 0.1 * dt);
-      }
-      continue; // 跳过碰撞检测
+      // 减少该区块计数（仅非友好生物计入区块限制）
+      if (!mob.friendly) this.decZoneCount(mapId, this.zoneAt(mapId, mob.x, mob.y));
+      toDormant.push({
+        type: mob.type, rarity: mob.rarity,
+        x: mob.x, y: mob.y, vx: mob.vx, vy: mob.vy,
+        health: mob.hp, maxHealth: mob.maxHp,
+        lastHitBy: mob.lastHitBy,
+        damageByPlayer: Array.from(mob.damageByPlayer.entries()),
+        spawnedThresholds: Array.from(mob.spawnedThresholds),
+      });
+      world.mobs.splice(i, 1);
     }
+  }
+  world.dormantMobs.push(...toDormant);
+
+  // ===== 唤醒系统：检查休眠生物是否进入玩家视野 =====
+  const wakeUp: DormantMob[] = [];
+  const stillDormant: DormantMob[] = [];
+  for (const d of world.dormantMobs) {
+    let inView = false;
+    for (const pos of playerPositions) {
+      const dx = d.x - pos.x;
+      const dy = d.y - pos.y;
+      if (dx * dx + dy * dy < VIEW_RADIUS_SQ) {
+        inView = true;
+        break;
+      }
+    }
+    if (inView) {
+      wakeUp.push(d);
+    } else {
+      stillDormant.push(d);
+    }
+  }
+  world.dormantMobs = stillDormant;
+
+  // 唤醒生物：恢复完整状态
+  for (const d of wakeUp) {
+    const mob = new Mob(this.nextId++, d.type, mapId, d.x, d.y, d.rarity);
+    mob.hp = d.health;
+    mob.maxHp = d.maxHealth;
+    mob.vx = d.vx;
+    mob.vy = d.vy;
+    mob.lastHitBy = d.lastHitBy;
+    for (const [pid, dmg] of d.damageByPlayer) {
+      mob.damageByPlayer.set(pid, dmg);
+    }
+    for (const t of d.spawnedThresholds) {
+      mob.spawnedThresholds.add(t);
+    }
+    world.mobs.push(mob);
+    // 增加该区块计数
+    this.incZoneCount(mapId, this.zoneAt(mapId, mob.x, mob.y));
+  }
+
+  // ===== 更新所有活跃生物 =====
+  // 区域划分：只有玩家所在区域及其相邻区域的生物才进行完整更新
+  const REGION_SIZE = 2000; // 每个区域 2000x2000 像素
+  const playerRegionKeys = new Set<string>();
+  for (const pos of playerPositions) {
+    const rx = Math.floor(pos.x / REGION_SIZE);
+    const ry = Math.floor(pos.y / REGION_SIZE);
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        playerRegionKeys.add(`${rx + dx},${ry + dy}`);
+      }
+    }
+  }
+  for (let i = world.mobs.length - 1; i >= 0; i--) {
+    const mob = world.mobs[i];
 
     // ===== 视野内的生物：完整更新 =====
     mob.hitCd = Math.max(0, mob.hitCd - dt);
     mob.spawnProtection = Math.max(0, mob.spawnProtection - dt);
+    mob.thinkTimer -= dt;
 
+    // 区域检查：仅玩家所在区域及其相邻区域的生物做完整更新
+    const mobRegionKey = `${Math.floor(mob.x / REGION_SIZE)},${Math.floor(mob.y / REGION_SIZE)}`;
+    const inPlayerRegion = playerRegionKeys.has(mobRegionKey);
 
-    // ---- 目标寻找 ----
+    // 非玩家区域生物：仅做基础维护，跳过目标寻找和复杂决策
+    if (!inPlayerRegion) {
+      // 基础移动（减速漂移）
+      if (mob.speed > 0) {
+        mob.vx *= 0.98;
+        mob.vy *= 0.98;
+      }
+      // 基础移动（减速漂移）
+      if (mob.speed > 0 && mob.targetId !== 0) {
+        mob.vx += ((Math.cos(mob.angle) * mob.speed * 0.3 - mob.vx)) * Math.min(1, dt * 1.5);
+        mob.vy += ((Math.sin(mob.angle) * mob.speed * 0.3 - mob.vy)) * Math.min(1, dt * 1.5);
+      } else if (mob.speed > 0) {
+        mob.vx *= 0.95;
+        mob.vy *= 0.95;
+      } else {
+        mob.vx *= 0.9;
+        mob.vy *= 0.9;
+      }
+      // 位置更新
+      mob.x += mob.vx * dt;
+      mob.y += mob.vy * dt;
+      mob.x = clamp(mob.x, mob.radius, map.width - mob.radius);
+      mob.y = clamp(mob.y, mob.radius, map.height - mob.radius);
+      // ---- 墙壁碰撞（数组 AABB）：只要生物被更新就执行 ----
+      // 位置积分后立即用墙壁数组做圆-AABB 推挤，防止漂移时穿过墙。
+      // 生物碰撞时墙壁向外 +10px（等效墙变厚）。
+      [mob.x, mob.y] = collider.collideCircle(mob.x, mob.y, mob.radius, this.collisionCounter, MOB_WALL_INFLATE);
+      // 死亡检查（非活跃区域生物仍需要清理）
+      if (mob.hp <= 0) {
+        if (!mob.friendly) { this.decZoneCount(mapId, this.zoneAt(mapId, mob.x, mob.y)); }
+        world.mobs.splice(i, 1);
+        if (mob.friendly && mob.ownerSlot >= 0) {
+          const owner = here.find(p => p.id === mob.ownerId);
+          if (owner) owner.pets[mob.ownerSlot] = (owner.pets[mob.ownerSlot] || []).filter(m => m !== mob);
+        }
+      }
+      continue;
+    }
+
+    // ---- 目标寻找（降频至每 MOB_THINK_INTERVAL 秒） ----
     let target: { x: number; y: number; id: number } | null = null;
     let best = Infinity;
 
-    if (mob.friendly) {
-      for (const other of world.mobs) {
-        if (!other.friendly) {
-          const d = Math.hypot(other.x - mob.x, other.y - mob.y);
-          if (d < 520 && d < best) { best = d; target = other; }
+    if (mob.thinkTimer <= 0) {
+      mob.thinkTimer = MOB_THINK_INTERVAL + Math.random() * 0.05; // 0.2s + 随机偏移，错开各生物
+
+      if (mob.friendly) {
+        for (const other of world.mobs) {
+          if (!other.friendly) {
+            const d = Math.hypot(other.x - mob.x, other.y - mob.y);
+            if (d < 520 && d < best) { best = d; target = other; }
+          }
+        }
+        const owner = here.find((p) => p.id === mob.ownerId);
+        if (owner) {
+          const od = Math.hypot(owner.x - mob.x, owner.y - mob.y);
+          if (!target || od > 260) target = { x: owner.x, y: owner.y, id: owner.id };
+        }
+      } else {
+        for (const p of here) {
+          const d = Math.hypot(p.x - mob.x, p.y - mob.y);
+          if (d < 460 && d < best) { best = d; target = { x: p.x, y: p.y, id: p.id }; }
+        }
+        for (const other of world.mobs) {
+          if (other.friendly) {
+            const d = Math.hypot(other.x - mob.x, other.y - mob.y);
+            if (d < 380 && d < best) { best = d; target = other; }
+          }
         }
       }
-      const owner = here.find((p) => p.id === mob.ownerId);
-      if (owner) {
-        const od = Math.hypot(owner.x - mob.x, owner.y - mob.y);
-        if (!target || od > 260) target = { x: owner.x, y: owner.y, id: owner.id };
+      // 缓存目标
+      if (target) {
+        mob.targetId = target.id;
+        mob.cachedTargetX = target.x;
+        mob.cachedTargetY = target.y;
+      } else {
+        mob.targetId = 0;
       }
     } else {
-      for (const p of here) {
-        const d = Math.hypot(p.x - mob.x, p.y - mob.y);
-        if (d < 460 && d < best) { best = d; target = { x: p.x, y: p.y, id: p.id }; }
-      }
-      for (const other of world.mobs) {
-        if (other.friendly) {
-          const d = Math.hypot(other.x - mob.x, other.y - mob.y);
-          if (d < 380 && d < best) { best = d; target = other; }
+      // 降频帧：复用缓存目标
+      if (mob.targetId !== 0) {
+        // 尝试从当前玩家列表中找到目标
+        if (mob.friendly) {
+          const other = world.mobs.find(m => m.id === mob.targetId && !m.friendly && m.hp > 0);
+          if (other) {
+            target = { x: other.x, y: other.y, id: other.id };
+          } else {
+            const owner = here.find((p) => p.id === mob.ownerId);
+            if (owner) target = { x: owner.x, y: owner.y, id: owner.id };
+            else mob.targetId = 0;
+          }
+        } else {
+          const pTarget = here.find(p => p.id === mob.targetId);
+          if (pTarget) {
+            target = { x: pTarget.x, y: pTarget.y, id: pTarget.id };
+          } else {
+            const other = world.mobs.find(m => m.id === mob.targetId && m.friendly && m.hp > 0);
+            if (other) target = { x: other.x, y: other.y, id: other.id };
+            else mob.targetId = 0;
+          }
         }
       }
     }
@@ -2081,66 +3532,187 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
     mob.y += mob.vy * dt;
     mob.x = clamp(mob.x, mob.radius, map.width - mob.radius);
     mob.y = clamp(mob.y, mob.radius, map.height - mob.radius);
-    // Mob 墙壁碰撞已移至 wallCollisionBatch() 以 20fps 批量处理
 
-    // ---- 生物间碰撞 ----
-    const nearby = getNearby(mob.x, mob.y);
-    for (const other of nearby) {
-      if (other === mob) continue;
-      this.collisionCounter.n++;
-      const dx = mob.x - other.x, dy = mob.y - other.y, d = Math.hypot(dx, dy), min = mob.radius + other.radius;
-      if (d < min && d > 0.001) {
-        const push = (min - d) * 0.4;
-        mob.x += (dx / d) * push;
-        mob.y += (dy / d) * push;
+    // ---- 墙壁碰撞（数组 AABB）：只要生物被更新就执行 ----
+    // 直接在位置积分后使用墙壁数组做圆-AABB 推挤，不再依赖 20fps 批量
+    // 和凹凸多边形墙。穿入深度较大时视为卡墙，走 pushOutOfWall 传送兜底。
+    // 生物碰撞时墙壁向外 +10px（等效墙变厚）。
+    const [wallX, wallY] = collider.collideCircle(mob.x, mob.y, mob.radius, this.collisionCounter, MOB_WALL_INFLATE);
+    const stuckThreshold = Math.max(PUSH_OUT_THRESHOLD, mob.radius * 0.5);
+    const stuck =
+      Math.abs(wallX - mob.x) >= stuckThreshold || Math.abs(wallY - mob.y) >= stuckThreshold;
+    if (stuck && mob.pushOutCooldown <= 0) {
+      mob.pushOutCooldown = 0.8;
+      this.pushOutOfWall(mob, mapId);
+    } else {
+      mob.x = wallX;
+      mob.y = wallY;
+    }
+    mob.pushOutCooldown = Math.max(0, mob.pushOutCooldown - dt);
 
-        // ---- 敌对生物攻击 ----
-        if (mob.friendly !== other.friendly && mob.hitCd <= 0) {
-          const attacker = mob.friendly ? mob : other;
-          const victim = mob.friendly ? other : mob;
-          if (victim.spawnProtection <= 0) {
-            const dmg = attacker.damage * 0.6;
-            victim.hp -= dmg;
-            victim.lastHitBy = attacker.ownerId;
-            if (!victim.friendly && attacker.friendly && attacker.ownerId) {
-              victim.addDamage(attacker.ownerId, dmg);
-            }
-          }
-          if (attacker.spawnProtection <= 0) {
-            attacker.hp -= victim.damage * 0.3;
-          }
-          mob.hitCd = 0.1;
-          other.hitCd = 0.1;
+    // ---- Hornet 远程攻击：朝玩家发射导弹（身体已通过 mob.angle 转向目标）----
+    // Hornet（type 16）有目标玩家且在射程内时，每隔 HORNET_MISSILE_INTERVAL 秒
+    // 朝目标方向发射一枚导弹。导弹由 Projectile 系统统一更新与渲染。
+    if (mob.type === 16 && target && !mob.friendly) {
+      mob.missileTimer -= dt;
+      if (mob.missileTimer <= 0) {
+        const tdx = target.x - mob.x;
+        const tdy = target.y - mob.y;
+        const tdist = Math.hypot(tdx, tdy);
+        if (tdist < HORNET_MISSILE_RANGE) {
+          mob.missileTimer = HORNET_MISSILE_INTERVAL;
+          // 身体转向目标（确保发射时朝向玩家）
+          mob.angle = Math.atan2(tdy, tdx);
+          // 发射点略前移，避免出生即撞自身
+          const muzzleX = mob.x + Math.cos(mob.angle) * (mob.radius + 6);
+          const muzzleY = mob.y + Math.sin(mob.angle) * (mob.radius + 6);
+          // 伤害随稀有度递增
+          const dmg = mob.damage * 0.6 * (1 + mob.rarity * 0.25);
+          this.fireProjectile(
+            mapId,
+            muzzleX,
+            muzzleY,
+            mob.angle,
+            MISSILE_SPEED,
+            dmg,
+            TEAM.HOSTILE,
+            mob.id,
+            mob.type,
+            mob.rarity,
+            10,
+          );
         }
       }
     }
 
-    // ---- 生物攻击玩家 ----
-    if (!mob.friendly) {
-      for (const p of here) {
-        this.collisionCounter.n++;
-        const d = Math.hypot(p.x - mob.x, p.y - mob.y);
-        if (d < mob.radius + PLAYER_RADIUS) {
-          const push = (mob.radius + PLAYER_RADIUS - d) * 0.5;
-          const ux = (p.x - mob.x) / (d || 1), uy = (p.y - mob.y) / (d || 1);
-          p.x += ux * push;
-          p.y += uy * push;
-          mob.x -= ux * push * 0.4;
-          mob.y -= uy * push * 0.4;
+    // ---- Scorpion 远程攻击：发射穿透性毒针（穿墙、穿目标，按距离/血量销毁）----
+    // Scorpion 有目标玩家且在射程内时，每隔 SCORPION_MISSILE_INTERVAL 秒
+    // 朝目标方向发射一枚穿透毒针。毒针可穿墙、穿生物/玩家/花瓣，
+    // 每次命中扣减自身 1 点血量，飞行超过 SCORPION_PROJECTILE_MAX_DISTANCE 自动销毁。
+    if (mob.type === SCORPION_TYPE && target && !mob.friendly) {
+      mob.missileTimer -= dt;
+      if (mob.missileTimer <= 0) {
+        const tdx = target.x - mob.x;
+        const tdy = target.y - mob.y;
+        const tdist = Math.hypot(tdx, tdy);
+        if (tdist < SCORPION_MISSILE_RANGE) {
+          mob.missileTimer = SCORPION_MISSILE_INTERVAL;
+          mob.angle = Math.atan2(tdy, tdx);
+          const muzzleX = mob.x + Math.cos(mob.angle) * (mob.radius + 6);
+          const muzzleY = mob.y + Math.sin(mob.angle) * (mob.radius + 6);
+          const dmg = mob.damage * 0.5 * (1 + mob.rarity * 0.2);
+          this.fireProjectile(
+            mapId,
+            muzzleX,
+            muzzleY,
+            mob.angle,
+            SCORPION_MISSILE_SPEED,
+            dmg,
+            TEAM.HOSTILE,
+            mob.id,
+            mob.type,
+            mob.rarity,
+            8,
+            true,                       // isPiercing = true（穿墙穿目标）
+            SCORPION_PROJECTILE_MAX_DISTANCE, // maxDistance = 1000px
+            Math.round(SCORPION_PROJECTILE_BASE_HP * rarityMult(mob.rarity)),
+          );
+        }
+      }
+    }
 
-          if (p.hurtCd <= 0) {
-            let dmg = mob.damage;
-            if (p.shield > 0 && dmg > 0) {
-              const absorbed = Math.min(p.shield * 2, dmg);
-              p.shield -= absorbed / 2;
-              dmg -= absorbed;
+    // ---- 生物间碰撞 ----
+    // 频率策略（基于生物自身速度）：
+    //  - speed === 0（Ant Hole / Crab Cave / Hive 等静止巢穴）→ 永久跳过生物间碰撞；
+    //  - speed <= MOB_COLLISION_SLOW_SPEED（慢速）→ 每 0.1s 检查一次；
+    //  - speed > MOB_COLLISION_SLOW_SPEED（快速）→ 每帧检查。
+    // 同时本帧若本 tick 累计碰撞检测次数已超 MOB_COLLISION_OVERLOAD_THRESHOLD
+    // （>10000），则根据 mobCollisionSkipFrames 跳过本轮（每 4 帧 1 次），避免 CPU 尖峰。
+    const isStationary = mob.speed <= 0;
+    // 全局限流：上一帧检测过载时本帧不进行生物间碰撞
+    const skipThisFrame = this.mobCollisionSkipFrames > 0;
+    // 按生物自身速度决定本帧是否需要做
+    const interval = mob.speed <= MOB_COLLISION_SLOW_SPEED
+      ? MOB_COLLISION_SLOW_INTERVAL
+      : MOB_COLLISION_FAST_INTERVAL;
+    mob.collisionTimer -= dt;
+    const mobReady = mob.collisionTimer <= 0;
+
+    if (!isStationary) {
+      if (!skipThisFrame && mobReady) {
+        // 重置计时器（加入随机偏移，让多个生物错开检查帧）
+        mob.collisionTimer = interval + Math.random() * 0.02;
+
+        const nearby = getNearby(mob.x, mob.y);
+        for (const other of nearby) {
+          if (other === mob) continue;
+          this.collisionCounter.n++;
+          const dx = mob.x - other.x, dy = mob.y - other.y, d = Math.hypot(dx, dy), min = mob.radius + other.radius;
+          if (d < min && d > 0.001) {
+            const push = (min - d) * 0.4;
+            mob.x += (dx / d) * push;
+            mob.y += (dy / d) * push;
+
+            // ---- 敌对生物攻击 ----
+            if (mob.friendly !== other.friendly && mob.hitCd <= 0) {
+              const attacker = mob.friendly ? mob : other;
+              const victim = mob.friendly ? other : mob;
+              if (victim.spawnProtection <= 0) {
+                const dmg = attacker.damage * 0.6;
+                victim.hp -= dmg;
+                victim.lastHitBy = attacker.ownerId;
+                if (!victim.friendly && attacker.friendly && attacker.ownerId) {
+                  victim.addDamage(attacker.ownerId, dmg);
+                }
+              }
+              if (attacker.spawnProtection <= 0) {
+                attacker.hp -= victim.damage * 0.3;
+              }
+              mob.hitCd = 0.1;
+              other.hitCd = 0.1;
             }
-            p.hp -= dmg;
-            p.hurtCd = 0.1;
-            p.statsDirty = true;
-            const c = this.clientOf(p.id);
-            if (c) this.pushEvent(c, EVT.HIT, p.x, p.y, Math.round(mob.damage));
-            if (p.hp <= 0) this.killPlayer(p);
+          }
+        }
+      }
+    }
+    // 静止生物：完全跳过生物间碰撞（但不影响它们与玩家的攻击/伤害判定在下面）
+
+    // ---- 生物攻击玩家 ----
+    // 同样的频率策略：静止生物不会主动撞玩家，但仍会基于 hitCd 攻击；
+    // 慢速/快速生物按 interval 频率推进碰撞和攻击判定。
+    if (!mob.friendly) {
+      // 用户的诉求是"不和其他生物检测碰撞"，并未禁止它们对玩家造成伤害。
+      // 静止生物每帧都做（playerCollisionReady = true），慢速/快速生物按 mobReady 节奏。
+      const playerCollisionReady = isStationary ? true : mobReady;
+      if (!isStationary && skipThisFrame) {
+        // 全局限流：跳过生物-玩家碰撞
+      } else if (playerCollisionReady) {
+        for (const p of here) {
+          this.collisionCounter.n++;
+          const d = Math.hypot(p.x - mob.x, p.y - mob.y);
+          const pRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(p);
+          if (d < mob.radius + pRadius) {
+            const push = (mob.radius + pRadius - d) * 0.5;
+            const ux = (p.x - mob.x) / (d || 1), uy = (p.y - mob.y) / (d || 1);
+            p.x += ux * push;
+            p.y += uy * push;
+            mob.x -= ux * push * 0.4;
+            mob.y -= uy * push * 0.4;
+
+            if (p.hurtCd <= 0) {
+              let dmg = mob.damage;
+              if (p.shield > 0 && dmg > 0) {
+                const absorbed = Math.min(p.shield * 2, dmg);
+                p.shield -= absorbed / 2;
+                dmg -= absorbed;
+              }
+              p.hp -= dmg;
+              p.hurtCd = 0.1;
+              p.statsDirty = true;
+              const c = this.clientOf(p.id);
+              if (c) this.pushEvent(c, EVT.HIT, p.x, p.y, Math.round(mob.damage));
+              if (p.hp <= 0) this.killPlayer(p);
+            }
           }
         }
       }
@@ -2157,14 +3729,28 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
             for (const spawnId of mobDef.spawner.spawnMobs(mob.rarity)) {
               const spawnDef = MOBS[spawnId];
               if (!spawnDef) continue;
-              const angle = Math.random() * Math.PI * 2;
-              const dist = mob.radius + spawnDef.radius + 12 + Math.random() * 28;
-              let sx = mob.x + Math.cos(angle) * dist;
-              let sy = mob.y + Math.sin(angle) * dist;
-              sx = clamp(sx, spawnDef.radius + 4, map.width - spawnDef.radius - 4);
-              sy = clamp(sy, spawnDef.radius + 4, map.height - spawnDef.radius - 4);
-              const [rx, ry] = collider.collideCircle(sx, sy, spawnDef.radius + 4);
-              world.mobs.push(new Mob(this.nextId++, spawnId, mapId, rx, ry, mob.rarity));
+              // 尝试多次找到一个不在墙壁内的生成位置；
+              // 若所有尝试都落在墙里，则使用最后一次碰撞修正后的位置（被弹出墙壁）。
+              let sx = mob.x, sy = mob.y;
+              let placed = false;
+              for (let tries = 0; tries < 12; tries++) {
+                const angle = Math.random() * Math.PI * 2;
+                const dist = mob.radius + spawnDef.radius + 12 + Math.random() * 28;
+                let tx = mob.x + Math.cos(angle) * dist;
+                let ty = mob.y + Math.sin(angle) * dist;
+                tx = clamp(tx, spawnDef.radius + 4, map.width - spawnDef.radius - 4);
+                ty = clamp(ty, spawnDef.radius + 4, map.height - spawnDef.radius - 4);
+                const [rx, ry] = collider.collideCircle(tx, ty, spawnDef.radius + 4, undefined, MOB_WALL_INFLATE);
+                // 如果碰撞修正没有移动位置，说明该位置不在墙内，可用。
+                if (Math.abs(rx - tx) < 0.01 && Math.abs(ry - ty) < 0.01) {
+                  sx = tx; sy = ty; placed = true; break;
+                }
+                // 记录最后一次修正后的位置作为兜底（被弹出墙壁）。
+                sx = rx; sy = ry;
+              }
+              // placed=true 表示找到了不在墙内的位置；否则 sx/sy 已被弹出墙壁。
+              // 【原始逻辑】巢穴衍生物不受区块上限限制，按阈值正常生成
+              world.mobs.push(new Mob(this.nextId++, spawnId, mapId, sx, sy, mob.rarity));
             }
           }
         }
@@ -2173,6 +3759,10 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
 
     // ---- 死亡处理 ----
     if (mob.hp <= 0) {
+      // 减少该区块计数（非友好生物才计入区块限制）
+      if (!mob.friendly) {
+        this.decZoneCount(mapId, this.zoneAt(mapId, mob.x, mob.y));
+      }
       world.mobs.splice(i, 1);
       if (mob.friendly) {
         const owner = here.find((p) => p.id === mob.ownerId);
@@ -2186,18 +3776,33 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
     }
   }
 
+  // ---- 全局碰撞压力限流 ----
+  // 在所有地图、所有生物的碰撞检测结束后，检查本 tick 累计次数：
+  //  - 若超过 MOB_COLLISION_OVERLOAD_THRESHOLD (10000)，开启限流：
+  //    接下来 MOB_COLLISION_OVERLOAD_SKIP (4) 帧内的生物间碰撞将直接跳过。
+  //  - 否则递减 skip 计数（已经低于阈值的 tick 不会持续限流）。
+  if (this.collisionCounter.n > MOB_COLLISION_OVERLOAD_THRESHOLD) {
+    this.mobCollisionSkipFrames = MOB_COLLISION_OVERLOAD_SKIP;
+  } else if (this.mobCollisionSkipFrames > 0) {
+    this.mobCollisionSkipFrames--;
+  }
+
   // ---- 掉落物更新 ----
   for (let i = world.drops.length - 1; i >= 0; i--) {
     const d = world.drops[i];
     d.ttl -= dt;
+    if (d.groundTimer > 0) {
+      d.groundTimer = Math.max(0, d.groundTimer - dt);
+    }
+    if (d.suctionTimer > 0) {
+      d.suctionTimer = Math.max(0, d.suctionTimer - dt);
+    }
     if (d.ttl <= 0) world.drops.splice(i, 1);
   }
 
   // ---- 生成新生物 ----
-  const hostiles = world.mobs.filter((m) => !m.friendly).length;
-  if (hostiles < this.mobCapForMap(mapId) && Math.random() < 0.5) {
-    this.spawnMob(mapId);
-  }
+  // 生成逻辑改为每 ZONE_REFILL_INTERVAL 秒由 refillZoneMobs() 统一检查：
+  // 区块达到 ZONE_MOB_LIMITS 上限时不再生成，只有生物减少后才补生。
 }
   private setBonusStatus(p: Player, multiplier: number, seconds: number) {
     const safeMultiplier = Math.max(1, Math.min(5, Math.floor(multiplier)));
@@ -2254,6 +3859,37 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
       this.pushEvent(killerClient!, EVT.XP, mob.x, mob.y, xp);
       this.pushEvent(killerClient!, EVT.KILL, mob.x, mob.y, mob.type, EMPTY_ITEM, mob.rarity);
     }
+
+    // Ultra+ rarity kill announcement in chat
+    const ULTRA_RARITY_INDEX = RARITIES.findIndex(r => r.name === "Ultra");
+    if (mob.rarity >= ULTRA_RARITY_INDEX && ULTRA_RARITY_INDEX >= 0) {
+      let maxDamage = 0;
+      let topPlayerId = 0;
+      for (const [pid, dmg] of mob.damageByPlayer.entries()) {
+        if (dmg > maxDamage) {
+          maxDamage = dmg;
+          topPlayerId = pid;
+        }
+      }
+      if (topPlayerId > 0) {
+        const topClient = this.clientOf(topPlayerId);
+        const topPlayer = topClient?.player;
+        if (topPlayer) {
+// 保留2位小数，上限 100.00
+const damagePercent = Math.min(1, maxDamage / Math.max(1, mob.maxHp));
+const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
+          const mobRarityName = RARITIES[mob.rarity]?.name ?? "Unknown";
+           const mobName = MOBS[mob.type]?.name ?? "Unknown";
+          const message = `a ${mobRarityName} ${mobName} has been defeated by ${topPlayer.name} with ${percentDisplay}% damage!`;
+          for (const c of this.clients.values()) {
+            if (c.player && c.player.mapId === mapId) {
+              this.sendChatToClient(c, message, "System", true, false);
+            }
+          }
+        }
+      }
+    }
+
     if (world.drops.length >= MAX_DROPPED_CARDS) { world.drops.splice(0, DROP_TRIM_COUNT); }
     const mobRarityIndex = Math.max(0, Math.min(MAX_RARITY, mob.rarity));
     const mobRarityName = RARITIES[mobRarityIndex].name;
@@ -2305,6 +3941,8 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
       if (Math.hypot(d.x - x, d.y - y) > DROP_STACK_RADIUS) continue;
       if (!this.setsEqual(d.allowedPlayerIds, allowed)) continue;
       d.count++; d.ttl = Math.max(d.ttl, 45);
+      d.groundTimer = 0.8;
+      d.suctionTimer = 0;
       if (d.ownerId !== ownerId) d.ownerId = 0;
       return;
     }
@@ -2315,9 +3953,13 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
 
   private killPlayer(p: Player) {
     p.alive = false; p.hp = 0; p.shield = 0; p.statsDirty = true;
+    // 保存死亡位置，用于死亡后仍然更新该位置周围的生物
+    p.deathX = p.x; p.deathY = p.y;
     const world = this.worlds[p.mapId];
     world.mobs = world.mobs.filter((m) => m.ownerId !== p.id);
     for (let i = 0; i < SLOT_COUNT; i++) p.pets[i] = [];
+    // 死亡时清除身上可能残留的毒伤(防止 map key 一直挂着死掉的 player 引用)
+    this.poisonManager.clearPoison(p);
     const c = this.clientOf(p.id);
     if (c) this.pushEvent(c, EVT.DEATH, p.x, p.y, p.level);
   }
@@ -2338,7 +3980,7 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
     return total;
   }
 
-  private pickupDrops(p: Player) {
+  private pickupDrops(p: Player, dt: number) {
     if (!p.alive) return;
     const world = this.worlds[p.mapId];
     const magnetRange = this.magnetRangeFor(p);
@@ -2348,12 +3990,38 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
       // Per-player filtering: if the drop has an allow-list, only that player
       // can see and loot it. null = legacy/anyone (shouldn't happen in new code).
       if (d.allowedPlayerIds !== null && d.allowedPlayerIds !== undefined && !d.allowedPlayerIds.has(p.id)) continue;
+
+      // 地面停留期间：不可被 magnet 影响，也不可拾取
+      if (d.groundTimer > 0) continue;
+
       const dist = Math.hypot(d.x - p.x, d.y - p.y);
-      if (magnetRange > 0 && dist < magnetRange && dist > 46) {
-        const pull = Math.min(Math.min(1, 8 / dist) * 120, dist - 46);
-        d.x += ((p.x - d.x) / dist) * pull;
-        d.y += ((p.y - d.y) / dist) * pull;
+
+      // Magnet 快速吸取：0.5 秒直达玩家中心
+      if (magnetRange > 0 && dist < magnetRange) {
+        if (d.suctionTimer <= 0) {
+          d.suctionTimer = 0.5;
+        }
+        const move = dist * dt / Math.max(d.suctionTimer, dt);
+        if (dist > 0.001) {
+          d.x += ((p.x - d.x) / dist) * move;
+          d.y += ((p.y - d.y) / dist) * move;
+        }
+
+        // 吸取到达或足够近时自动拾取
+        if (dist < 12 || d.suctionTimer <= dt) {
+          if (this.addItem(p, d.item, d.rarity, d.count)) {
+            world.drops.splice(i, 1);
+            const c = this.clientOf(p.id);
+            if (c) this.pushEvent(c, EVT.LOOT, p.x, p.y - (looted++ % 3) * 18, 0, d.item, d.rarity);
+          }
+          continue;
+        }
+      } else {
+        // 离开 magnet 范围，重置吸取状态
+        d.suctionTimer = 0;
       }
+
+      // 无 magnet 时的正常拾取
       if (dist < 46) {
         if (this.addItem(p, d.item, d.rarity, d.count)) {
           world.drops.splice(i, 1);
@@ -2362,6 +4030,232 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
         }
       }
     }
+  }
+
+  // ----------------------------------------------------- projectile system
+  /**
+   * 弹射物系统更新：生物与花瓣共用。
+   *
+   * 处理流程：
+   *  1. 存活时间衰减，到期销毁；
+   *  2. 位置积分（vx/vy * dt）；
+   *  3. 墙壁碰撞——撞墙即销毁（导弹类不穿透墙壁）；
+   *  4. 边界检查——越界销毁；
+   *  5. 命中判定——按 team 区分目标：
+   *     - TEAM.HOSTILE：命中玩家（含花瓣护盾）；
+   *     - TEAM.FRIENDLY：命中敌对生物。
+   *  6. 命中冷却递减。
+   */
+  private updateProjectiles(mapId: number, dt: number, players: Player[]) {
+    const world = this.worlds[mapId];
+    const map = MAPS[mapId];
+    const collider = this.wallColliders[mapId];
+    const proj = world.projectiles;
+
+    for (let i = proj.length - 1; i >= 0; i--) {
+      const p = proj[i];
+      // ---- 1. TTL 衰减 ----
+      p.ttl -= dt;
+      if (p.ttl <= 0) {
+        proj.splice(i, 1);
+        continue;
+      }
+      p.hitCd = Math.max(0, p.hitCd - dt);
+
+      // ---- 2. 位置积分 + 距离累计 ----
+      const prevX = p.x;
+      const prevY = p.y;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.distanceTraveled += Math.hypot(p.x - prevX, p.y - prevY);
+      if (p.maxDistance > 0 && p.distanceTraveled >= p.maxDistance) {
+        proj.splice(i, 1);
+        continue;
+      }
+
+      // ---- 3. 墙壁碰撞（非穿透型撞墙销毁；穿透型直接穿过）----
+      if (!p.isPiercing) {
+        const [cx, cy] = collider.collideCircle(p.x, p.y, p.radius, this.collisionCounter);
+        if (Math.abs(cx - p.x) > 0.5 || Math.abs(cy - p.y) > 0.5) {
+          proj.splice(i, 1);
+          continue;
+        }
+        p.x = cx;
+        p.y = cy;
+      }
+
+      // ---- 4. 边界检查 ----
+      if (p.x < p.radius || p.x > map.width - p.radius || p.y < p.radius || p.y > map.height - p.radius) {
+        proj.splice(i, 1);
+        continue;
+      }
+
+      // ---- 4.5 弹射物与对立生物排斥 ----
+      if (p.team === TEAM.HOSTILE) {
+        for (const pl of players) {
+          if (pl.mapId !== mapId || !pl.alive) continue;
+          const dx = p.x - pl.x;
+          const dy = p.y - pl.y;
+          const d = Math.hypot(dx, dy);
+          const plRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(pl);
+          const minDist = p.radius + plRadius;
+          if (d < minDist && d > 0.001) {
+            const push = (minDist - d) * 0.3;
+            p.x += (dx / d) * push;
+            p.y += (dy / d) * push;
+          }
+        }
+      } else {
+        for (const mob of world.mobs) {
+          if (mob.friendly || mob.hp <= 0) continue;
+          const dx = p.x - mob.x;
+          const dy = p.y - mob.y;
+          const d = Math.hypot(dx, dy);
+          const minDist = p.radius + mob.radius;
+          if (d < minDist && d > 0.001) {
+            const push = (minDist - d) * 0.3;
+            p.x += (dx / d) * push;
+            p.y += (dy / d) * push;
+          }
+        }
+      }
+
+      // ---- 5. 命中判定 ----
+      if (p.team === TEAM.HOSTILE) {
+        // 敌方弹射物 → 命中玩家
+        let hitAny = false;
+        for (const pl of players) {
+          if (pl.mapId !== mapId || !pl.alive || p.hitCd > 0) continue;
+          // 先检查花瓣护盾（活着的花瓣可挡导弹）
+          let blocked = false;
+          for (const petal of pl.petals) {
+            if (!petal.alive || petal.hp <= 0) continue;
+            const pd = Math.hypot(petal.x - p.x, petal.y - p.y);
+            if (pd < petal.radius + p.radius) {
+              petal.hp -= p.damage;
+              petal.hitCd = 0.1;
+              p.hitCd = PROJECTILE_HIT_CD;
+              if (petal.hp <= 0) {
+                petal.alive = false;
+                petal.hp = 0;
+                petal.timer = ITEMS[petal.item]?.reload ?? 1;
+              }
+              hitAny = true;
+              blocked = true;
+              if (!p.isPiercing) {
+                p.hp = 0;
+                break;
+              }
+              const petalDef = ITEMS[petal.item];
+              const petalDmg = (petalDef?.damage ?? 0) * rarityMult(petal.rarity);
+              p.hp -= Math.max(1, petalDmg);
+              break;
+            }
+          }
+          if (blocked) break;
+          // 再检查玩家本体（受护盾/无敌帧影响）
+          const d = Math.hypot(pl.x - p.x, pl.y - p.y);
+          const plRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(pl);
+          if (d < plRadius + p.radius && pl.hurtCd <= 0) {
+            let dmg = p.damage;
+            if (pl.shield > 0 && dmg > 0) {
+              const absorbed = Math.min(pl.shield * 2, dmg);
+              pl.shield -= absorbed / 2;
+              dmg -= absorbed;
+            }
+            pl.hp -= dmg;
+            pl.hurtCd = 0.1;
+            pl.statsDirty = true;
+            const cc = this.clientOf(pl.id);
+            if (cc) this.pushEvent(cc, EVT.HIT, pl.x, pl.y, Math.round(p.damage));
+            if (pl.hp <= 0) this.killPlayer(pl);
+
+            if (p.sourceType === SCORPION_TYPE) {
+              this.poisonManager.applyPoison(
+                pl,
+                { type: "poison", isDoT: true, owner: p.ownerId },
+                p.damage * 0.4,
+                3000,
+                1.2,
+                0.5,
+                false,
+              );
+            }
+            p.hitCd = PROJECTILE_HIT_CD;
+            hitAny = true;
+            if (!p.isPiercing) {
+              p.hp = 0;
+              break;
+            }
+            p.hp -= 1;
+          }
+        }
+        if (hitAny && p.hp <= 0) {
+          proj.splice(i, 1);
+          continue;
+        }
+      } else {
+        // 友方弹射物 → 命中敌对生物（仅活跃生物，休眠生物在视野外不参与）
+        let hitAny = false;
+        for (const mob of world.mobs) {
+          if (mob.friendly || mob.hp <= 0 || p.hitCd > 0) continue;
+          const d = Math.hypot(mob.x - p.x, mob.y - p.y);
+          if (d < mob.radius + p.radius) {
+            mob.hp -= p.damage;
+            mob.lastHitBy = p.ownerId;
+            if (p.ownerId) mob.addDamage(p.ownerId, p.damage);
+            p.hitCd = PROJECTILE_HIT_CD;
+            if (mob.hp <= 0) this.onMobKilled(mob, mapId);
+            hitAny = true;
+            if (!p.isPiercing) {
+              p.hp = 0;
+              break;
+            }
+            p.hp -= mob.damage;
+          }
+        }
+        if (hitAny && p.hp <= 0) {
+          proj.splice(i, 1);
+          continue;
+        }
+      }
+    }
+  }
+
+  /**
+   * 发射弹射物（生物与花瓣共用入口）。
+   * @param mapId     地图 ID
+   * @param x         发射点 X
+   * @param y         发射点 Y
+   * @param angle     发射方向（弧度）
+   * @param speed     飞行速度（像素/秒）
+   * @param damage    命中伤害
+   * @param team      阵营（TEAM.HOSTILE / TEAM.FRIENDLY）
+   * @param ownerId   发射者 ID（mob.id 或 player.id）
+   * @param sourceType 发射来源类型（mob.type 或 item id）
+   * @param rarity    稀有度
+   * @param radius    碰撞半径
+   */
+  private fireProjectile(
+    mapId: number,
+    x: number,
+    y: number,
+    angle: number,
+    speed: number,
+    damage: number,
+    team: number,
+    ownerId: number,
+    sourceType: number,
+    rarity: number,
+    radius = 10,
+    isPiercing = false,
+    maxDistance = 0,
+    projHp = 1,
+  ) {
+    const world = this.worlds[mapId];
+    world.projectiles.push(
+      new Projectile(this.nextId++, mapId, x, y, angle, speed, damage, team, ownerId, sourceType, rarity, radius, isPiercing, maxDistance, projHp),
+    );
   }
 
   // ------------------------------------------------------------ state sync
@@ -2380,10 +4274,11 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
       const op = other.player;
       if (!op || op.mapId !== p.mapId || !op.alive) continue;
       if (op !== p && !inView(op.x, op.y)) continue;
+      const opRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(op);
       body.u8(ENT.PLAYER).u16(op.id).u8(op.flags).u8(op === p ? TEAM.SELF : TEAM.FRIENDLY)
         .i16(Math.round(op.x)).i16(Math.round(op.y))
         .u16(Math.round(((op.baseAngle % (Math.PI * 2)) / (Math.PI * 2)) * 65535))
-        .u8(Math.round(PLAYER_RADIUS)).u8(Math.round((op.hp / op.maxHp) * 255)).str(op.name);
+        .u8(Math.round(opRadius)).u8(Math.round((op.hp / op.maxHp) * 255)).str(op.name);
       count++;
       for (let i = 0; i < SLOT_COUNT; i++) {
         const cell = op.slots[i];
@@ -2412,8 +4307,28 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
       if (!inView(d.x, d.y)) continue;
       // Per-player drops: skip this drop if the player is not in its allow-list.
       if (d.allowedPlayerIds !== null && d.allowedPlayerIds !== undefined && !d.allowedPlayerIds.has(p.id)) continue;
+      // 正在被磁铁吸取（suctionTimer > 0）时，radius 字节最高位置 1；
+      // 客户端据此只在"确定被吸"时才让掉落物缩小淡出。
+      const dropRadius = d.suctionTimer > 0 ? (12 | 0x80) : 12;
       body.u8(ENT.DROP).u16(d.id).u8(d.item).u8(d.rarity)
-        .i16(Math.round(d.x)).i16(Math.round(d.y)).u16(0).u8(12).u8(Math.min(255, d.count));
+        .i16(Math.round(d.x)).i16(Math.round(d.y)).u16(0).u8(dropRadius).u8(Math.min(255, d.count));
+      count++;
+    }
+    // Projectiles: send to the client so it can render them. The client
+    // filters by team (FRIENDLY for the owning player, HOSTILE for everyone).
+    for (const proj of world.projectiles) {
+      if (proj.mapId !== p.mapId) continue;
+      if (!inView(proj.x, proj.y)) continue;
+      body.u8(ENT.PROJECTILE)
+        .u16(proj.id)
+        .u8(proj.sourceType)
+        .u8(proj.team)
+        .i16(Math.round(proj.x))
+        .i16(Math.round(proj.y))
+        .u16(Math.round(((proj.angle % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) / (Math.PI * 2)) * 65535))
+        .u8(Math.round(proj.radius))
+        .u8(Math.max(0, Math.min(255, Math.round((proj.hp / Math.max(1, proj.maxHp)) * 255))))
+        .u8(proj.rarity);
       count++;
     }
     for (let i = 0; i < SLOT_COUNT; i++) {
