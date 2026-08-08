@@ -2205,13 +2205,19 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
     p.statsDirty = true;
   }
 
-  private pushEvent(c: ClientState, kind: number, x: number, y: number, value: number, item = EMPTY_ITEM, rarity = 0) {
+  /**
+   * Push a floating-text event onto a client's outbound queue.
+   * Public: `PoisonManager.updateAll` consumes `GameServerLike`, which requires
+   * `pushEvent`/`clientOf` to be part of the server's public surface.
+   */
+  pushEvent(c: ClientState, kind: number, x: number, y: number, value: number, item = EMPTY_ITEM, rarity = 0) {
     const w = new Writer(16);
     w.u8(S2C.EVENT).u8(kind).i16(Math.round(x)).i16(Math.round(y)).u32(Math.max(0, Math.round(value))).u8(item).u8(rarity);
     c.events.push(w.bytes());
   }
 
-  private clientOf(playerId: number): ClientState | null {
+  /** Resolve the client state that owns a player id, or null. Public: see `pushEvent`. */
+  clientOf(playerId: number): ClientState | null {
     for (const c of this.clients.values()) if (c.player && c.player.id === playerId) return c;
     return null;
   }
@@ -4158,8 +4164,12 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
           let blocked = false;
           for (const petal of pl.petals) {
             if (!petal.alive || petal.hp <= 0) continue;
+            const petalDef = ITEMS[petal.item];
+            // 与 sendState 中快照的显示半径保持同一公式（Moon ×4）
+            const petalRadius = (petalDef?.radius ?? 0) * (1 + petal.rarity * 0.06) *
+              ((petalDef?.name ?? "").toLowerCase().includes("moon") ? 4 : 1);
             const pd = Math.hypot(petal.x - p.x, petal.y - p.y);
-            if (pd < petal.radius + p.radius) {
+            if (pd < petalRadius + p.radius) {
               petal.hp -= p.damage;
               petal.hitCd = 0.1;
               p.hitCd = PROJECTILE_HIT_CD;
