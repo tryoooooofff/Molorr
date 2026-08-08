@@ -268,6 +268,11 @@ export interface ItemDef {
    */
   noDowngrade?: boolean;
   desc: string;
+   poisonDamage?: number;
+  poisonDuration?: number;      // 毫秒
+  poisonInitialMult?: number;   // 初始伤害倍率
+  poisonStableMult?: number;    // 持续伤害倍率
+  poisonCanStack?: boolean;     // 是否可叠加
 }
 
 /** Rose is the only item that restores player HP. */
