@@ -1709,7 +1709,7 @@ private preSpawnMap(mapId: number) {
     for (let col = 0; col < cols; col++) {
         for (let row = 0; row < rows; row++) {
             // 每个区块生成 1-3 只怪物
-            const count = 1 + Math.floor(Math.random() * 3);
+            const count = 2 + Math.floor(Math.random() * 2);
             for (let i = 0; i < count; i++) {
                 // 计算区块中心位置
                 const centerX = (col + 0.5) * BLOCK_SIZE;
@@ -2441,74 +2441,102 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
   }
 
   /**
-   * 生成一只野生生物。zoneHint 指定后只在该区块内采样（用于补生）；
-   * 未指定则在全图 A-G 区块中随机采样。
-   * 区块达到 ZONE_MOB_LIMITS 上限时不再生成。
-   */
-  private spawnMob(mapId: number, zoneHint = "") {
+ * 生成一只野生生物。zoneHint 指定后只在该区块内采样（用于补生）；
+ * 未指定则在全图 A-G 区块中随机采样。
+ * 区块达到 ZONE_MOB_LIMITS 上限时不再生成。
+ *
+ * @param mapId 地图ID
+ * @param zoneHint 区块提示
+ * @param x 指定x坐标（可选）
+ * @param y 指定y坐标（可选）
+ */
+private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
     const map = MAPS[mapId];
     const collider = this.wallColliders[mapId];
-    const type = pickWeightedMob(mapId, map.mobs); // 使用权重表选择生物类型
+    const type = pickWeightedMob(mapId, map.mobs);
     const zoneCounts = this.zoneMobCounts[mapId];
-    let rarity = 0, x = 0, y = 0, zone = "", placed = false;
+    let rarity = 0, spawnX = 0, spawnY = 0, zone = "", placed = false;
 
-    // 收集候选瓦片：zoneHint 非空时只收集该区块的瓦片，保证补生落在目标区块
-    const grid = MAP_GRIDS[mapId];
-    const tileW = map.width / BLOCK_GRID_COLS;
-    const tileH = map.height / BLOCK_GRID_ROWS;
-    const tiles: { col: number; row: number }[] = [];
-    if (grid) {
-      for (let row = 0; row < BLOCK_GRID_ROWS; row++) {
-        for (let col = 0; col < BLOCK_GRID_COLS; col++) {
-          const ch = grid[row]?.[col] ?? "1";
-          const letter = ch === "2" ? "A" : ch;
-          if (letter === "1") continue;
-          if (zoneHint && letter !== zoneHint) continue;
-          tiles.push({ col, row });
+    // 如果指定了位置，直接使用
+    if (x !== undefined && y !== undefined) {
+        // 验证位置是否有效
+        zone = getBlockAt(mapId, x, y);
+        if (zone === "1" || zone < "A" || zone > "G") {
+            return; // 位置无效（墙壁或未知区块）
         }
-      }
-    }
+        // 检查该区块是否已达生成上限
+        if (this.zoneFull(mapId, zone)) return;
 
-    if (tiles.length > 0) {
-      // 优先：按区块瓦片均匀采样（200×200 一格）
-      for (let tries = 0; tries < 60; tries++) {
-        const tile = tiles[(Math.random() * tiles.length) | 0];
-        x = tile.col * tileW + Math.random() * tileW;
-        y = tile.row * tileH + Math.random() * tileH;
-        zone = getBlockAt(mapId, x, y);
-        // 检查该区块是否已达生成上限
-        if (this.zoneFull(mapId, zone)) continue;
         const cr = rollZoneRarity(zone);
         const crRadius = MOBS[type].radius * mobSizeMult(cr);
-        // 生成点校验与生物碰撞一致：墙壁向外 +10px
         const [cx, cy] = collider.collideCircle(x, y, crRadius + 6, undefined, MOB_WALL_INFLATE);
-        if (Math.abs(cx - x) >= 0.01 || Math.abs(cy - y) >= 0.01) continue;
-        rarity = cr; placed = true; break;
-      }
+
+        if (Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01) {
+            spawnX = x;
+            spawnY = y;
+            rarity = cr;
+            placed = true;
+        }
     } else {
-      // 兜底：无区块网格时按原逻辑随机采样
-      for (let tries = 0; tries < 80; tries++) {
-        x = 200 + Math.random() * (map.width - 400);
-        y = 200 + Math.random() * (map.height - 400);
-        zone = getBlockAt(mapId, x, y);
-        if (zone < "A" || zone > "G") continue;
-        if (zoneHint && zone !== zoneHint) continue;
-        // 检查该区块是否已达生成上限
-        if (this.zoneFull(mapId, zone)) continue;
-        const cr = rollZoneRarity(zone);
-        const crRadius = MOBS[type].radius * mobSizeMult(cr);
-        // 生成点校验与生物碰撞一致：墙壁向外 +10px
-        const [cx, cy] = collider.collideCircle(x, y, crRadius + 6, undefined, MOB_WALL_INFLATE);
-        if (Math.abs(cx - x) >= 0.01 || Math.abs(cy - y) >= 0.01) continue;
-        rarity = cr; placed = true; break;
-      }
+        // 原有逻辑：在区块内随机采样
+        // 收集候选瓦片：zoneHint 非空时只收集该区块的瓦片
+        const grid = MAP_GRIDS[mapId];
+        const tileW = map.width / BLOCK_GRID_COLS;
+        const tileH = map.height / BLOCK_GRID_ROWS;
+        const tiles: { col: number; row: number }[] = [];
+
+        if (grid) {
+            for (let row = 0; row < BLOCK_GRID_ROWS; row++) {
+                for (let col = 0; col < BLOCK_GRID_COLS; col++) {
+                    const ch = grid[row]?.[col] ?? "1";
+                    const letter = ch === "2" ? "A" : ch;
+                    if (letter === "1") continue;
+                    if (zoneHint && letter !== zoneHint) continue;
+                    tiles.push({ col, row });
+                }
+            }
+        }
+
+        if (tiles.length > 0) {
+            // 优先：按区块瓦片均匀采样（200×200 一格）
+            for (let tries = 0; tries < 60; tries++) {
+                const tile = tiles[(Math.random() * tiles.length) | 0];
+                spawnX = tile.col * tileW + Math.random() * tileW;
+                spawnY = tile.row * tileH + Math.random() * tileH;
+                zone = getBlockAt(mapId, spawnX, spawnY);
+                if (this.zoneFull(mapId, zone)) continue;
+                const cr = rollZoneRarity(zone);
+                const crRadius = MOBS[type].radius * mobSizeMult(cr);
+                const [cx, cy] = collider.collideCircle(spawnX, spawnY, crRadius + 6, undefined, MOB_WALL_INFLATE);
+                if (Math.abs(cx - spawnX) >= 0.01 || Math.abs(cy - spawnY) >= 0.01) continue;
+                rarity = cr;
+                placed = true;
+                break;
+            }
+        } else {
+            // 兜底：无区块网格时按原逻辑随机采样
+            for (let tries = 0; tries < 80; tries++) {
+                spawnX = 200 + Math.random() * (map.width - 400);
+                spawnY = 200 + Math.random() * (map.height - 400);
+                zone = getBlockAt(mapId, spawnX, spawnY);
+                if (zone < "A" || zone > "G") continue;
+                if (zoneHint && zone !== zoneHint) continue;
+                if (this.zoneFull(mapId, zone)) continue;
+                const cr = rollZoneRarity(zone);
+                const crRadius = MOBS[type].radius * mobSizeMult(cr);
+                const [cx, cy] = collider.collideCircle(spawnX, spawnY, crRadius + 6, undefined, MOB_WALL_INFLATE);
+                if (Math.abs(cx - spawnX) >= 0.01 || Math.abs(cy - spawnY) >= 0.01) continue;
+                rarity = cr;
+                placed = true;
+                break;
+            }
+        }
     }
 
     if (!placed) return;
-    // 增加该区块计数
     zoneCounts.set(zone, (zoneCounts.get(zone) || 0) + 1);
-    this.worlds[mapId].mobs.push(new Mob(this.nextId++, type, mapId, x, y, rarity));
-  }
+    this.worlds[mapId].mobs.push(new Mob(this.nextId++, type, mapId, spawnX, spawnY, rarity));
+}
 
   /** 获取某位置所在区块的字母（A-G），若不在有效区块内返回空字符串。 */
   private zoneAt(mapId: number, x: number, y: number): string {
