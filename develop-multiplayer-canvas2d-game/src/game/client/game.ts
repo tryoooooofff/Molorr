@@ -5,6 +5,7 @@
  * main menu, account panel, world, HUD, inventory bag, crafting panel,
  * drag & drop of item cards, panel/scene animations.
  */
+ //IMPORTANT: always follow {   "compilerOptions": {     "target": "ES2017",     "lib": [       "dom",       "dom.iterable",       "esnext"     ],     "allowJs": false,     "skipLibCheck": true,     "strict": true,     "noEmit": true,     "esModuleInterop": true,     "module": "esnext",     "moduleResolution": "bundler",     "resolveJsonModule": true,     "isolatedModules": true,     "jsx": "react-jsx",     "incremental": true,     "baseUrl": ".",     "paths": {       "@/*": [         "./src/*"       ]     },     "plugins": [       {         "name": "next"       }     ]   },   "include": [     "next-env.d.ts",     "**/*.ts",     "**/*.tsx",     ".next/types/**/*.ts",     ".next/dev/types/**/*.ts"   ],   "exclude": [     "node_modules"   ] }
 import {
   AFK_CHECK_SECONDS,
   AFK_CLOSE_CODE,
@@ -93,6 +94,8 @@ interface Ent {
   /** Lagging health used to draw the "damage taken" flash on mob health bars. */
   displayHp: number;
   rarity: number;
+  /** True while the server is magnet-sucking this drop toward its owner (drop only shrinks when set). */
+  suction?: boolean;
   name: string;
   seen: number;
   /** Snapshot generation in which this entity was last present. */
@@ -235,6 +238,11 @@ class SettingsSystem {
     photoHardware: boolean = false;
     collisionUpdateSkip: number = 0;
     lowQualityWall: boolean = false;
+    /** Cache the ground + walls into an off-screen canvas and re-draw the
+     *  cached bitmap each frame. Drastically reduces per-frame work for
+     *  static visuals; the cache is rebuilt only when the camera moves
+     *  beyond the dirty rect or when the biome / wall set changes. */
+    cacheCanvas: boolean = false;
 
     // UI状态
     panelOpen: boolean = false;
@@ -429,6 +437,7 @@ class SettingsSystem {
                 this.lowQualityWall = data.lowQualityWall !== undefined ? data.lowQualityWall : false;
                 this.showMovementHelper = data.showMovementHelper !== undefined ? data.showMovementHelper : true;
                 this.showDebugInfo = data.showDebugInfo !== undefined ? data.showDebugInfo : false;
+                this.cacheCanvas = data.cacheCanvas !== undefined ? data.cacheCanvas : false;
             }
         } catch(e) {}
         this._forceRedraw();
@@ -454,7 +463,8 @@ class SettingsSystem {
                 lowQualityWall: this.lowQualityWall,
                 performanceMode: this.performanceMode,
                 showMovementHelper: this.showMovementHelper,
-                showDebugInfo: this.showDebugInfo
+                showDebugInfo: this.showDebugInfo,
+                cacheCanvas: this.cacheCanvas
             }));
         } catch(e) {}
         this._forceRedraw();
@@ -576,7 +586,7 @@ class SettingsSystem {
         this.panelOriginX = panelX;
         this.panelOriginY = panelY;
 
-        const totalContentHeight = 880;
+        const totalContentHeight = 920;
         const contentY = panelY + 70;
         const contentH = panelH - 90;
         this.maxScrollOffset = Math.max(0, totalContentHeight - contentH);
@@ -595,7 +605,7 @@ class SettingsSystem {
         ctx.fillStyle = 'rgba(180, 180, 180, 0.95)';
         ctx.beginPath();
         if (ctx.roundRect) {
-            ctx.roundRect(panelX, panelY, panelW, panelH, 15);
+            ctx.roundRect(panelX, panelY, panelW, panelH, 5);
         } else {
             ctx.rect(panelX, panelY, panelW, panelH);
         }
@@ -646,10 +656,10 @@ class SettingsSystem {
         const items = ['showHitbox', 'showRarity', 'showDamageNumbers', 'showParticles',
                        'showEnhancedHealthBar', 'showEnemyPanel', 'showFPS',
                        'showProjectileHitbox', 'showAdvancedDPS', 'photoHardware',
-                       'showMovementHelper','lowQualityWall','showDebugInfo'];
+                       'showMovementHelper','lowQualityWall','showDebugInfo','cacheCanvas'];
         const labels = ['Show Hitbox', 'Show Rarity', 'Show Damage', 'Show Particles',
                         'Health Bar', 'Enemy Panel', 'Show FPS', 'Show Projectile Hitbox',
-                        'Show Advanced DPS', 'Potato Hardware', 'Movement Helper','Low Quality Wall','Debug Info'];
+                        'Show Advanced DPS', 'Potato Hardware', 'Movement Helper','Low Quality Wall','Debug Info','Cache Canvas'];
 
         items.forEach((item, i) => {
             const itemY = curY + i * 32;
@@ -916,7 +926,7 @@ class SettingsSystem {
         const items = ['showHitbox', 'showRarity', 'showDamageNumbers', 'showParticles',
                        'showEnhancedHealthBar', 'showEnemyPanel', 'showFPS',
                        'showProjectileHitbox', 'showAdvancedDPS', 'photoHardware',
-                       'showMovementHelper','lowQualityWall','showDebugInfo'];
+                       'showMovementHelper','lowQualityWall','showDebugInfo','cacheCanvas'];
 
         for (let i = 0; i < items.length; i++) {
             const itemY = checkYStart + i * itemH - this.scrollOffset;
@@ -1050,8 +1060,11 @@ class ChatSystem {
   inputText = "";
   inputActive = false;
   visible = true;
-  width = 250;
+  width = 200;
   height = 30;
+  /** Last computed panel rect from draw(), used by handleClick so hit-testing
+   *  and rendering always use the same coordinates. */
+  lastPanelRect: Rect | null = null;
 
   addMessage(text: string, sender: string, isSystem = false, isCraftReport = false, isSelf = false) {
     this.messages.push({
@@ -1074,6 +1087,29 @@ class ChatSystem {
     return msg;
   }
 
+  /** Compute the chat panel rectangle using the same logic as draw(). */
+  private computePanelRect(screenHeight: number): Rect {
+    const isMobile = (window.innerHeight || 0) < 640;
+    const panelX = 15 * (isMobile ? 5 : 1);
+    const panelY = screenHeight - this.height - 20 * (isMobile ? 4 : 1);
+    const panelW = this.width * (isMobile ? 0.9 : 0.8);
+    const panelH = this.height * (isMobile ? 0.8 : 1.1);
+    return { x: panelX, y: panelY, w: panelW, h: panelH };
+  }
+
+  /** Hit-test the chat panel. Returns true when the pointer is inside the
+   *  same rectangle that draw() uses, and activates the input. */
+  handleClick(mx: number, my: number, screenHeight: number): boolean {
+    const rect = this.computePanelRect(screenHeight);
+    this.lastPanelRect = rect;
+    if (hit(rect, mx, my)) {
+      this.inputActive = true;
+      this.inputText = "";
+      return true;
+    }
+    return false;
+  }
+
   draw(ctx: CanvasRenderingContext2D, screenHeight: number) {
     if (!this.visible) return;
     if (!this.messages) this.messages = [];
@@ -1083,12 +1119,20 @@ class ChatSystem {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     const dpr = Math.min(2, (window.devicePixelRatio || 1));
     ctx.scale(dpr, dpr);
-    const panelX = 15;
-    const panelY = screenHeight - this.height + 40;
-    const padding = 12;
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+
+    const rect = this.computePanelRect(screenHeight);
+    this.lastPanelRect = rect;
+    const panelX = rect.x;
+    const panelY = rect.y;
+    const panelW = rect.w;
+    const panelH = rect.h;
+
+    const padding = 15;
+    ctx.fillStyle = 'rgba(50, 50, 50, 0.5)';
     ctx.beginPath();
-    ctx.roundRect(panelX, panelY, this.width, this.height, 10);
+    ctx.roundRect(panelX, panelY, panelW, panelH, 5);
+    ctx.lineWidth = 5;
+    ctx.stroke();
     ctx.fill();
     ctx.lineJoin = 'round';
     ctx.miterLimit = 2;
@@ -1119,7 +1163,7 @@ class ChatSystem {
     const sortedNames = allNames.sort((a, b) => b.length - a.length);
 
     visibleMsgs.forEach((msg, i) => {
-      const y = panelY - 15 - i * lineHeight;
+      const y = panelY - 22 - i * lineHeight;
       let displayText = msg.text || '';
 
       if (msg.sender === 'System' || msg.isSystem || msg.isCraftReport) {
@@ -1252,7 +1296,7 @@ class ChatSystem {
     });
 
     // Input line
-    const inputY = panelY + this.height - 28;
+    const inputY = panelY + panelH - 26;
     ctx.font = `16px ${FONT_FAMILY || 'Arial'}`;
     ctx.textBaseline = 'middle';
     const display = this.inputActive
@@ -1344,7 +1388,7 @@ class TooltipSystem {
         suffix: { text: ` (${RARITIES[summonRarity]?.name ?? "Common"})`, color: RARITIES[summonRarity]?.color ?? this.STYLES.WHITE },
       });
     } else if (def.kind === "trinket") {
-      statLines.push({ text: "Trade fodder — no combat use", color: this.STYLES.SPECIAL });
+      statLines.push({ text: "a special item which you can use", color: this.STYLES.SPECIAL });
     }
 
     const descriptionHeight = descriptionLines.length * 20;
@@ -1551,7 +1595,7 @@ class VirtualKeyboard {
     const kx = (w - kbW) / 2;
     const ky = h - kbH - 10;
     ctx.fillStyle = '#2a2a2e';
-    roundRect(ctx, kx - 4, ky - 4, kbW + 8, kbH + 52 + 8, 10);
+    roundRect(ctx, kx - 4, ky - 4, kbW + 8, kbH + 52 + 8, 5);
     ctx.fill();
 
     for (const kr of this.keyRects) {
@@ -1607,16 +1651,6 @@ class VirtualKeyboard {
   }
 }
 
-/**
- * AccountSystem — a self-contained local-storage account panel.
- * Painted entirely on canvas2d (no DOM). Tracks per-user stats, login
- * counts, session play-time, and exposes Export/Import/Clear actions.
- *
- * The class is intentionally defensive: every game-side hook
- * (window.gameInstance.shopSystem, .player, .score, …) is accessed
- * through optional chaining so the panel still works before the game
- * wires those systems up.
- */
 export class AccountSystem {
   [k: string]: any;
 
@@ -1627,7 +1661,6 @@ export class AccountSystem {
   LOGIN_COUNT_KEY = "flwrr_login_counts";
   SESSION_STATS_KEY = "flwrr_session_stats";
 
-  // panel state
   panelOpen = false;
   panelW = 480;
   panelH = 650;
@@ -1637,7 +1670,20 @@ export class AccountSystem {
   hoveredBtn: string | null = null;
   message: { text: string; color: string; ttl: number } | null = null;
 
-  // inputs
+  _panelScale = 1;
+  _panelCX = 0;
+  _panelCY = 0;
+  _uiK = 1;
+  _isLandscape = false;
+
+  private _conv(mx: number, my: number): [number, number] {
+    if (this._panelScale === 1) return [mx, my];
+    return [
+      this._panelCX + (mx - this._panelCX) / this._panelScale,
+      this._panelCY + (my - this._panelCY) / this._panelScale,
+    ];
+  }
+
   inputs: Record<string, any> = {
     login_user:  { value: "", focused: false, label: "Username",         type: "text" },
     login_pass:  { value: "", focused: false, label: "Password",         type: "password" },
@@ -1649,7 +1695,6 @@ export class AccountSystem {
   showPassReg = false;
   showPassConfirm = false;
 
-  // UI helpers
   _btns: Array<{ id: string; x: number; y: number; w: number; h: number }> = [];
   _sessionStart: number | null = null;
   _profileScrollOffset = 0;
@@ -1666,25 +1711,16 @@ export class AccountSystem {
   constructor() {
     this.currentUser = null;
     this.users = new Map();
-
     this.loadAllUsers();
     this.loadLoginCounts();
     this.loadSessionStats();
-
     setInterval(() => {
-      if (this.currentUser) {
-        this.saveSessionStats();
-        this.saveAllUsers();
-      }
+      if (this.currentUser) { this.saveSessionStats(); this.saveAllUsers(); }
     }, 30000);
-
     setTimeout(() => this.autoLogin(), 500);
     this._startStatsUpdate();
   }
 
-  // ====================================================================
-  //  Real-time stats
-  // ====================================================================
   _startStatsUpdate() {
     if (this._statsUpdateTimer) clearInterval(this._statsUpdateTimer);
     this._statsUpdateTimer = setInterval(() => {
@@ -1699,25 +1735,20 @@ export class AccountSystem {
     const ud = this.users.get(this.currentUser);
     if (!ud) return;
     const game: any = (window as any).gameInstance;
-
     if (this._sessionStart) {
       ud.stats.totalPlayTime = (ud.stats.totalPlayTime || 0) + (Date.now() - this._sessionStart);
       this._sessionStart = Date.now();
     }
-
     if (game) {
       if ((game.score || 0) > (ud.stats.highestScore || 0)) ud.stats.highestScore = game.score;
-
       if (game.enemiesKilled !== undefined) {
         const diff = game.enemiesKilled - (ud.stats.lastSyncedKills || 0);
         if (diff > 0) { ud.stats.totalKills = (ud.stats.totalKills || 0) + diff; ud.stats.lastSyncedKills = game.enemiesKilled; }
       }
-
       if (game.player?.xp !== undefined) {
         const diff = game.player.xp - (ud.stats.lastSyncedXp || 0);
         if (diff > 0) { ud.stats.totalXp = (ud.stats.totalXp || 0) + diff; ud.stats.lastSyncedXp = game.player.xp; }
       }
-
       if (game.player?.inventory?.craftingSystem) {
         const cs = game.player.inventory.craftingSystem;
         if ((cs.totalCrafted || 0) > (ud.stats.petalsCrafted || 0)) ud.stats.petalsCrafted = cs.totalCrafted;
@@ -1742,9 +1773,6 @@ export class AccountSystem {
     try { if (localStorage.getItem(this.SESSION_STATS_KEY)) JSON.parse(localStorage.getItem(this.SESSION_STATS_KEY) || "{}"); } catch(_e) {}
   }
 
-  // ====================================================================
-  //  Panel lifecycle
-  // ====================================================================
   openPanel() {
     this.panelOpen = true;
     this.screen = this.currentUser ? "profile" : "menu";
@@ -1790,22 +1818,31 @@ export class AccountSystem {
 
   clearAutoLogin() { localStorage.removeItem(this.LAST_USER_KEY); }
 
-  // ====================================================================
-  //  Draw entry
-  // ====================================================================
   draw(ctx: CanvasRenderingContext2D) {
     if (!this.panelOpen) return;
     const W = (window as any).WIDTH || (window as any).innerWidth || ctx.canvas.width;
     const H = (window as any).HEIGHT || (window as any).innerHeight || ctx.canvas.height;
-    // Mobile: smaller panel so it doesn't dominate the screen.
-    const isMobileView = W < 640;
-    const maxW = isMobileView ? 360 : 480;
-    const maxH = isMobileView ? 520 : 650;
+
+    const isMobileView = H < 640;
+    this._isLandscape = isMobileView && W > H;
     const margin = isMobileView ? 12 : 40;
+
+    let maxW: number, maxH: number;
+    if (this._isLandscape) { maxW = 700; maxH = 340; }
+    else { maxW = isMobileView ? 350 : 480; maxH = 650; }
+
     this.panelW = Math.min(maxW, W - margin);
     this.panelH = Math.min(maxH, H - margin);
     this.panelX = Math.floor((W - this.panelW) / 2);
     this.panelY = Math.floor((H - this.panelH) / 2);
+
+    if (this._isLandscape) { this._panelScale = 0.95; this._uiK = 0.82; }
+    else if (isMobileView) { this._panelScale = 0.9; this._uiK = 0.8; }
+    else { this._panelScale = 1; this._uiK = 1; }
+
+    this._panelCX = this.panelX + this.panelW / 2;
+    this._panelCY = this.panelY + this.panelH / 2;
+
     this._btns = [];
     if (this.message) { this.message.ttl -= 16; if (this.message.ttl <= 0) this.message = null; }
 
@@ -1816,19 +1853,22 @@ export class AccountSystem {
     const { panelX: px, panelY: py, panelW: pw, panelH: ph } = this;
     ctx.save();
 
-    // background
+    if (this._panelScale !== 1) {
+      ctx.translate(this._panelCX, this._panelCY);
+      ctx.scale(this._panelScale, this._panelScale);
+      ctx.translate(-this._panelCX, -this._panelCY);
+    }
+
     ctx.fillStyle = "#d94b4b";
     ctx.beginPath();
-    if (ctx.roundRect) ctx.roundRect(px, py, pw, ph, 16); else ctx.rect(px, py, pw, ph);
+    if (ctx.roundRect) ctx.roundRect(px, py, pw, ph, 5); else ctx.rect(px, py, pw, ph);
     ctx.fill();
 
-    ctx.strokeStyle = "rgba(0,0,0,0.3)";
-    ctx.lineWidth = 6;
+    ctx.strokeStyle = "rgba(0,0,0,0.3)"; ctx.lineWidth = 6;
     ctx.beginPath();
-    if (ctx.roundRect) ctx.roundRect(px, py, pw, ph, 16); else ctx.rect(px, py, pw, ph);
+    if (ctx.roundRect) ctx.roundRect(px, py, pw, ph, 5); else ctx.rect(px, py, pw, ph);
     ctx.stroke();
 
-    // title bar
     const hdrH = 52;
     ctx.fillStyle = "#c83f3f";
     ctx.beginPath();
@@ -1843,7 +1883,6 @@ export class AccountSystem {
     this._drawStyledButton(ctx, "✕", [px + pw - 38, py + 10, 28, 28], [200, 60, 60], 16);
     this._registerBtn("close", px + pw - 38, py + 10, 28, 28);
 
-    // content
     const contentY = py + hdrH + 10;
     const contentH = ph - hdrH - 10;
     ctx.save();
@@ -1854,17 +1893,17 @@ export class AccountSystem {
     else if (this.screen === "register") this._drawRegister(ctx, px, contentY, pw, contentH);
     else if (this.screen === "profile")  this._drawProfile(ctx, px, contentY, pw, contentH);
 
-    // message toast
     if (this.message) {
       const fade = Math.min(1, this.message.ttl / 400);
       const isErr = this.message.color === "error";
-      const mw = pw - 40, mh = 36, mx = px + 20, my = py + ph - 56;
+      const mw = pw - 40, mh = 36 * this._uiK, mx = px + 20;
+      const my = this._isLandscape ? py + ph - 80 : py + ph - 56;
       ctx.globalAlpha = fade;
       ctx.fillStyle = isErr ? "rgba(180,30,30,0.92)" : "rgba(30,130,60,0.92)";
       ctx.beginPath();
       if (ctx.roundRect) ctx.roundRect(mx, my, mw, mh, 8); else ctx.rect(mx, my, mw, mh);
       ctx.fill();
-      this.drawStrokedText(ctx, this.message.text, mx + mw / 2, my + mh / 2, 12, "center", "white");
+      this.drawStrokedText(ctx, this.message.text, mx + mw / 2, my + mh / 2, 12 * this._uiK, "center", "white");
       ctx.globalAlpha = 1;
     }
 
@@ -1873,46 +1912,95 @@ export class AccountSystem {
   }
 
   // --- Menu screen -----------------------------------------------------
-  _drawMenu(ctx: CanvasRenderingContext2D, px: number, py: number, pw: number, _ph: number) {
+  _drawMenu(ctx: CanvasRenderingContext2D, px: number, py: number, pw: number, ph: number) {
     const cx = px + pw / 2;
-    this.drawStrokedText(ctx, "lol", cx, py + 45, 48, "center", "white");
-    this.drawStrokedText(ctx, "Flwrr Account", cx, py + 95, 22, "center", "white");
-    this.drawStrokedText(ctx, "Sign in to save your progress", cx, py + 125, 12, "center", "rgba(255,255,255,0.5)");
-    const bw = pw - 80, bh = 42, bx = px + 40;
-    this._drawStyledButton(ctx, "Sign In",  [bx, py + 165, bw, bh], [36, 113, 163], 16);
-    this._registerBtn("menu_login",    bx, py + 165, bw, bh);
-    this._drawStyledButton(ctx, "Register", [bx, py + 215, bw, bh], [30, 132, 73],  16);
-    this._registerBtn("menu_register", bx, py + 215, bw, bh);
-    ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(px + 30, py + 275); ctx.lineTo(px + pw - 30, py + 275); ctx.stroke();
-    this.drawStrokedText(ctx, "Your data is stored locally on this device", cx, py + 295, 11, "center", "rgba(255,255,255,0.3)");
+    if (this._isLandscape) {
+      const leftCX = px + pw * 0.22;
+      this.drawStrokedText(ctx, "lol", leftCX, py + ph * 0.28, 40, "center", "white");
+      this.drawStrokedText(ctx, "Flwrr Account", leftCX, py + ph * 0.50, 18, "center", "white");
+      this.drawStrokedText(ctx, "Sign in to save your progress", leftCX, py + ph * 0.70, 10, "center", "rgba(255,255,255,0.5)");
+
+      ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(px + pw * 0.42, py + 20); ctx.lineTo(px + pw * 0.42, py + ph - 20); ctx.stroke();
+
+      const bw = pw * 0.48, bh = 36, bx = px + pw * 0.5;
+      const by1 = py + ph * 0.28, by2 = py + ph * 0.58;
+      this._drawStyledButton(ctx, "Sign In",  [bx, by1, bw, bh], [36, 113, 163], 15);
+      this._registerBtn("menu_login",    bx, by1, bw, bh);
+      this._drawStyledButton(ctx, "Register", [bx, by2, bw, bh], [30, 132, 73],  15);
+      this._registerBtn("menu_register", bx, by2, bw, bh);
+
+      this.drawStrokedText(ctx, "Your data is stored locally on this device", cx, py + ph - 14, 10, "center", "rgba(255,255,255,0.3)");
+    } else {
+      this.drawStrokedText(ctx, "lol", cx, py + 45, 48, "center", "white");
+      this.drawStrokedText(ctx, "Flwrr Account", cx, py + 95, 22, "center", "white");
+      this.drawStrokedText(ctx, "Sign in to save your progress", cx, py + 125, 12, "center", "rgba(255,255,255,0.5)");
+      const bw = pw - 80, bh = 42, bx = px + 40;
+      this._drawStyledButton(ctx, "Sign In",  [bx, py + 165, bw, bh], [36, 113, 163], 16);
+      this._registerBtn("menu_login",    bx, py + 165, bw, bh);
+      this._drawStyledButton(ctx, "Register", [bx, py + 215, bw, bh], [30, 132, 73],  16);
+      this._registerBtn("menu_register", bx, py + 215, bw, bh);
+      ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(px + 30, py + 275); ctx.lineTo(px + pw - 30, py + 275); ctx.stroke();
+      this.drawStrokedText(ctx, "Your data is stored locally on this device", cx, py + 295, 11, "center", "rgba(255,255,255,0.3)");
+    }
   }
 
   // --- Login screen ----------------------------------------------------
-  _drawLogin(ctx: CanvasRenderingContext2D, px: number, py: number, pw: number, _ph: number) {
+  _drawLogin(ctx: CanvasRenderingContext2D, px: number, py: number, pw: number, ph: number) {
     const cx = px + pw / 2;
-    this._drawStyledButton(ctx, "←", [px + 16, py + 5, 28, 28], [100, 100, 120], 16);
-    this._registerBtn("back", px + 16, py + 5, 28, 28);
-    this.drawStrokedText(ctx, "Sign In", cx, py + 35, 18, "center", "white");
-    let iy = py + 65;
-    iy = this._drawInput(ctx, px + 24, iy, pw - 48, "login_user", false) + 12;
-    iy = this._drawInput(ctx, px + 24, iy, pw - 48, "login_pass", true, this.showPassLogin, "toggle_pass_login") + 20;
-    this._drawStyledButton(ctx, "Sign In", [px + 24, iy, pw - 48, 42], [36, 113, 163], 16);
-    this._registerBtn("do_login", px + 24, iy, pw - 48, 42);
+    if (this._isLandscape) {
+      this._drawStyledButton(ctx, "←", [px + 10, py + 4, 24, 24], [100, 100, 120], 14);
+      this._registerBtn("back", px + 10, py + 4, 24, 24);
+      this.drawStrokedText(ctx, "Sign In", cx, py + 22, 16, "center", "white");
+      const colW = Math.floor((pw - 52) / 2);
+      const iy = py + 42;
+      this._drawInput(ctx, px + 16, iy, colW - 8, "login_user", false);
+      this._drawInput(ctx, px + 28 + colW, iy, colW - 8, "login_pass", true, this.showPassLogin, "toggle_pass_login");
+      const btnW = Math.min(180, pw * 0.35);
+      const btnX = px + (pw - btnW) / 2;
+      const btnY = iy + 52;
+      this._drawStyledButton(ctx, "Sign In", [btnX, btnY, btnW, 34], [36, 113, 163], 15);
+      this._registerBtn("do_login", btnX, btnY, btnW, 34);
+    } else {
+      this._drawStyledButton(ctx, "←", [px + 16, py + 5, 28, 28], [100, 100, 120], 16);
+      this._registerBtn("back", px + 16, py + 5, 28, 28);
+      this.drawStrokedText(ctx, "Sign In", cx, py + 35, 18, "center", "white");
+      let iy = py + 65;
+      iy = this._drawInput(ctx, px + 24, iy, pw - 48, "login_user", false) + 12;
+      iy = this._drawInput(ctx, px + 24, iy, pw - 48, "login_pass", true, this.showPassLogin, "toggle_pass_login") + 20;
+      this._drawStyledButton(ctx, "Sign In", [px + 24, iy, pw - 48, 42], [36, 113, 163], 16);
+      this._registerBtn("do_login", px + 24, iy, pw - 48, 42);
+    }
   }
 
   // --- Register screen -------------------------------------------------
-  _drawRegister(ctx: CanvasRenderingContext2D, px: number, py: number, pw: number, _ph: number) {
+  _drawRegister(ctx: CanvasRenderingContext2D, px: number, py: number, pw: number, ph: number) {
     const cx = px + pw / 2;
-    this._drawStyledButton(ctx, "←", [px + 16, py + 5, 28, 28], [100, 100, 120], 16);
-    this._registerBtn("back", px + 16, py + 5, 28, 28);
-    this.drawStrokedText(ctx, "Create Account", cx, py + 35, 18, "center", "white");
-    let iy = py + 65;
-    iy = this._drawInput(ctx, px + 24, iy, pw - 48, "reg_user",    false) + 12;
-    iy = this._drawInput(ctx, px + 24, iy, pw - 48, "reg_pass",    true, this.showPassReg,     "toggle_pass_reg")     + 12;
-    iy = this._drawInput(ctx, px + 24, iy, pw - 48, "reg_confirm", true, this.showPassConfirm, "toggle_pass_confirm") + 20;
-    this._drawStyledButton(ctx, "Create Account", [px + 24, iy, pw - 48, 42], [30, 132, 73], 16);
-    this._registerBtn("do_register", px + 24, iy, pw - 48, 42);
+    if (this._isLandscape) {
+      this._drawStyledButton(ctx, "←", [px + 10, py + 4, 24, 24], [100, 100, 120], 14);
+      this._registerBtn("back", px + 10, py + 4, 24, 24);
+      this.drawStrokedText(ctx, "Create Account", cx, py + 22, 16, "center", "white");
+      const colW = Math.floor((pw - 52) / 2);
+      const iy = py + 42;
+      this._drawInput(ctx, px + 16, iy, colW - 8, "reg_user", false);
+      this._drawInput(ctx, px + 28 + colW, iy, colW - 8, "reg_pass", true, this.showPassReg, "toggle_pass_reg");
+      const iy2 = iy + 52;
+      this._drawInput(ctx, px + 16, iy2, colW - 8, "reg_confirm", true, this.showPassConfirm, "toggle_pass_confirm");
+      const btnW = colW - 8, btnX = px + 28 + colW;
+      this._drawStyledButton(ctx, "Create Account", [btnX, iy2 + 4, btnW, 34], [30, 132, 73], 14);
+      this._registerBtn("do_register", btnX, iy2 + 4, btnW, 34);
+    } else {
+      this._drawStyledButton(ctx, "←", [px + 16, py + 5, 28, 28], [100, 100, 120], 16);
+      this._registerBtn("back", px + 16, py + 5, 28, 28);
+      this.drawStrokedText(ctx, "Create Account", cx, py + 35, 18, "center", "white");
+      let iy = py + 65;
+      iy = this._drawInput(ctx, px + 24, iy, pw - 48, "reg_user",    false) + 12;
+      iy = this._drawInput(ctx, px + 24, iy, pw - 48, "reg_pass",    true, this.showPassReg,     "toggle_pass_reg")     + 12;
+      iy = this._drawInput(ctx, px + 24, iy, pw - 48, "reg_confirm", true, this.showPassConfirm, "toggle_pass_confirm") + 20;
+      this._drawStyledButton(ctx, "Create Account", [px + 24, iy, pw - 48, 42], [30, 132, 73], 16);
+      this._registerBtn("do_register", px + 24, iy, pw - 48, 42);
+    }
   }
 
   // --- Profile screen --------------------------------------------------
@@ -1924,19 +2012,6 @@ export class AccountSystem {
     const sessionMs   = this._sessionStart ? (now - this._sessionStart) : 0;
     const totalPlayMs = (stats.totalPlayTime || 0) + sessionMs;
 
-    // avatar
-    const avR = 34, avX = cx, avY = py + 38;
-    ctx.save();
-    ctx.fillStyle = "#e74c3c";
-    ctx.beginPath(); ctx.arc(avX, avY, avR, 0, Math.PI * 2); ctx.fill();
-    ctx.strokeStyle = "#C82B19"; ctx.lineWidth = 4; ctx.stroke();
-    this._drawStar(ctx, avX, avY, 5, 18, 9, "#9C0000");
-    ctx.restore();
-
-    // username
-    this.drawStrokedText(ctx, this.currentUser || "", cx, py + 80, 18, "center", "#ffffff");
-
-    // stats grid
     const statItems = [
       { label: "Time Joined",    value: this._formatDate(ud.createdAt) },
       { label: "Time Played",    value: this._formatDuration(totalPlayMs) },
@@ -1949,93 +2024,151 @@ export class AccountSystem {
       { label: "Max Score",     value: this._formatNum(stats.highestScore) },
     ];
 
-    const cols    = 2;
-    const cellW   = Math.floor((pw - 40) / cols);
-    const cellH   = 52;
-    const rows    = Math.ceil(statItems.length / cols);
-    const totalCH = rows * cellH;
+    if (this._isLandscape) {
+      const leftW = Math.floor(pw * 0.26);
+      const avR = 26, avX = px + leftW / 2, avY = py + ph * 0.35;
+      ctx.save();
+      ctx.fillStyle = "#e74c3c";
+      ctx.beginPath(); ctx.arc(avX, avY, avR, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "#C82B19"; ctx.lineWidth = 3; ctx.stroke();
+      this._drawStar(ctx, avX, avY, 5, 14, 7, "#9C0000");
+      ctx.restore();
+      this.drawStrokedText(ctx, this.currentUser || "", avX, py + ph * 0.62, 13, "center", "#ffffff");
 
-    const btnAreaH = 4 * 36 + 3 * 6 + 12;
-    const gridTop  = py + 105;
-    const gridH    = ph - (gridTop - py) - btnAreaH;
+      ctx.strokeStyle = "rgba(255,255,255,0.08)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(px + leftW + 4, py + 10); ctx.lineTo(px + leftW + 4, py + ph - 10); ctx.stroke();
 
-    this._profileMaxOffset    = Math.max(0, totalCH - gridH);
-    this._profileScrollOffset = Math.max(0, Math.min(this._profileMaxOffset, this._profileScrollOffset));
+      const rightX = px + leftW + 14;
+      const rightW = pw - leftW - 24;
+      const cols = 3;
+      const cellW = Math.floor((rightW - 16) / cols);
+      const cellH = Math.floor((ph - 60) / 3);
+      const gridTop = py + 10;
 
-    ctx.save();
-    ctx.beginPath(); ctx.rect(px + 10, gridTop, pw - 20, gridH); ctx.clip();
+      this._profileMaxOffset = 0;
+      this._profileScrollOffset = 0;
 
-    const oy = -this._profileScrollOffset;
-    for (let i = 0; i < statItems.length; i++) {
-      const col  = i % cols;
-      const row  = Math.floor(i / cols);
-      const item = statItems[i];
-      const cx2  = px + 20 + col * cellW;
-      const cy2  = gridTop + oy + row * cellH;
-      if (cy2 + cellH < gridTop || cy2 > gridTop + gridH) continue;
+      for (let i = 0; i < statItems.length; i++) {
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        const item = statItems[i];
+        const cx2 = rightX + col * cellW;
+        const cy2 = gridTop + row * cellH;
+        ctx.fillStyle = "rgba(0,0,0,0.22)";
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(cx2, cy2, cellW - 8, cellH - 8, 8); else ctx.rect(cx2, cy2, cellW - 8, cellH - 8);
+        ctx.fill();
+        this.drawStrokedText(ctx, item.label, cx2 + (cellW-8)/2, cy2 + 14, 10, "center", "rgba(255,255,255,0.6)");
+        this.drawStrokedText(ctx, item.value,  cx2 + (cellW-8)/2, cy2 + 32, 12, "center", "white");
+      }
 
-      ctx.fillStyle = "rgba(0,0,0,0.22)";
-      ctx.beginPath();
-      if (ctx.roundRect) ctx.roundRect(cx2, cy2, cellW - 8, cellH - 8, 8); else ctx.rect(cx2, cy2, cellW - 8, cellH - 8);
-      ctx.fill();
-      this.drawStrokedText(ctx, item.label, cx2 + (cellW-8)/2, cy2 + 16, 11, "center", "rgba(255,255,255,0.6)");
-      this.drawStrokedText(ctx, item.value,  cx2 + (cellW-8)/2, cy2 + 36, 13, "center", "white");
+      const btnY = py + ph - 40;
+      const btnH = 30;
+      const gap = 6;
+      const btnW = Math.floor((rightW - gap * 3) / 4);
+
+      this._drawStyledButton(ctx, "Export",   [rightX,                     btnY, btnW, btnH], [41, 128, 185], 12);
+      this._registerBtn("export_items", rightX, btnY, btnW, btnH);
+      this._drawStyledButton(ctx, "Import",   [rightX + btnW + gap,        btnY, btnW, btnH], [39, 174, 96],  12);
+      this._registerBtn("import_items", rightX + btnW + gap, btnY, btnW, btnH);
+      this._drawStyledButton(ctx, "Clear",    [rightX + (btnW + gap) * 2,  btnY, btnW, btnH], [146, 43, 33],  12);
+      this._registerBtn("clear_items", rightX + (btnW + gap) * 2, btnY, btnW, btnH);
+      this._drawStyledButton(ctx, "Sign Out", [rightX + (btnW + gap) * 3,  btnY, btnW, btnH], [93, 109, 126], 12);
+      this._registerBtn("do_logout", rightX + (btnW + gap) * 3, btnY, btnW, btnH);
+    } else {
+      const avR = 34, avX = cx, avY = py + 38;
+      ctx.save();
+      ctx.fillStyle = "#e74c3c";
+      ctx.beginPath(); ctx.arc(avX, avY, avR, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "#C82B19"; ctx.lineWidth = 4; ctx.stroke();
+      this._drawStar(ctx, avX, avY, 5, 18, 9, "#9C0000");
+      ctx.restore();
+      this.drawStrokedText(ctx, this.currentUser || "", cx, py + 80, 18, "center", "#ffffff");
+
+      const cols = 2;
+      const cellW = Math.floor((pw - 40) / cols);
+      const cellH = 52;
+      const rows = Math.ceil(statItems.length / cols);
+      const totalCH = rows * cellH;
+      const btnAreaH = 4 * 36 + 3 * 6 + 12;
+      const gridTop = py + 105;
+      const gridH = ph - (gridTop - py) - btnAreaH;
+
+      this._profileMaxOffset = Math.max(0, totalCH - gridH);
+      this._profileScrollOffset = Math.max(0, Math.min(this._profileMaxOffset, this._profileScrollOffset));
+
+      ctx.save();
+      ctx.beginPath(); ctx.rect(px + 10, gridTop, pw - 20, gridH); ctx.clip();
+      const oy = -this._profileScrollOffset;
+      for (let i = 0; i < statItems.length; i++) {
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        const item = statItems[i];
+        const cx2 = px + 20 + col * cellW;
+        const cy2 = gridTop + oy + row * cellH;
+        if (cy2 + cellH < gridTop || cy2 > gridTop + gridH) continue;
+        ctx.fillStyle = "rgba(0,0,0,0.22)";
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(cx2, cy2, cellW - 8, cellH - 8, 8); else ctx.rect(cx2, cy2, cellW - 8, cellH - 8);
+        ctx.fill();
+        this.drawStrokedText(ctx, item.label, cx2 + (cellW-8)/2, cy2 + 16, 11, "center", "rgba(255,255,255,0.6)");
+        this.drawStrokedText(ctx, item.value,  cx2 + (cellW-8)/2, cy2 + 36, 13, "center", "white");
+      }
+      if (this._profileMaxOffset > 0) {
+        const sbX = px + pw - 14;
+        const thumbH = Math.max(28, (gridH / totalCH) * gridH);
+        const thumbY = gridTop + (this._profileScrollOffset / this._profileMaxOffset) * (gridH - thumbH);
+        ctx.fillStyle = "rgba(0,0,0,0.25)";
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(sbX, gridTop, 8, gridH, 4); else ctx.rect(sbX, gridTop, 8, gridH);
+        ctx.fill();
+        ctx.fillStyle = this.hoveredBtn === "scrollbar" ? "rgba(255,255,255,0.6)" : "rgba(255,255,255,0.35)";
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(sbX, thumbY, 8, thumbH, 4); else ctx.rect(sbX, thumbY, 8, thumbH);
+        ctx.fill();
+        this._registerBtn("scrollbar", sbX - 4, gridTop, 16, gridH);
+      }
+      ctx.restore();
+
+      const btnY0 = gridTop + gridH + 8;
+      const btnH = 36;
+      const gap = 6;
+      const half = Math.floor((pw - 56) / 2);
+      this._drawStyledButton(ctx, "Export", [px + 18,         btnY0,              half, btnH], [41, 128, 185], 13);
+      this._registerBtn("export_items", px + 18, btnY0, half, btnH);
+      this._drawStyledButton(ctx, "Import", [px + 20 + half,  btnY0,              half, btnH], [39, 174, 96],  13);
+      this._registerBtn("import_items", px + 20 + half, btnY0, half, btnH);
+      this._drawStyledButton(ctx, "Clear All Items", [px + 18, btnY0 + (btnH+gap),   pw - 36, btnH], [146, 43, 33], 13);
+      this._registerBtn("clear_items", px + 18, btnY0 + (btnH+gap), pw - 36, btnH);
+      this._drawStyledButton(ctx, "Sign Out",        [px + 18, btnY0 + (btnH+gap)*2, pw - 36, btnH], [93, 109, 126], 13);
+      this._registerBtn("do_logout", px + 18, btnY0 + (btnH+gap)*2, pw - 36, btnH);
     }
-
-    // scrollbar
-    if (this._profileMaxOffset > 0) {
-      const sbX    = px + pw - 14;
-      const thumbH = Math.max(28, (gridH / totalCH) * gridH);
-      const thumbY = gridTop + (this._profileScrollOffset / this._profileMaxOffset) * (gridH - thumbH);
-      ctx.fillStyle = "rgba(0,0,0,0.25)";
-      ctx.beginPath();
-      if (ctx.roundRect) ctx.roundRect(sbX, gridTop, 8, gridH, 4); else ctx.rect(sbX, gridTop, 8, gridH);
-      ctx.fill();
-      ctx.fillStyle = this.hoveredBtn === "scrollbar" ? "rgba(255,255,255,0.6)" : "rgba(255,255,255,0.35)";
-      ctx.beginPath();
-      if (ctx.roundRect) ctx.roundRect(sbX, thumbY, 8, thumbH, 4); else ctx.rect(sbX, thumbY, 8, thumbH);
-      ctx.fill();
-      this._registerBtn("scrollbar", sbX - 4, gridTop, 16, gridH);
-    }
-
-    ctx.restore();
-
-    // bottom buttons
-    const btnY0  = gridTop + gridH + 8;
-    const btnH   = 36;
-    const gap    = 6;
-    const half   = Math.floor((pw - 56) / 2);
-
-    this._drawStyledButton(ctx, "Export", [px + 18,         btnY0,              half, btnH], [41, 128, 185], 13);
-    this._registerBtn("export_items", px + 18, btnY0, half, btnH);
-
-    this._drawStyledButton(ctx, "Import", [px + 20 + half,  btnY0,              half, btnH], [39, 174, 96],  13);
-    this._registerBtn("import_items", px + 20 + half, btnY0, half, btnH);
-
-    this._drawStyledButton(ctx, "Clear All Items", [px + 18, btnY0 + (btnH+gap),   pw - 36, btnH], [146, 43, 33], 13);
-    this._registerBtn("clear_items", px + 18, btnY0 + (btnH+gap), pw - 36, btnH);
-
-    this._drawStyledButton(ctx, "Sign Out",        [px + 18, btnY0 + (btnH+gap)*2, pw - 36, btnH], [93, 109, 126], 13);
-    this._registerBtn("do_logout", px + 18, btnY0 + (btnH+gap)*2, pw - 36, btnH);
   }
 
   // ====================================================================
   //  Draw helpers
   // ====================================================================
   _drawStyledButton(ctx: CanvasRenderingContext2D, text: string, rect: [number, number, number, number], baseColor: [number, number, number], fontSize = 16) {
-    const [x, y, w, h] = rect;
+    let [x, y, w, h] = rect;
+    let fs = fontSize;
+    const k = this._uiK;
+    if (k !== 1) {
+      x = x + w / 2 - (w * k) / 2;
+      y = y + h / 2 - (h * k) / 2;
+      w *= k; h *= k; fs *= k;
+    }
     const adj    = (rgb: number[], f: number) => rgb.map(c => Math.min(255, Math.max(0, Math.floor(c * f))));
     const dark   = `rgb(${adj(baseColor, 0.82).join(",")})`;
     const light  = `rgb(${baseColor.join(",")})`;
     const stroke = `rgb(${adj(baseColor, 0.5).join(",")})`;
 
     ctx.beginPath();
-    if (ctx.roundRect) ctx.roundRect(x, y, w, h, 10); else ctx.rect(x, y, w, h);
+    if (ctx.roundRect) ctx.roundRect(x, y, w, h, 5); else ctx.rect(x, y, w, h);
     ctx.fillStyle = light; ctx.fill();
 
     ctx.save();
     ctx.beginPath();
-    if (ctx.roundRect) ctx.roundRect(x, y, w, h, 10); else ctx.rect(x, y, w, h);
+    if (ctx.roundRect) ctx.roundRect(x, y, w, h, 5); else ctx.rect(x, y, w, h);
     ctx.clip();
     ctx.fillStyle = dark; ctx.fillRect(x, y, w, h / 2);
     ctx.restore();
@@ -2046,7 +2179,7 @@ export class AccountSystem {
     ctx.stroke();
 
     if (text) {
-      ctx.font = ` ${fontSize}px ${FONT_FAMILY}`;
+      ctx.font = ` ${fs}px ${FONT_FAMILY}`;
       ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.strokeStyle = "black"; ctx.lineWidth = 4; ctx.lineJoin = "round";
       ctx.strokeText(text, x + w / 2, y + h / 2);
@@ -2082,8 +2215,9 @@ export class AccountSystem {
 
   _drawInput(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, key: string, isPassword: boolean, showPlain = false, toggleId: string | null = null) {
     const inp = this.inputs[key];
-    const h = 42, isFoc = inp.focused;
-    this.drawStrokedText(ctx, inp.label.toUpperCase(), x, y + 2, 9, "left",
+    const k = this._uiK;
+    const h = 42 * k, isFoc = inp.focused;
+    this.drawStrokedText(ctx, inp.label.toUpperCase(), x, y + 2, 9 * k, "left",
       isFoc ? "#f1c40f" : "rgba(255,255,255,0.5)");
     const bx = x, by = y + 8;
     ctx.fillStyle   = isFoc ? "rgba(255,255,255,0.07)" : "rgba(255,255,255,0.04)";
@@ -2095,7 +2229,7 @@ export class AccountSystem {
     this._registerBtn(key + "_box", bx, by, w, h);
     const display = isPassword && !showPlain ? "•".repeat(inp.value.length) : inp.value;
     const empty   = inp.value.length === 0;
-    ctx.font = `14px ${FONT_FAMILY}`;
+    ctx.font = `${14 * k}px ${FONT_FAMILY}`;
     ctx.fillStyle = empty ? "rgba(255,255,255,0.2)" : "white";
     ctx.textAlign = "left"; ctx.textBaseline = "middle";
     ctx.fillText(empty ? inp.label : display, bx + 12, by + h / 2);
@@ -2128,6 +2262,7 @@ export class AccountSystem {
   // ====================================================================
   handleMouseMove(mx: number, my: number) {
     if (!this.panelOpen) return false;
+    [mx, my] = this._conv(mx, my);
     this.hoveredBtn = this._hitTest(mx, my);
     if (this._draggingScroll && this._profileMaxOffset > 0) {
       const trackH = Math.max(1, this.panelH - 52 - 10 - (4*36 + 3*6 + 12) - 200);
@@ -2140,6 +2275,7 @@ export class AccountSystem {
 
   handleMouseDown(mx: number, my: number) {
     if (!this.panelOpen) return false;
+    [mx, my] = this._conv(mx, my);
     if (this._hitTest(mx, my) === "scrollbar") {
       this._draggingScroll  = true;
       this._dragStartY      = my;
@@ -2160,6 +2296,7 @@ export class AccountSystem {
 
   handleClick(mx: number, my: number) {
     if (!this.panelOpen) return false;
+    [mx, my] = this._conv(mx, my);
     const id = this._hitTest(mx, my);
     if (!id) {
       if (mx < this.panelX || mx > this.panelX + this.panelW ||
@@ -2655,6 +2792,307 @@ export class AccountSystem {
   }
 }
 
+// =====================================================================
+// Changelog panel（主菜单浮层：更新日志）
+// 实现来源：MainMenu 的 ChangelogPanel —— 绘制 / 自动换行 / 滚动 / 滚动条
+// 逻辑原样保留，仅补齐 TypeScript 类型。
+// =====================================================================
+
+interface ChangelogLogGroup {
+  date: string;
+  entries: string[];
+}
+
+class ChangelogPanel {
+  visible = false;
+  scrollY = 0;
+  logs: ChangelogLogGroup[] = [
+
+    {
+      date: "7th October 2026",
+      entries: [
+        "- updated changelog UI, also updated main menu UI",
+        "- updated mobile UI in game",
+        "- resized the panel and arrangement"
+      ]
+    },
+    {
+      date: "6th October 2026",
+      entries: [
+        "- changelog are not available before",
+        "- What are you expected to see here ???"
+      ]
+    }
+  ];
+  panelW = 420;
+  panelH = 460;
+  closeRect: [number, number, number, number] | null = null;
+  totalContentH = 0;
+  /** 触摸/指针滚动中标志（手机版用手指滑动面板内容）。 */
+  touchScrolling = false;
+  private touchLastY = 0;
+
+  /**
+   * 面板位置：左上角附近（宽 /10、高 /5 处），并 clamp 到屏幕内。
+   * W/H 为画布 CSS 尺寸（与点击坐标一致）。
+   */
+  private panelPos(W: number, H: number): [number, number] {
+    this.syncSize(W, H);
+    const px = Math.max(8, W / 10 - this.panelW / 2);
+    const py = Math.max(8, H / 5 - this.panelH / 2);
+    return [px, py];
+  }
+
+  /**
+   * 面板尺寸按设备自适应：手机版（W < 640）更小，正常版 420×460。
+   */
+  private syncSize(W: number, H: number) {
+    if (H < 640) {
+      this.panelW = Math.min(340, W - 16);
+      this.panelH = Math.min(420, H - 24);
+    } else {
+      this.panelW = 420;
+      this.panelH = 460;
+    }
+  }
+
+  /**
+   * 按下：命中面板内部（非 ✕）则进入内容滚动状态并返回 true
+   * （点击面板不再关闭，仅滚动内容）。
+   */
+  beginTouch(x: number, y: number, W: number, H: number): boolean {
+    if (!this.visible) return false;
+    const [px, py] = this.panelPos(W, H);
+    if (x < px || x > px + this.panelW || y < py || y > py + this.panelH) return false;
+    if (this.closeRect) {
+      const [cx, cy, cw, ch] = this.closeRect;
+      if (x >= cx && x <= cx + cw && y >= cy && y <= cy + ch) return false;
+    }
+    this.touchScrolling = true;
+    this.touchLastY = y;
+    return true;
+  }
+
+  /** 移动：手指上下滑动 → 滚动面板内容（复用 handleScroll 逻辑）。 */
+  touchMove(y: number) {
+    if (!this.touchScrolling) return;
+    const delta = this.touchLastY - y;
+    this.touchLastY = y;
+    this.handleScroll(delta);
+  }
+
+  endTouch() {
+    this.touchScrolling = false;
+  }
+
+  draw(ctx: CanvasRenderingContext2D, W: number, H: number) {
+    if (!this.visible) return;
+
+    const panelW = this.panelW;
+    const panelH = this.panelH;
+    const [px, py] = this.panelPos(W, H);
+    // 手机版：面板缩小后，字号/间距/按钮/滚动条等比缩放
+    const s = Math.min(1, panelW / 420);
+
+    // --- 背景 ---
+    ctx.fillStyle = '#4caf50';
+    ctx.beginPath();
+    ctx.roundRect(px, py, panelW, panelH, 5 * s);
+    ctx.fill();
+    ctx.strokeStyle = '#2e7d32';
+    ctx.lineWidth = 4 * s;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+
+    // --- 标题 ---
+    const titleX = px + panelW / 2;
+    const titleY = py + 35 * s;
+
+    ctx.font = `${28 * s}px ${FONT_FAMILY}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+
+    ctx.lineWidth = 5 * s;
+    ctx.strokeStyle = '#000000';
+    ctx.strokeText('Changelog', titleX, titleY);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('Changelog', titleX, titleY);
+
+    // --- 关闭按钮 ---
+    const closeSize = 38 * s;
+    const closeRect: [number, number, number, number] = [px + panelW - 50 * s, py + 12 * s, closeSize, closeSize];
+    this.closeRect = closeRect;
+    ctx.fillStyle = '#f44336';
+    ctx.beginPath();
+    ctx.roundRect(...closeRect, 8 * s);
+    ctx.fill();
+
+    ctx.font = `${22 * s}px ${FONT_FAMILY}`;
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 4 * s;
+    ctx.strokeText('✕', px + panelW - 31 * s, py + 31 * s);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('✕', px + panelW - 31 * s, py + 31 * s);
+
+    // --- 内容区 ---
+    const contentY = py + 70 * s;
+    const contentH = panelH - 85 * s;
+
+    ctx.save();
+    ctx.beginPath();
+    const paddingRight = 15 * s;
+    ctx.rect(px + 10 * s, contentY, panelW - 20 * s - paddingRight, contentH);
+    ctx.clip();
+
+    let y = contentY + 10 * s - this.scrollY;
+    ctx.textAlign = 'left';
+
+    const drawTextWithStroke = (text: string, x: number, y: number, fontSize: number, fontWeight: string = 'normal') => {
+      ctx.font = `${fontWeight} ${fontSize}px ${FONT_FAMILY}`;
+      ctx.textBaseline = 'top';
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = '#000000';
+      ctx.lineWidth = 3 * s;
+      ctx.strokeText(text, x, y);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(text, x, y);
+    };
+
+    for (let i = 0; i < this.logs.length; i++) {
+      const group = this.logs[i];
+
+      const dateSize = 22 * s;
+      drawTextWithStroke(group.date, px + 16 * s, y, dateSize, '');
+      y += 32 * s;
+
+      const entrySize = 18 * s;
+      for (const entry of group.entries) {
+        const words = entry.split(' ');
+        let line = '';
+        ctx.font = `${entrySize}px ${FONT_FAMILY}`;
+
+        for (const word of words) {
+          const test = line + word + ' ';
+          const maxWidth = panelW - 40 * s - paddingRight;
+          if (ctx.measureText(test).width > maxWidth && line) {
+            drawTextWithStroke(line, px + 16 * s, y, entrySize);
+            y += 24 * s;
+            line = word + ' ';
+          } else {
+            line = test;
+          }
+        }
+        if (line) {
+          drawTextWithStroke(line.trim(), px + 16 * s, y, entrySize);
+          y += 24 * s;
+        }
+        y += 6 * s;
+      }
+
+      if (i < this.logs.length - 1) {
+        ctx.strokeStyle = '#388e3c';
+        ctx.lineWidth = 2 * s;
+        ctx.beginPath();
+        ctx.moveTo(px + 15 * s, y + 8 * s);
+        ctx.lineTo(px + panelW - 15 * s - paddingRight, y + 8 * s);
+        ctx.stroke();
+        y += 24 * s;
+      }
+    }
+
+    this.totalContentH = y + this.scrollY - contentY;
+    ctx.restore();
+
+    // --- 滚动条 ---
+    const totalContentH_scaled = this.totalContentH;
+
+    if (totalContentH_scaled > contentH) {
+      const trackX = px + panelW - 12 * s;
+      const trackY = contentY;
+      const trackW = Math.max(4, 6 * s);
+      const trackH = contentH;
+
+      // 滚动条轨道
+      ctx.fillStyle = 'rgba(46, 125, 50, 0.4)';
+      ctx.beginPath();
+      ctx.roundRect(trackX, trackY, trackW, trackH, trackW / 2);
+      ctx.fill();
+
+      // 滑块
+      let thumbH = (contentH / totalContentH_scaled) * trackH;
+      thumbH = Math.max(20 * s, thumbH);
+
+      const maxScrollY = totalContentH_scaled - contentH;
+      const scrollRatio = maxScrollY > 0 ? this.scrollY / maxScrollY : 0;
+      const thumbY = trackY + (trackH - thumbH) * scrollRatio;
+
+      ctx.fillStyle = 'rgba(46, 125, 50, 0.6)';
+      ctx.beginPath();
+      ctx.roundRect(trackX, thumbY, trackW, thumbH, trackW / 2);
+      ctx.fill();
+    }
+  }
+
+  handleClick(x: number, y: number, W: number, H: number): boolean {
+    if (!this.visible) return false;
+
+    const [px, py] = this.panelPos(W, H);
+
+    // 点击面板外关闭
+    if (x < px || x > px + this.panelW || y < py || y > py + this.panelH) {
+      this.visible = false;
+      return true;
+    }
+
+    // 关闭按钮
+    if (this.closeRect) {
+      const [cx, cy, cw, ch] = this.closeRect;
+      if (x >= cx && x <= cx + cw && y >= cy && y <= cy + ch) {
+        this.visible = false;
+        return true;
+      }
+    }
+
+    return true;
+  }
+
+  handleWheel(deltaY: number): boolean {
+    if (!this.visible) return false;
+
+    const contentH = this.panelH - 85 * Math.min(1, this.panelW / 420);
+    const maxScroll = Math.max(0, (this.totalContentH || 0) - contentH);
+    this.scrollY = Math.max(0, Math.min(maxScroll, this.scrollY + deltaY));
+    return true;
+  }
+
+  handleScroll(deltaY: number): boolean {
+    if (!this.visible) return false;
+
+    const contentH = this.panelH - 85 * Math.min(1, this.panelW / 420);
+    const maxScroll = Math.max(0, (this.totalContentH || 0) - contentH);
+
+    const scrollAmount = deltaY * 0.8;
+    this.scrollY = Math.max(0, Math.min(maxScroll, this.scrollY + scrollAmount));
+
+    return true;
+  }
+
+  open() {
+    this.visible = true;
+    this.scrollY = 0;
+  }
+
+  close() {
+    this.visible = false;
+  }
+
+  toggle() {
+    this.visible = !this.visible;
+    if (this.visible) this.scrollY = 0;
+  }
+}
+
 export class GameClient {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -2664,12 +3102,13 @@ export class GameClient {
   private w = 800;
   private h = 600;
 private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map();
+ private _wallDataCache: Map<string, string> = new Map(); // 低质量墙壁缓存
   // scene
   private scene: "menu" | "game" = "menu";
   private fade = 0; // 1 = fully covered
   private pendingScene: (() => void) | null = null;
   private mapFlash = 0;
-  private wallPatternCache: Map<string, CanvasPattern> = new Map();
+
   // menu state
   private playerName = "flower";
   private selectedMap = 0;
@@ -2679,9 +3118,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private authStatus = "Playing as guest. Progress saved locally.";
   private account: { username: string; token: string } | null = null;
   private bonus = new BonusSystem();
-  private bonusOpen = false;
   /** Main-menu bestiary; kill counts are tracked locally by mob + rarity. */
   private mobGallery = new MobGallery();
+  private changelog = new ChangelogPanel();
   private chat = new ChatSystem();
   private vk = new VirtualKeyboard();
   /** Canvas-painted account panel (local-storage based). */
@@ -2775,7 +3214,17 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   _wallPatternLegacy: CanvasPattern | null = null;
   _wallPatternLegacyBiome = "";
   private _patternCache: Record<string, CanvasPattern> = {};
-
+ private wallPatternCache: Map<string, CanvasPattern> = new Map();
+  /** Off-screen canvas used to pre-render the ground + walls once per
+   *  cache tick, so per-frame work drops to a single drawImage(). The cache
+   *  is rebuilt whenever the camera crosses a tile boundary, the zoom
+   *  changes, the biome changes, or the wall list changes. Only used when
+   *  Settings.cacheCanvas is enabled. */
+  private _groundWallCache: HTMLCanvasElement | null = null;
+  private _groundWallCtx: CanvasRenderingContext2D | null = null;
+  private _groundWallCacheKey: string = "";
+  private _groundWallCacheBiome: string = "";
+  private _groundWallCacheMap: number = -1;
   // player state
   private hp = 100;
   private maxHp = 100;
@@ -2992,6 +3441,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.canvas.addEventListener("wheel", this.onWheel, { passive: false });
     this.resize();
     window.addEventListener("resize", this.resize);
+    window.addEventListener("fullscreenchange", this.onFullscreenChange);
     this.loop(performance.now());
   }
 
@@ -3012,14 +3462,22 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   }
 
 
+  /** 统一的手机检测：窗口宽度 / UA / 触摸能力 / 全屏（进入全屏视为最精确的手机信号）。 */
   private detectMobile(): boolean {
     if (typeof window === "undefined") return false;
     return (
       window.innerWidth <= 900 ||
       /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
-      "ontouchstart" in window
+      "ontouchstart" in window ||
+      // 全屏检测：手机端玩家通常进入全屏游玩，命中即视为手机版
+      (typeof document !== "undefined" && !!document.fullscreenElement)
     );
   }
+
+  /** 全屏状态变化（进入/退出全屏）→ 重新检测设备并刷新移动端布局。 */
+  private onFullscreenChange = () => {
+    this.updateMobileLayout();
+  };
 
   private updateMobileLayout() {
     this.isMobile = this.detectMobile();
@@ -3304,182 +3762,209 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.net.send(w.bytes());
   }
 
-  private handlePacket(data: Uint8Array) {
-    this.debugBytesInWindow += data.byteLength;
-    const r = new Reader(data);
-    const type = r.u8();
-    switch (type) {
-      case S2C.WELCOME: {
-        this.selfId = r.u16();
-        this.mapId = r.u8();
-        this.worldW = r.u16();
-        this.worldH = r.u16();
-        const wallCount = r.u16();
-        this.walls = [];
-        for (let i = 0; i < wallCount; i++) {
-          this.walls.push({ x: r.u16(), y: r.u16(), w: r.u16(), h: r.u16() });
-        }
-        this.ents.clear();
-        this.roseParticles.length = 0;
-        this.mapFlash = 1;
-        this.chat.addMessage("Welcome! Press [Enter] to chat. type /help for help", "System", true);
-        break;
+private handlePacket(data: Uint8Array) {
+  this.debugBytesInWindow += data.byteLength;
+  const r = new Reader(data);
+  const type = r.u8();
+  switch (type) {
+    case S2C.WELCOME: {
+      this.selfId = r.u16();
+      this.mapId = r.u8();
+      this.worldW = r.u16();
+      this.worldH = r.u16();
+      const wallCount = r.u16();
+      this.walls = [];
+      for (let i = 0; i < wallCount; i++) {
+        this.walls.push({ x: r.u16(), y: r.u16(), w: r.u16(), h: r.u16() });
       }
-      case S2C.SNAPSHOT: {
-        r.u32();
-        // A snapshot landed, so the stream is healthy again. Entity ageing
-        // resumes from *now*: the seen-timestamps were held still during the
-        // stall, so nothing expires just because packets were late.
-        this.sinceSnapshot = 0;
-        this.snapshotStalled = false;
-        const snapshotSequence = ++this.snapshotSequence;
-        const count = r.u16();
-        for (let i = 0; i < count; i++) {
-          const kind = r.u8();
-          const id = r.u16();
-          const etype = r.u8();
-          const team = r.u8();
-          const x = r.i16();
-          const y = r.i16();
-          const angle = (r.u16() / 65535) * Math.PI * 2;
-          // Mob radii use u16: the Eternal 10× size tier can exceed the
-          // previous 255px byte limit. Other entity kinds remain compact u8.
-          const radius = kind === ENT.MOB ? r.u16() : r.u8();
-          const hp = r.u8() / 255;
-          let name = "";
-          if (kind === ENT.PLAYER) name = r.str();
-          const rarity = kind === ENT.MOB ? r.u8() : 0;
-          let e = this.ents.get(id);
-          if (!e) {
-            e = {
-              id, kind, type: etype, team, x, y, tx: x, ty: y, angle,
-              radius, hp, displayHp: hp, rarity, name, seen: this.time, seenSnapshot: snapshotSequence, hurt: 0, spawn: 0,
-            };
-            this.ents.set(id, e);
-          }
-          if (hp < e.hp) e.hurt = 0.22;
-          e.kind = kind;
-          e.type = etype;
-          e.team = team;
-          e.tx = x;
-          e.ty = y;
-          e.angle = angle;
-          e.radius = radius;
-          e.hp = hp;
-          e.rarity = rarity;
-          if (name) e.name = name;
-          e.seen = this.time;
-          e.seenSnapshot = snapshotSequence;
-          if (e.spawn < 1) e.spawn = Math.min(1, e.spawn + 0.12);
-        }
-        // Petals are authoritative, short-lived entities. Remove one as soon
-        // as it is absent so an absorbed Rose does not sit over the player for
-        // the generic stale-entity grace period.
-        for (const [id, entity] of this.ents) {
-          if (entity.kind === ENT.PETAL && entity.seenSnapshot !== snapshotSequence) this.ents.delete(id);
-        }
-        // Trailing per-slot reload progress, one byte per hotbar slot.
-        if (r.remaining >= SLOT_COUNT) {
-          for (let i = 0; i < SLOT_COUNT; i++) this.slotReload[i] = r.u8() / 255;
-        }
-        // Trailing per-slot remaining health, one byte per hotbar slot.
-        if (r.remaining >= SLOT_COUNT) {
-          for (let i = 0; i < SLOT_COUNT; i++) this.slotHp[i] = r.u8() / 255;
-        }
-        break;
-      }
-      case S2C.INVENTORY: {
-        const slotCount = r.u8();
-        const slots = emptyCells(SLOT_COUNT);
-        for (let i = 0; i < slotCount; i++) {
-          const c = this.readCell(r);
-          if (i < SLOT_COUNT) slots[i] = c;
-        }
-        const secCount = r.u8();
-        const secondary = emptyCells(SECONDARY_SLOT_COUNT);
-        for (let i = 0; i < secCount; i++) {
-          const c = this.readCell(r);
-          if (i < SECONDARY_SLOT_COUNT) secondary[i] = c;
-        }
-        const bagCount = Math.min(r.u16(), BAG_MAX);
-        const bag = emptyCells(Math.max(BAG_COUNT, bagCount));
-        for (let i = 0; i < bagCount; i++) bag[i] = this.readCell(r);
-        this.slots = slots;
-        this.secondary = secondary;
-        this.bag = bag;
-        this.saveDirty = true;
-        break;
-      }
-      case S2C.STATS: {
-        this.xp = r.u32();
-        this.level = r.u16();
-        this.hp = r.u16();
-        this.maxHp = r.u16();
-        this.mapId = r.u8();
-        this.alive = r.u8() === 1;
-        const oracleSecLeft = r.u32();
-        const tradeSecLeft = r.u32();
-        const now = Date.now();
-        this.nextOracleAt = oracleSecLeft > 0 ? now + oracleSecLeft * 1000 : 0;
-        this.nextTradeAt = tradeSecLeft > 0 ? now + tradeSecLeft * 1000 : 0;
-        if (r.remaining >= 2) this.shield = r.u16();
-        break;
-      }
-      case S2C.EVENT: {
+      this.ents.clear();
+      this.roseParticles.length = 0;
+      this.mapFlash = 1;
+      this.chat.addMessage("Welcome! Press [Enter] to chat. type /help for help", "System", true);
+      break;
+    }
+    case S2C.SNAPSHOT: {
+      r.u32();
+      this.sinceSnapshot = 0;
+      this.snapshotStalled = false;
+      const snapshotSequence = ++this.snapshotSequence;
+      const count = r.u16();
+      for (let i = 0; i < count; i++) {
         const kind = r.u8();
+        const id = r.u16();
+        const etype = r.u8();
+        const team = r.u8();
         const x = r.i16();
         const y = r.i16();
-        const value = r.u32();
-        const item = r.u8();
-        const rarity = r.u8();
-        this.onEvent(kind, x, y, value, item, rarity);
-        break;
-      }
-      case S2C.CHAT: {
-        const text = r.str();
-        const sender = r.str();
-        const isSystem = r.u8() === 1;
-        const isCraftReport = r.u8() === 1;
-        const isSelf = sender === this.playerName;
-        this.chat.addMessage(text, sender, isSystem, isCraftReport, isSelf);
-        break;
-      }
-      case S2C.AFK_CHECK: {
-        const active = r.u8() === 1;
-        const secondsLeft = r.u16();
-        if (active && !this.afkPending) this.afkAnim = 0;
-        this.afkPending = active;
-        this.afkSecondsLeft = secondsLeft;
-        this.afkSmoothSeconds = secondsLeft;
-        break;
-      }
-      case S2C.SQUAD_UPDATE: {
-        this.squadCode = r.str();
-        if (this.squadCode) {
-          this.chat.addMessage(`Joined squad: ${this.squadCode}`, "System", true);
-        } else {
-          this.chat.addMessage("Left squad.", "System", true);
+        const angle = (r.u16() / 65535) * Math.PI * 2;
+        // DROP：服务器把"正在被磁铁吸取"的状态编码在 radius 字节的最高位，
+        // 客户端只在确定被吸时才对掉落物做缩小淡出。
+        let radius = kind === ENT.MOB ? r.u16() : r.u8();
+        let suction = false;
+        if (kind === ENT.DROP) {
+          suction = (radius & 0x80) !== 0;
+          radius &= 0x7f;
         }
-        break;
+        const hp = r.u8() / 255;
+        let name = "";
+        if (kind === ENT.PLAYER) name = r.str();
+
+        // ─── 读取 rarity ───
+        let rarity = 0;
+        if (kind === ENT.MOB) {
+          rarity = r.u8();
+        } else if (kind === ENT.PROJECTILE) {
+          // PROJECTILE 在序列化时末尾附加了 rarity (u8)
+          rarity = r.u8();
+        }
+
+        let e = this.ents.get(id);
+        if (!e) {
+          e = {
+            id,
+            kind,
+            type: etype,
+            team,
+            x,
+            y,
+            tx: x,
+            ty: y,
+            angle,
+            radius,
+            hp,
+            displayHp: hp,
+            rarity,
+            suction,
+            name,
+            seen: this.time,
+            seenSnapshot: snapshotSequence,
+            hurt: 0,
+            spawn: 0,
+          };
+          this.ents.set(id, e);
+        }
+        if (hp < e.hp) e.hurt = 0.22;
+        e.kind = kind;
+        e.type = etype;
+        e.team = team;
+        e.tx = x;
+        e.ty = y;
+        e.angle = angle;
+        e.radius = radius;
+        e.hp = hp;
+        e.rarity = rarity;
+        e.suction = suction;
+        if (name) e.name = name;
+        e.seen = this.time;
+        e.seenSnapshot = snapshotSequence;
+        if (e.spawn < 1) e.spawn = Math.min(1, e.spawn + 0.12);
       }
-      case S2C.PONG: {
-        const stamp = r.u32();
-        // Guards against a stray/late reply from before a reconnect throwing
-        // off the reading with a huge or negative delta.
-        const rtt = (Date.now() >>> 0) - stamp;
-        if (rtt >= 0 && rtt < 60000) this.debugPingMs = rtt;
-        break;
+      // Petals are authoritative, short-lived entities. Remove one as soon
+      // as it is absent so an absorbed Rose does not sit over the player for
+      // the generic stale-entity grace period.
+      for (const [id, entity] of this.ents) {
+        if (entity.kind === ENT.PETAL && entity.seenSnapshot !== snapshotSequence) this.ents.delete(id);
       }
-      case S2C.DEBUG: {
-        this.debugCollisionChecks = r.u32();
-        this.debugEntityCount = r.u16();
-        this.debugPlayerCount = r.u16();
-        break;
+      // Trailing per-slot reload progress, one byte per hotbar slot.
+      if (r.remaining >= SLOT_COUNT) {
+        for (let i = 0; i < SLOT_COUNT; i++) this.slotReload[i] = r.u8() / 255;
       }
-      default:
-        break;
+      // Trailing per-slot remaining health, one byte per hotbar slot.
+      if (r.remaining >= SLOT_COUNT) {
+        for (let i = 0; i < SLOT_COUNT; i++) this.slotHp[i] = r.u8() / 255;
+      }
+      break;
     }
+    case S2C.INVENTORY: {
+      const slotCount = r.u8();
+      const slots = emptyCells(SLOT_COUNT);
+      for (let i = 0; i < slotCount; i++) {
+        const c = this.readCell(r);
+        if (i < SLOT_COUNT) slots[i] = c;
+      }
+      const secCount = r.u8();
+      const secondary = emptyCells(SECONDARY_SLOT_COUNT);
+      for (let i = 0; i < secCount; i++) {
+        const c = this.readCell(r);
+        if (i < SECONDARY_SLOT_COUNT) secondary[i] = c;
+      }
+      const bagCount = Math.min(r.u16(), BAG_MAX);
+      const bag = emptyCells(Math.max(BAG_COUNT, bagCount));
+      for (let i = 0; i < bagCount; i++) bag[i] = this.readCell(r);
+      this.slots = slots;
+      this.secondary = secondary;
+      this.bag = bag;
+      this.saveDirty = true;
+      break;
+    }
+    case S2C.STATS: {
+      this.xp = r.u32();
+      this.level = r.u16();
+      this.hp = r.u16();
+      this.maxHp = r.u16();
+      this.mapId = r.u8();
+      this.alive = r.u8() === 1;
+      const oracleSecLeft = r.u32();
+      const tradeSecLeft = r.u32();
+      const now = Date.now();
+      this.nextOracleAt = oracleSecLeft > 0 ? now + oracleSecLeft * 1000 : 0;
+      this.nextTradeAt = tradeSecLeft > 0 ? now + tradeSecLeft * 1000 : 0;
+      if (r.remaining >= 2) this.shield = r.u16();
+      break;
+    }
+    case S2C.EVENT: {
+      const kind = r.u8();
+      const x = r.i16();
+      const y = r.i16();
+      const value = r.u32();
+      const item = r.u8();
+      const rarity = r.u8();
+      this.onEvent(kind, x, y, value, item, rarity);
+      break;
+    }
+    case S2C.CHAT: {
+      const text = r.str();
+      const sender = r.str();
+      const isSystem = r.u8() === 1;
+      const isCraftReport = r.u8() === 1;
+      const isSelf = sender === this.playerName;
+      this.chat.addMessage(text, sender, isSystem, isCraftReport, isSelf);
+      break;
+    }
+    case S2C.AFK_CHECK: {
+      const active = r.u8() === 1;
+      const secondsLeft = r.u16();
+      if (active && !this.afkPending) this.afkAnim = 0;
+      this.afkPending = active;
+      this.afkSecondsLeft = secondsLeft;
+      this.afkSmoothSeconds = secondsLeft;
+      break;
+    }
+    case S2C.SQUAD_UPDATE: {
+      this.squadCode = r.str();
+      if (this.squadCode) {
+        this.chat.addMessage(`Joined squad: ${this.squadCode}`, "System", true);
+      } else {
+        this.chat.addMessage("Left squad.", "System", true);
+      }
+      break;
+    }
+    case S2C.PONG: {
+      const stamp = r.u32();
+      const rtt = (Date.now() >>> 0) - stamp;
+      if (rtt >= 0 && rtt < 60000) this.debugPingMs = rtt;
+      break;
+    }
+    case S2C.DEBUG: {
+      this.debugCollisionChecks = r.u32();
+      this.debugEntityCount = r.u16();
+      this.debugPlayerCount = r.u16();
+      break;
+    }
+    default:
+      break;
   }
+}
 
   private readCell(r: Reader): Cell | null {
     const item = r.u8();
@@ -3507,10 +3992,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         this.floaters.push({ x, y, msg: `-${value}`, color: "#ff6f6f", life: 0.9, vy: -40 });
         break;
       case EVT.KILL:
-        this.killFeed.unshift({ msg: `Defeated ${MOBS[value]?.name ?? "mob"}`, life: 3 });
         this.killFeed = this.killFeed.slice(0, 5);
-        // KILL events carry the defeated mob's rarity in the event rarity byte.
-        // Keep this local collection count independent from server save data.
         this.mobGallery.recordKill(value, rarity);
         break;
       case EVT.CRAFT_OK:
@@ -3838,7 +4320,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     const isLandscape = this.w > this.h;
     const mobileScale = isMobile ? 0.5 : 1;
     const widthMult = isMobile && isLandscape ? 1.5 : 1;   // +50% width
-    const heightMult = isMobile && isLandscape ? 2.5 : 1;    // ×2 height
+    const heightMult = isMobile && isLandscape ? 2.1 : 1;    // ×2 height
     const w = Math.min(380, this.w * 0.92) * mobileScale * widthMult;
     const reservedHotbar = this.scene === "game" ? this.hotbarHeight() : 0;
     const topGap = 18 * mobileScale;
@@ -3848,7 +4330,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     const hidden = this.h + 20;
     const shown = topGap;
     const t = ease.outCubic(this.bagAnim);
-    return { x: (this.w - w) / 2, y: hidden + (shown - hidden) * t, w, h };
+    return { x: (this.w - w) / 10, y: hidden + (shown - hidden) * t, w, h };
   }
 
   /** Geometry for the scrollable item grid + header widgets inside the bag panel. */
@@ -3863,9 +4345,9 @@ private bagLayout() {
   let cols = 5;
 
   if (isMobile) {
-    gap = 8 * scale;
-    pad = 12 * scale;
-    cols = 5;
+    gap = 6 * scale;
+    pad = 10 * scale;
+    cols = 6;
   }
 
   const slotSize = Math.max(28 * scale, Math.floor((p.w - pad * 2 - gap * (cols - 1)) / cols));
@@ -3882,7 +4364,7 @@ private bagLayout() {
   // 【修改】手机端降低统计面板高度
   let statsH = 92 * scale;
   if (isMobile) {
-    statsH = 70 * scale;  // 从92减小到76
+    statsH = 72 * scale;  // 从92减小到76
   }
 
   const gridTop = barY + barH + 12 * scale;
@@ -3991,10 +4473,10 @@ private bagLayout() {
     const isMobile = this.isMobile || this.w < 640;
     const isLandscape = this.w > this.h;
     const mobileScale = isMobile ? 0.5 : 1;
-    const landscapeW = isMobile && isLandscape ? 1.25 : 1;  // +25% width (landscape)
+    const landscapeW = isMobile && isLandscape ? 1.3 : 1;  // +25% width (landscape)
     const landscapeH = isMobile && isLandscape ? 2 : 1;     // ×2 height (landscape)
-    const mobileBumpW = isMobile ? 1.10 : 1;                // +10% width (all mobile)
-    const mobileBumpH = isMobile ? 1.15 : 1;                // +15% height (all mobile)
+    const mobileBumpW = isMobile ? 1.15 : 1;                // +10% width (all mobile)
+    const mobileBumpH = isMobile ? 1.2 : 1;                // +15% height (all mobile)
     const widthMult = landscapeW * mobileBumpW;
     const heightMult = landscapeH * mobileBumpH;
     const w = Math.min(800, Math.floor(this.w * 0.92)) * mobileScale * widthMult;
@@ -4008,7 +4490,6 @@ private bagLayout() {
     const shown = this.w - w - 16;
     return { x: hidden + (shown - hidden) * t, y: topGap, w, h };
   }
-
   /**
    * Geometry for the widened crafting panel.
    * - Five 70px craft slots form a compact pentagon near the top
@@ -4025,15 +4506,16 @@ private bagLayout() {
     const tabsH = 32 * scale;
     const barH = 26 * scale;
 
+    // [Change] 应用 scale 到日志区域
     const logRect: Rect = {
       x: p.x + pad,
       y: p.y + 10 * scale,
-      w: Math.min(150, p.w * 0.18),
+      w: Math.min(150, p.w * 0.18) * scale, // [Change] 宽度缩放
       h: 82 * scale,
     };
     const tabsY = p.y + 10 * scale;
 
-    const bigSize = Math.max(34, Math.min(70, p.h * 0.13));
+    const bigSize = Math.max(30, Math.min(70, p.h * 0.13));
     const radius = Math.max(38, Math.min(80, p.h * 0.14));
     const cx = p.x + p.w * 0.38;
     const cy = p.y + Math.max(82, Math.min(148, p.h * 0.29));
@@ -4050,16 +4532,29 @@ private bagLayout() {
     const resultSize = Math.min(66, Math.max(bigSize * 1.25, 54));
     const resultRect: Rect = { x: cx - resultSize / 2, y: cy - resultSize / 2, w: resultSize, h: resultSize };
 
-    const actionW = Math.min(110, p.w * 0.18);
-    const actionH = Math.min(36, p.h * 0.07);
-    const actionRect: Rect = { x: p.x + p.w - actionW - 14, y: cy - actionH / 2, w: actionW, h: actionH };
-    const closeRect: Rect = { x: p.x + p.w - 34, y: p.y + 10 * scale, w: 24, h: 24 };
+    // [Change] 应用 scale 到操作按钮
+    const actionW = Math.min(110, p.w * 0.18) * scale; // [Change] 宽度缩放
+    const actionH = Math.min(36, p.h * 0.07) * scale;  // [Change] 高度缩放
+    const actionRect: Rect = {
+      x: p.x + p.w - actionW - (14 * scale), // [Change] 右侧 padding 缩放
+      y: cy - actionH / 2,
+      w: actionW,
+      h: actionH
+    };
+
+    // [Change] 应用 scale 到关闭按钮
+    const closeRect: Rect = {
+      x: p.x + p.w - (34 * scale), // [Change] X 位置缩放
+      y: p.y + 10 * scale,
+      w: 24 * scale, // [Change] 宽度缩放
+      h: 24 / scale  // [Change] 高度缩放
+    };
 
     // [Change 1] Reduced padding from 24 to 10 to lift the bottom bar up
     const craftBottom = cy + radius + bigSize / 2 + 10 * scale;
     const barGap = 8 * scale;
-    const dropW = Math.min(110, p.w * 0.2);
-    const barW = Math.min(210, p.w * 0.34);
+    const dropW = Math.min(110, p.w * 0.2) * scale; // [Change] 下拉框宽度缩放
+    const barW = Math.min(210, p.w * 0.34) * scale; // [Change] 搜索条宽度缩放
     const dropX = p.x + pad;
     const barY = craftBottom + 4 * scale;
     const barX = dropX + dropW + barGap;
@@ -4072,7 +4567,7 @@ private bagLayout() {
 
     const cols = RARITIES.length;
     const gapSmall = 6 * scale;
-    const maxGridWidth = p.w - pad * 2 - 18;
+    const maxGridWidth = p.w - pad * 2 - (18 * scale); // [Change] 边距缩放
     const widthLimitedSlot = Math.floor((maxGridWidth - gapSmall * (cols - 1)) / cols);
     const availableGridH = Math.max(1, gridBottom - gridTop);
     const slotSizeSmall = Math.max(18, Math.min(40, widthLimitedSlot, availableGridH));
@@ -4080,8 +4575,13 @@ private bagLayout() {
     const totalGridWidth = cols * (slotSizeSmall + gapSmall) - gapSmall;
     const gridStartX = p.x + p.w / 2 - totalGridWidth / 2;
     const gridH = availableGridH;
-    const maxVisibleRows = Math.max(1, Math.floor(gridH / itemHeightSmall));
-    const scrollTrack: Rect = { x: gridStartX + totalGridWidth + 10, y: gridTop, w: 6, h: gridH };
+    const maxVisibleRows = Math.max(5, Math.floor(gridH / itemHeightSmall));
+    const scrollTrack: Rect = {
+      x: gridStartX + totalGridWidth + (10 * scale), // [Change] 滚动条间距缩放
+      y: gridTop,
+      w: 10 * scale, // [Change] 滚动条宽度缩放
+      h: gridH
+    };
 
     return {
       panel: p,
@@ -4117,6 +4617,7 @@ private bagLayout() {
       logRect,
     };
   }
+
 
 
   private craftModeRects(): { mode: "normal" | "oracle" | "trade"; rect: Rect; label: string; color: string }[] {
@@ -4707,6 +5208,8 @@ private bagLayout() {
     const p = this.pointerPos(e);
     this.mx = p.x;
     this.my = p.y;
+    // Changelog 面板内容触摸滚动（手机/桌面通用）。
+    if (this.scene === "menu" && this.changelog.touchScrolling) this.changelog.touchMove(p.y);
     // Account panel hover tracking (only when open).
     if (this.accountSystem.panelOpen) this.accountSystem.handleMouseMove(p.x, p.y);
     // Mobile joystick handling: if active, clamp current point to radius.
@@ -4775,12 +5278,9 @@ private bagLayout() {
     }
     // Mobile: clicking the chatbox triggers the keyboard (check BEFORE joystick)
     if (this.isMobile && this.scene === "game" && this.bagAnim < 0.2 && this.craftAnim < 0.2) {
-      const chatW = Math.min(400, this.w * 0.35);
-      const chatY = this.h - this.hotbarHeight() - 17;
-      const chatRect: Rect = { x: 15, y: chatY, w: chatW, h: 65 };
-      if (hit(chatRect, p.x, p.y)) {
-        this.chat.inputActive = true;
-        this.chat.inputText = "";
+      const chatLift = this.isMobile || this.w < 640 ? 76 : 50;
+      const chatScreenHeight = this.h - this.hotbarHeight() + chatLift;
+      if (this.chat.handleClick(p.x, p.y, chatScreenHeight)) {
         this.vk.active = true;
         this.vk.target = 'chat';
         this.vk.numMode = false;
@@ -4874,8 +5374,17 @@ private bagLayout() {
     }
     this.mouseDown = true;
     this.mouseDownPointerId = e.pointerId;
-    if (this.scene === "menu") this.menuClick(p.x, p.y);
-    else this.gameClick(p.x, p.y, e.shiftKey);
+    if (this.scene === "menu") {
+      // Changelog 面板内容触摸滚动：按下面板内部（非 ✕）进入滚动状态，
+      // 不再走 menuClick，因此点击面板不会关闭它。
+      if (
+        !this.mobGallery.visible &&
+        !this.settings.panelOpen &&
+        !this.accountSystem.panelOpen &&
+        this.changelog.beginTouch(p.x, p.y, this.w, this.h)
+      ) return;
+      this.menuClick(p.x, p.y);
+    } else this.gameClick(p.x, p.y, e.shiftKey);
   };
 
   /**
@@ -4935,6 +5444,7 @@ private bagLayout() {
     }
     this.bagDraggingThumb = false;
     this.craftDraggingThumb = false;
+    this.changelog.endTouch();
     this.mobGallery.handleMouseUp();
     if (this.settings.panelOpen) this.settings.handleMouseUp();
     if (this.drag) this.dropDrag(this.mx, this.my);
@@ -4953,6 +5463,12 @@ private bagLayout() {
   private onWheel = (e: WheelEvent) => {
     // Account panel: scroll the profile stats grid.
     if (this.accountSystem.panelOpen && this.accountSystem.handleWheel(e.deltaY)) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    if (this.scene === "menu" && this.changelog.visible) {
+      this.changelog.handleWheel(e.deltaY);
       e.preventDefault();
       e.stopPropagation();
       return;
@@ -5008,6 +5524,42 @@ private bagLayout() {
   private menuBgColor: [number, number, number] = [26, 26, 46];
   private menuTargetBgColor: [number, number, number] = [26, 26, 46];
   private menuHoveredButton: string | null = null;
+  /** 主菜单瞬态提示（"Coming soon" 等），到期自动消失。 */
+  private menuToast: { text: string; until: number } | null = null;
+
+  private showMenuToast(text: string) {
+    this.menuToast = { text, until: this.time + 1.4 };
+  }
+
+  // ── Bonus 面板（_drawBonusPanel）状态，参考 MainMenu ──
+  /** 面板矩形（右上角），每帧在 renderMenu 中重算。 */
+  private extraBonusButton: number[] = [0, 0, 180, 165];
+  /** Extra Bonus 尚未实现：保持默认未激活（面板显示 inactive，点击 → Coming soon）。 */
+  private extraBonusActive = false;
+  private extraBonusExpireTime = 0;
+  private extraBonusPermanent = false;
+  private rubyMembershipActive = false;
+  private _bonusClaimRect: number[] | null = null;
+  private _bonusExtraRect: number[] | null = null;
+  /** 面板/按钮 hover 状态（'bonus_claim' / 'bonus_extra'）。 */
+  private hoveredButton: string | null = null;
+
+  /** 命中检测（数组形式矩形 [x,y,w,h]）。 */
+  private hitArr(r: number[] | null, mx: number, my: number): boolean {
+    if (!r) return false;
+    return mx >= r[0] && mx <= r[0] + r[2] && my >= r[1] && my <= r[1] + r[3];
+  }
+
+  /** 描边文字（GameClient 实例方法，供主菜单面板使用）。 */
+  private drawStrokedText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, fontSize: number, textAlign: CanvasTextAlign = "center", fillColor: string = "white") {
+    ctx.save();
+    ctx.font = ` ${fontSize}px ${FONT_FAMILY}`;
+    ctx.textAlign = textAlign; ctx.textBaseline = "middle";
+    ctx.strokeStyle = "black"; ctx.lineWidth = 3; ctx.lineJoin = "round";
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = fillColor; ctx.fillText(text, x, y);
+    ctx.restore();
+  }
 
   // Biome colors for the 3 maps
   private BIOME_COLORS: Record<string, [number, number, number]> = {
@@ -5118,6 +5670,223 @@ private bagLayout() {
     ctx.restore();
   }
 
+  /**
+   * 顶部栏按钮图标（参考 MainMenu._drawTopBtnIcon）：白色矢量图标居中。
+   */
+  private _drawTopBtnIcon(ctx: CanvasRenderingContext2D, key: string, rect: { x: number; y: number; w: number; h: number }) {
+    const x = rect.x, y = rect.y, w = rect.w, h = rect.h;
+    const cx = x + w / 2, cy = y + h / 2;
+    const s  = Math.min(w, h) * 0.32;
+    ctx.save();
+    ctx.strokeStyle = 'white';
+    ctx.fillStyle   = 'white';
+    ctx.lineWidth   = Math.max(1.5, s * 0.18);
+    ctx.lineCap     = 'round';
+    ctx.lineJoin    = 'round';
+
+    switch (key) {
+      // Account: circle head + shoulder arc
+      case 'account': {
+        ctx.beginPath(); ctx.arc(cx, cy - s * 0.5, s * 0.3, 0, Math.PI * 2); ctx.stroke();ctx.fill();
+        ctx.beginPath(); ctx.arc(cx, cy + s * 0.8, s * 0.65, 0, Math.PI, true);ctx.closePath();ctx.fill(); ctx.stroke();
+        break;
+      }
+      // Shop: 小房子（屋顶 + 波浪雨棚 + 房体）
+      case 'shop': {
+        ctx.beginPath();
+        ctx.moveTo(cx - s * 0.75, cy - s * 0.15);
+        ctx.lineTo(cx - s * 0.55, cy - s * 0.75);
+        ctx.lineTo(cx + s * 0.55, cy - s * 0.75);
+        ctx.lineTo(cx + s * 0.75, cy - s * 0.15);
+        // wavy awning
+        ctx.quadraticCurveTo(cx + s * 0.55, cy + s * 0.10, cx + s * 0.35, cy);
+        ctx.quadraticCurveTo(cx + s * 0.15, cy + s * 0.18, cx, cy);
+        ctx.quadraticCurveTo(cx - s * 0.15, cy + s * 0.18, cx - s * 0.35, cy);
+        ctx.quadraticCurveTo(cx - s * 0.55, cy + s * 0.10, cx - s * 0.75, cy - s * 0.15);
+        ctx.closePath();
+        ctx.fill();
+        // building body
+        ctx.fillRect(cx - s * 0.45, cy, s * 0.90, s * 0.75);
+        break;
+      }
+      // Hunt: crosshair
+      case 'hunting_quest': {
+        ctx.beginPath(); ctx.arc(cx, cy, s * 0.65, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.arc(cx, cy, s * 0.22, 0, Math.PI * 2); ctx.stroke();
+        [[0, -1],[0, 1],[-1, 0],[1, 0]].forEach(([dx, dy]) => {
+          ctx.beginPath();
+          ctx.moveTo(cx + dx * s * 0.32, cy + dy * s * 0.32);
+          ctx.lineTo(cx + dx * s * 0.72, cy + dy * s * 0.72);
+          ctx.stroke();
+        });
+        break;
+      }
+      // Talent: 4-pointed star
+      case 'talent': {
+        const k = 0.8;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - s * k);
+        ctx.lineTo(cx + s * 0.3 * k, cy - s * 0.3 * k);
+        ctx.lineTo(cx + s * k, cy);
+        ctx.lineTo(cx + s * 0.3 * k, cy + s * 0.3 * k);
+        ctx.lineTo(cx, cy + s * k);
+        ctx.lineTo(cx - s * 0.3 * k, cy + s * 0.3 * k);
+        ctx.lineTo(cx - s * k, cy);
+        ctx.lineTo(cx - s * 0.3 * k, cy - s * 0.3 * k);
+        ctx.closePath();
+        ctx.stroke();
+        ctx.fill();
+        break;
+      }
+      // Gallery: paw (large pad + 3 toe pads)
+      case 'mob_gallery': {
+        ctx.beginPath(); ctx.arc(cx, cy + s * 0.35, s * 0.42, 0, Math.PI * 2); ctx.stroke();ctx.fill();
+        [[-s * 0.52, -s * 0.4],[0, -s * 0.58],[s * 0.52, -s * 0.38]].forEach(([dx, dy]) => {
+          ctx.beginPath(); ctx.arc(cx + dx, cy + dy, s * 0.25, 0, Math.PI * 2); ctx.fill();
+        });
+        break;
+      }
+      // Achievement: trophy cup
+      case 'achievement': {
+        const tw = s * 0.7, th = s * 0.8, tx = cx - tw / 2, ty = cy - th * 0.8;
+        ctx.beginPath();
+        ctx.moveTo(tx, ty);
+        ctx.lineTo(tx + tw, ty);
+        ctx.lineTo(tx + tw * 0.78, ty + th);
+        ctx.lineTo(tx + tw * 0.22, ty + th);
+        ctx.closePath(); ctx.stroke();ctx.fill();
+        ctx.beginPath(); ctx.arc(tx, ty + th * 0.4, s * 0.25, Math.PI * 1.5, Math.PI * 0.5, true); ctx.stroke();
+        ctx.beginPath(); ctx.arc(tx + tw, ty + th * 0.4, s * 0.25, Math.PI * 1.5, Math.PI * 0.5, false); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(cx, ty + th); ctx.lineTo(cx, cy + s * 0.58); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(cx - s * 0.4, cy + s * 0.58); ctx.lineTo(cx + s * 0.4, cy + s * 0.58); ctx.stroke();
+        break;
+      }
+      // Settings: gear (16-tooth star + center hole)
+      case 'settings': {
+        ctx.beginPath();
+        for (let i = 0; i < 16; i++) {
+          const a = (i / 16) * Math.PI * 2;
+          const r = (i % 2 === 0) ? s * 0.80 : s * 0.60;
+          const x = cx + Math.cos(a) * r;
+          const y = cy + Math.sin(a) * r;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        ctx.closePath();
+        ctx.fill();
+        // center hole
+        ctx.beginPath();
+        ctx.arc(cx, cy, s * 0.18, 0, Math.PI * 2);
+        ctx.fillStyle = "#444";
+        ctx.fill();
+        break;
+      }
+      // Changelog: document with 3 lines
+      case 'changelog': {
+        const dw = s, dh = s * 1.35, dx = cx - dw / 2, dy = cy - dh / 2;
+        ctx.beginPath(); ctx.roundRect(dx, dy, dw, dh, s * 0.12); ctx.stroke();
+        [0.25, 0.5, 0.75].forEach(t => {
+          ctx.beginPath();
+          ctx.moveTo(dx + dw * 0.18, dy + dh * t);
+          ctx.lineTo(dx + dw * 0.82, dy + dh * t);
+          ctx.stroke();
+        });
+        break;
+      }
+    }
+    ctx.restore();
+  }
+
+  /**
+   * 左侧栏按钮（参考 MainMenu._drawLeftBtnIcon）：图标居左 + 快捷键标签靠右。
+   */
+  private _drawLeftBtnIcon(ctx: CanvasRenderingContext2D, key: string, rect: { x: number; y: number; w: number; h: number }) {
+    const x = rect.x, y = rect.y, w = rect.w, h = rect.h;
+    const cx = x + w * 0.35; // icon positioned left side
+    const cy = y + h / 2;
+    const s  = h * 0.45;
+    const labelX = x + w - 15;
+    const labelY = y + h / 2;
+
+    ctx.save();
+    ctx.strokeStyle = 'white';
+    ctx.fillStyle   = 'white';
+    ctx.lineWidth   = Math.max(1.5, s * 0.22);
+    ctx.lineCap     = 'round';
+    ctx.lineJoin    = 'round';
+
+    switch (key) {
+      case 'inventory': {
+        // --- Bag Top (Crown/Frill) ---
+        ctx.beginPath();
+        ctx.moveTo(cx - s * 0.32, cy - s * 0.604);
+        ctx.bezierCurveTo(cx - s * 0.244, cy - s * 0.564, cx - s * 0.204, cy - s * 0.564, cx - s * 0.128, cy - s * 0.624);
+        ctx.bezierCurveTo(cx - s * 0.064, cy - s * 0.564, cx + s * 0.064, cy - s * 0.564, cx + s * 0.128, cy - s * 0.624);
+        ctx.bezierCurveTo(cx + s * 0.204, cy - s * 0.564, cx + s * 0.244, cy - s * 0.564, cx + s * 0.32, cy - s * 0.604);
+        ctx.lineTo(cx + s * 0.224, cy - s * 0.384);
+        ctx.lineTo(cx - s * 0.224, cy - s * 0.384);
+        ctx.closePath();
+        ctx.fill();
+        // --- Bag Neck (The collar/tie) ---
+        ctx.beginPath();
+        ctx.roundRect(cx - s * 0.264, cy - s * 0.356, s * 0.528, s * 0.072, s * 0.036);
+        ctx.fill();
+        // --- Bag Main Body ---
+        ctx.beginPath();
+        ctx.moveTo(cx - s * 0.184, cy - s * 0.244);
+        ctx.bezierCurveTo(cx - s * 0.464, cy - s * 0.064, cx - s * 0.704, cy + s * 0.336, cx - s * 0.464, cy + s * 0.656);
+        ctx.bezierCurveTo(cx - s * 0.304, cy + s * 0.836, cx + s * 0.304, cy + s * 0.836, cx + s * 0.464, cy + s * 0.656);
+        ctx.bezierCurveTo(cx + s * 0.704, cy + s * 0.336, cx + s * 0.464, cy - s * 0.064, cx + s * 0.184, cy - s * 0.244);
+        ctx.closePath();
+        ctx.fill();
+        break;
+      }
+      // Crafting: 分子/原子（带间隙的圆，离屏图层实现）
+      case 'crafting': {
+        const pad = s * 1.4;
+        const layer = document.createElement('canvas');
+        layer.width = Math.ceil(pad * 2);
+        layer.height = Math.ceil(pad * 2);
+        const lctx = layer.getContext('2d')!;
+        const gap = s * 0.05;
+        const drawAtomWithGap = (atomX: number, atomY: number, atomRadius: number) => {
+          lctx.save();
+          lctx.fillStyle = '#FFFFFF';
+          lctx.globalCompositeOperation = 'destination-out';
+          lctx.beginPath();
+          lctx.arc(atomX - cx + pad, atomY - cy + pad, atomRadius + gap, 0, Math.PI * 2);
+          lctx.fill();
+          lctx.restore();
+          lctx.beginPath();
+          lctx.arc(atomX - cx + pad, atomY - cy + pad, atomRadius, 0, Math.PI * 2);
+          lctx.fill();
+        };
+        drawAtomWithGap(cx - s * 0.1, cy - s * 0.42, s * 0.29);
+        drawAtomWithGap(cx - s * 0.4, cy + s * 0.2, s * 0.26);
+        drawAtomWithGap(cx - s * 0.04, cy - s * 0.04, s * 0.4);
+        drawAtomWithGap(cx + s * 0.39, cy + s * 0.05, s * 0.27);
+        ctx.drawImage(layer, cx - pad, cy - pad);
+        break;
+      }
+    }
+
+    // Draw label text (keyboard shortcut hint)
+    let label = '';
+    if (key === 'inventory') label = '[I]';
+    else if (key === 'crafting') label = '[C]';
+
+    ctx.font = `bold ${Math.floor(h * 0.34)}px ${FONT_FAMILY}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.strokeStyle = 'black';
+    ctx.lineWidth = 2;
+    ctx.strokeText(label, labelX, labelY);
+    ctx.fillStyle = 'white';
+    ctx.fillText(label, labelX, labelY);
+
+    ctx.restore();
+  }
+
   private menuLayout() {
     // Mobile responsive: single column on phone, 3 columns on desktop
     const isMobileLayout = this.isMobile || this.w < 640;
@@ -5158,81 +5927,134 @@ private bagLayout() {
     return buttons;
   }
 
-  /** Rects for the main-menu actions (top bar and left sidebar) - responsive for phone */
+  /**
+   * Rects for the main-menu actions — 排版参考 MainMenu：
+   *  - 顶部栏：Account / Shop / Hunting Quest / Talent / Mob Gallery /
+   *    Achievement / Settings / Changelog（圆角正方形图标）
+   *  - 左侧栏：Inventory / Crafting / Bonus（宽按钮：图标居左 + 快捷键标签）
+   * 手机端：顶部栏两行四列（网格上方），左侧栏一行三个（底部）。
+   */
   private menuActionRects() {
     const W = this.w;
     const H = this.h;
     const buttons: Record<string, { x: number; y: number; w: number; h: number }> = {};
     const isMobileLayout = this.isMobile || W < 640;
 
+    // 顶部栏 8 个图标按钮：全部移到左上角（桌面/手机同一布局，
+    // 手机端按钮自动缩小以适应宽度，无需单独分支）。
+    const topOrder = ['top_account', 'top_shop', 'top_hunting_quest', 'top_talent', 'top_mob_gallery', 'top_achievement', 'top_settings', 'top_changelog'];
+    const TOP_GAP = 8;
+    const topSize = Math.max(32, Math.min(44, (W - 16 - TOP_GAP * (topOrder.length - 1)) / topOrder.length));
+    topOrder.forEach((key, i) => {
+      buttons[key] = { x: 10 + i * (topSize + TOP_GAP), y: 10, w: topSize, h: topSize };
+    });
+
+    // 侧栏（已删除 Multiplayer / Bonus，Bonus 改为常驻面板）：
+    // Inventory / Crafting，宽按钮布局以容纳"图标居左 + 快捷键标签靠右"。
+    const leftOrder = ['left_inventory', 'left_craft'];
     if (isMobileLayout) {
-      // Phone: a compact six-button bar above the menu instructions.
-      const BTN_W = Math.min(72, (W - 40) / 6);
-      const BTN_H = 36;
-      const GAP = 5;
-      const totalW = BTN_W * 6 + GAP * 5;
+      // Phone: one compact row of two at the bottom.
+      const BTN_W = Math.min(104, (W - 16) / 2);
+      const BTN_H = 42;
+      const GAP = 6;
+      const totalW = BTN_W * 2 + GAP;
       const startX = (W - totalW) / 2;
-      const y = H - BTN_H - 45;
-      buttons['left_inventory'] = { x: startX, y, w: BTN_W, h: BTN_H };
-      buttons['left_craft'] = { x: startX + (BTN_W + GAP), y, w: BTN_W, h: BTN_H };
-      buttons['left_gallery'] = { x: startX + (BTN_W + GAP) * 2, y, w: BTN_W, h: BTN_H };
-      buttons['left_bonus'] = { x: startX + (BTN_W + GAP) * 3, y, w: BTN_W, h: BTN_H };
-      buttons['left_settings'] = { x: startX + (BTN_W + GAP) * 4, y, w: BTN_W, h: BTN_H };
-      buttons['left_account'] = { x: startX + (BTN_W + GAP) * 5, y, w: BTN_W, h: BTN_H };
+      const y = H - BTN_H - 12;
+      leftOrder.forEach((key, i) => {
+        buttons[key] = { x: startX + i * (BTN_W + GAP), y, w: BTN_W, h: BTN_H };
+      });
     } else {
-      // Desktop: left sidebar
+      // Desktop: left sidebar (reference MainMenu layout).
       const LEFT_X = 14;
-      const LEFT_W = 90;
-      const LEFT_H = 45;
+      const LEFT_W = 118;
+      const LEFT_H = 46;
       const LEFT_GAP = 10;
-      const leftMidY = H / 2 - (LEFT_H * 6 + LEFT_GAP * 5) / 2;
-      buttons['left_inventory'] = { x: LEFT_X, y: leftMidY, w: LEFT_W, h: LEFT_H };
-      buttons['left_craft'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP), w: LEFT_W, h: LEFT_H };
-      buttons['left_gallery'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 2, w: LEFT_W, h: LEFT_H };
-      buttons['left_bonus'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 3, w: LEFT_W, h: LEFT_H };
-      buttons['left_settings'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 4, w: LEFT_W, h: LEFT_H };
-      buttons['left_account'] = { x: LEFT_X, y: leftMidY + (LEFT_H + LEFT_GAP) * 5, w: LEFT_W, h: LEFT_H };
+      const leftMidY = H / 2 - (LEFT_H * leftOrder.length + LEFT_GAP * (leftOrder.length - 1)) / 2;
+      leftOrder.forEach((key, i) => {
+        buttons[key] = { x: LEFT_X, y: leftMidY + i * (LEFT_H + LEFT_GAP), w: LEFT_W, h: LEFT_H };
+      });
     }
 
     return buttons;
   }
 
   private menuClick(mx: number, my: number) {
+    // Bonus 面板常驻主菜单：面板区域内的点击一律由面板处理并吞掉，
+    // 不会穿透到下方的按钮（防止点开其它面板）。
+    // 其它模态面板（画廊/日志/账号/设置/背包/合成）打开时不触发 bonus。
+    if (!this.mobGallery.visible && !this.changelog.visible && !this.accountSystem.panelOpen && !this.settings.panelOpen && this.bagAnim < 0.4 && this.craftAnim < 0.4) {
+      if (this.hitArr(this.extraBonusButton, mx, my)) {
+        if (this.hitArr(this._bonusClaimRect, mx, my)) {
+          if (this.bonus.canClaim() && this.bonus.claim()) this.sendBonusStatus();
+        } else if (this.hitArr(this._bonusExtraRect, mx, my)) {
+          this.showMenuToast('Coming soon');
+        }
+        return;
+      }
+    }
+
+    // 模态面板打开时严格拦截，不穿透到主菜单
+    if (this.accountSystem.panelOpen) {
+      this.accountSystem.handleClick(mx, my);
+      return;
+    }
+    if (this.settings.panelOpen) {
+      this.settings.handleClick(mx, my);
+      return;
+    }
+    if (this.mobGallery.visible) {
+      if (this.mobGallery.handleClick(mx, my)) return;
+      this.mobGallery.close();
+      return;
+    }
+    if (this.changelog.visible) {
+      this.changelog.handleClick(mx, my, this.w, this.h);
+      return;
+    }
+    if (this.bagAnim > 0.4) {
+      if (this.handleBagClick(mx, my)) return;
+      this.bagOpen = false;
+      return;
+    }
+    if (this.craftAnim > 0.4) {
+      if (this.handleCraftClick(mx, my)) return;
+      this.craftOpen = false;
+      return;
+    }
+
     // Action buttons (top bar and left sidebar)
     const actions = this.menuActionRects();
 
-    if (actions.left_gallery && hit(actions.left_gallery, mx, my)) {
+    // ── Top bar（参考 MainMenu 布局）──
+    if (actions.top_mob_gallery && hit(actions.top_mob_gallery, mx, my)) {
       if (this.mobGallery.visible) {
         this.mobGallery.close();
       } else {
         this.focus = null;
         this.bagOpen = false;
         this.craftOpen = false;
-        this.bonusOpen = false;
         this.settings.close();
+        this.changelog.close();
         this.mobGallery.open();
       }
       return;
     }
-
-    // The gallery is a modal floating panel while open, so it gets first
-    // crack at clicks (including its close button and biome dropdown).
-    if (this.mobGallery.handleClick(mx, my)) return;
-    if (this.settings.panelOpen) {
-      if (this.settings.handleClick(mx, my)) return;
-    }
-    if (this.bonusOpen) {
-      const modal = this.bonusModalRect();
-      const claim = { x: modal.x + 28, y: modal.y + modal.h - 66, w: modal.w - 56, h: 40 };
-      if (hit(claim, mx, my) && this.bonus.claim()) this.sendBonusStatus();
-      else if (!hit(modal, mx, my)) this.bonusOpen = false;
+    if (actions.top_account && hit(actions.top_account, mx, my)) { this.accountSystem.openPanel(); return; }
+    if (actions.top_settings && hit(actions.top_settings, mx, my)) { this.settings.togglePanel(); return; }
+    // Changelog 面板：打开/关闭
+    if (actions.top_changelog && hit(actions.top_changelog, mx, my)) {
+      this.focus = null;
+      this.bagOpen = false;
+      this.craftOpen = false;
+      this.settings.close();
+      if (this.mobGallery.visible) this.mobGallery.close();
+      this.changelog.toggle();
       return;
     }
-    // Craft / Inventory panels can be opened right from the main menu — give
-    // them first crack at the click (same as in-game) so their own chrome
-    // (close button, search, scrollbar, drag targets) works here too.
-    if (this.craftAnim > 0.4 && this.handleCraftClick(mx, my)) return;
-    if (this.bagAnim > 0.4 && this.handleBagClick(mx, my)) return;
+    // 尚未实现的按钮：先绘制，点击返回 "Coming soon"（暂无实际功能代码）。
+    for (const id of ['top_shop', 'top_hunting_quest', 'top_talent', 'top_achievement']) {
+      if (actions[id] && hit(actions[id], mx, my)) { this.showMenuToast('Coming soon'); return; }
+    }
 
     // Name field (above biome buttons)
     const layout = this.menuLayout();
@@ -5255,13 +6077,10 @@ private bagLayout() {
       }
     }
 
-    // Left sidebar buttons (same functions) — each returns so a single
+    // Left sidebar buttons（参考 MainMenu 布局）— each returns so a single
     // tap never triggers two actions.
-    if (actions.left_account && hit(actions.left_account, mx, my)) { this.accountSystem.openPanel(); return; }
     if (actions.left_inventory && hit(actions.left_inventory, mx, my)) { this.toggleBag(); return; }
     if (actions.left_craft && hit(actions.left_craft, mx, my)) { this.toggleCraft(); return; }
-    if (actions.left_bonus && hit(actions.left_bonus, mx, my)) { this.bonusOpen = true; return; }
-    if (actions.left_settings && hit(actions.left_settings, mx, my)) { this.settings.togglePanel(); return; }
 
     // Play button (big button below biome grid)
     const playBtnRect = this.menuPlayButtonRect();
@@ -5340,6 +6159,26 @@ private bagLayout() {
       return;
     }
 
+    // 面板打开时严格拦截，不穿透到游戏世界
+    if (this.accountSystem.panelOpen) {
+      this.accountSystem.handleClick(mx, my);
+      return;
+    }
+    if (this.settings.panelOpen) {
+      this.settings.handleClick(mx, my);
+      return;
+    }
+    if (this.bagAnim > 0.4) {
+      if (this.handleBagClick(mx, my)) return;
+      this.bagOpen = false;
+      return;
+    }
+    if (this.craftAnim > 0.4) {
+      if (this.handleCraftClick(mx, my, shiftKey)) return;
+      this.craftOpen = false;
+      return;
+    }
+
     for (const b of this.hudButtons()) {
       if (!hit(b.rect, mx, my)) continue;
       if (b.id === "bag") this.toggleBag();
@@ -5351,12 +6190,9 @@ private bagLayout() {
 
     // Mobile: clicking the chatbox triggers the keyboard
     if (this.isMobile) {
-      const chatW = Math.min(400, this.w * 0.35);
-      const chatY = this.h - this.hotbarHeight() - 17;
-      const chatRect: Rect = { x: 15, y: chatY, w: chatW, h: 65 };
-      if (hit(chatRect, mx, my)) {
-        this.chat.inputActive = true;
-        this.chat.inputText = "";
+      const chatLift = this.isMobile || this.w < 640 ? 76 : 50;
+      const chatScreenHeight = this.h - this.hotbarHeight() + chatLift;
+      if (this.chat.handleClick(mx, my, chatScreenHeight)) {
         this.vk.active = true;
         this.vk.target = 'chat';
         this.vk.numMode = false;
@@ -5884,35 +6720,33 @@ private bagLayout() {
    * a diagnostic HUD — toggled from Settings → Debug Info.
    */
   private renderDebugOverlay(ctx: CanvasRenderingContext2D) {
-    const lines: string[] = [
-      `FPS: ${this.debugFps >= 1 ? Math.round(this.debugFps) : "--"}`,
-      `Ping: ${this.connected ? (this.debugPingMs > 0 ? `${this.debugPingMs} ms` : "..." ) : "--"}`,
-      `Throughput: ↓${formatDebugBytes(this.debugThroughputInWindow)}/s ↑${formatDebugBytes(this.debugThroughputOutWindow)}/s`,
-      `Objects: ${this.connected ? this.debugEntityCount : this.ents.size}`,
-      `Collision checks: ${this.connected ? this.debugCollisionChecks : "--"}`,
-      `Players: ${this.connected ? this.debugPlayerCount : "--"}`,
-    ];
-
-    const fontSize = 12;
-    const lineH = 16;
-    const padX = 10;
-    const padY = 8;
+    // Compressed: 2 short lines, smaller font, tight padding, so the panel
+    // takes up a fraction of the original screen space and never covers
+    // the chat box or hotbar in the bottom-right corner.
+    const fps = this.debugFps >= 1 ? Math.round(this.debugFps).toString() : "--";
+    const ping = this.connected ? (this.debugPingMs > 0 ? `${this.debugPingMs}ms` : "...") : "--";
+    const inKB = formatDebugBytes(this.debugThroughputInWindow);
+    const outKB = formatDebugBytes(this.debugThroughputOutWindow);
+    const objs = this.connected ? this.debugEntityCount : this.ents.size;
+    const players = this.connected ? this.debugPlayerCount : "--";
+    const checks = this.connected ? this.debugCollisionChecks : "--";
+    const line1 = `${fps}fps ${ping} ↓${inKB}/s ↑${outKB}/s`;
+    const line2 = `obj:${objs} player:${players} collision:${checks}`;
+    const fontSize = 10;
+    const lineH = 12;
+    const padX = 6;
+    const padY = 4;
     ctx.save();
     ctx.font = `900 ${fontSize}px "Trebuchet MS", "Segoe UI", sans-serif`;
-    let maxW = 0;
-    for (const line of lines) maxW = Math.max(maxW, ctx.measureText(line).width);
-    ctx.restore();
-
-    const w = maxW + padX * 2;
-    const h = lines.length * lineH + padY * 2 - 4;
-    const x = this.w - w - 12;
-    const y = this.h - h - 12;
+    const w = Math.ceil(Math.max(ctx.measureText(line1).width, ctx.measureText(line2).width)) + padX * 2;
+    const h = lineH * 2 + padY * 2 - 2;
+    const x = this.w - w - 8;
+    const y = this.h - h - 8;
     panel(ctx, { x, y, w, h }, "rgba(10,16,22,0.78)");
-    lines.forEach((line, i) => {
-      text(ctx, line, x + padX, y + padY + i * lineH + lineH / 2, fontSize, "rgba(255,255,255,0.92)", "left");
-    });
+    text(ctx, line1, x + padX, y + padY + lineH / 2, fontSize, "rgba(255,255,255,0.92)", "left");
+    text(ctx, line2, x + padX, y + padY + lineH + lineH / 2 + 1, fontSize, "rgba(255,255,255,0.78)", "left");
+    ctx.restore();
   }
-
   private renderMenu(dt: number) {
     const ctx = this.ctx;
     const t = this.time;
@@ -5996,9 +6830,9 @@ private bagLayout() {
     ctx.textBaseline = 'alphabetic';
     ctx.strokeStyle = 'black';
     ctx.lineWidth = 8;
-    ctx.strokeText('PETALIA.IO', W / 2, titleY + bob * 0.4);
-    ctx.fillStyle = '#ffe763';
-    ctx.fillText('PETALIA.IO', W / 2, titleY + bob * 0.4);
+    ctx.strokeText('Molorr.io', W / 2, titleY + bob * 0.4);
+    ctx.fillStyle = '#fff';
+    ctx.fillText('Molorr.io', W / 2, titleY + bob * 0.4);
 
     // ─── Name Field (above biome buttons) ───
     const layout = this.menuLayout();
@@ -6070,49 +6904,56 @@ private bagLayout() {
       ctx.fillText('PLAY', playBtnRect.x + playBtnRect.w / 2, playBtnRect.y + playBtnRect.h / 2);
     }
 
-    // ─── Left Sidebar Buttons ───
+    // ─── Top Bar Buttons（参考 MainMenu 配色与布局）───
     const actions = this.menuActionRects();
+    const TOP_BTN_COLORS: Record<string, [number, number, number]> = {
+      top_account:       [52, 152, 219],
+      top_shop:          [46, 204, 113],
+      top_hunting_quest: [46, 204, 113],
+      top_talent:        [142, 68, 173],
+      top_mob_gallery:   [155, 89, 182],
+      top_achievement:   [230, 126, 34],
+      top_settings:      [51, 51, 85],
+      top_changelog:     [21, 142, 24],
+    };
+    const TOP_BTN_HOVER_COLORS: Record<string, [number, number, number]> = {
+      top_account:       [41, 128, 185],
+      top_shop:          [39, 174, 96],
+      top_hunting_quest: [39, 174, 96],
+      top_talent:        [155, 89, 182],
+      top_mob_gallery:   [142, 68, 173],
+      top_achievement:   [211, 84, 0],
+      top_settings:      [85, 85, 119],
+      top_changelog:     [28, 180, 32],
+    };
+    for (const key of Object.keys(TOP_BTN_COLORS)) {
+      const rect = actions[key];
+      if (!rect) continue;
+      const isHov = hit(rect, this.mx, this.my);
+      const color = isHov ? TOP_BTN_HOVER_COLORS[key] : TOP_BTN_COLORS[key];
+      drawBtn(rect, color);
+      // 顶部栏：圆角正方形 + 居中图标（MainMenu._drawTopBtnIcon）
+      this._drawTopBtnIcon(ctx, key.replace('top_', ''), rect);
+    }
+
+    // ─── Left Sidebar Buttons（参考 MainMenu 配色与图标）───
     const leftBtnColors: Record<string, [number, number, number]> = {
-      left_inventory: [52, 152, 219],
-      left_craft: [155, 89, 182],
-      left_gallery: [70, 145, 94],
-      left_bonus: [217, 154, 38],
-      left_settings: [127, 140, 141],
-      left_account: [217, 75, 75],
+      left_inventory:  [52, 152, 219],
+      left_craft:      [155, 89, 182],
     };
     const leftBtnHoverColors: Record<string, [number, number, number]> = {
-      left_inventory: [41, 128, 185],
-      left_craft: [142, 68, 173],
-      left_gallery: [53, 120, 76],
-      left_bonus: [195, 130, 30],
-      left_settings: [100, 110, 110],
-      left_account: [180, 50, 50],
+      left_inventory:  [41, 128, 185],
+      left_craft:      [142, 68, 173],
     };
 
-    for (const key of ['left_inventory', 'left_craft', 'left_gallery', 'left_bonus', 'left_settings', 'left_account']) {
+    for (const key of ['left_inventory', 'left_craft']) {
       const rect = actions[key];
       if (!rect) continue;
       const isHov = hit(rect, this.mx, this.my);
       const color = isHov ? leftBtnHoverColors[key] : leftBtnColors[key];
       drawBtn(rect, color);
-
-      ctx.font = `bold ${isMobileLayout ? 10 : 11}px ${FONT_FAMILY}`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.strokeStyle = 'rgba(0,0,0,0.8)';
-      ctx.lineWidth = 2;
-      ctx.lineJoin = 'round';
-      const labels: Record<string, string> = {
-        left_inventory: isMobileLayout ? 'Bag' : '[I]nventory',
-        left_craft: isMobileLayout ? 'Craft' : '[C]raft',
-        left_gallery: isMobileLayout ? 'Mobs' : 'Mobs',
-        left_bonus: 'Bonus',
-        left_settings: 'Settings',
-        left_account: 'Account'
-      };
-      ctx.strokeText(labels[key] || '', rect.x + rect.w / 2, rect.y + rect.h / 2);
-      ctx.fillStyle = 'white';
-      ctx.fillText(labels[key] || '', rect.x + rect.w / 2, rect.y + rect.h / 2);
+      // 侧栏：宽按钮，图标居左 + 快捷键标签靠右（MainMenu._drawLeftBtnIcon）
+      this._drawLeftBtnIcon(ctx, key.replace('left_', ''), rect);
     }
 
     // ─── Version text ───
@@ -6124,20 +6965,49 @@ private bagLayout() {
     ctx.strokeText('v0.4.3', W - 10, isMobileLayout ? H - 8 : H - 10);
     ctx.fillStyle = 'rgba(255,255,255,0.7)';
     ctx.fillText('v0.4.3', W - 10, isMobileLayout ? H - 8 : H - 10);
+    const pwB = Math.min(180, W - 24);
+    this.extraBonusButton = [W - pwB - 12, 64, pwB, 165];
+    this.hoveredButton = null;
+    if (this.hitArr(this._bonusClaimRect, this.mx, this.my)) this.hoveredButton = 'bonus_claim';
+    else if (this.hitArr(this._bonusExtraRect, this.mx, this.my)) this.hoveredButton = 'bonus_extra';
+    this._drawBonusPanel(ctx, isMobileLayout ? 12 : 12);
+    this.settings.draw(ctx, W / 2, H / 2);
+if (this.drag) {
+  const size = 60;
+  // 摆动动画：使用正弦波产生左右摆动
+  const swingAmount = 10; // 摆动幅度（像素）
+  const swingSpeed = 6; // 摆动速度
+  const swing = Math.sin(this.time * swingSpeed) * swingAmount;
 
+  // 添加轻微的旋转摆动
+  const rotationAmount = 0.09; // 弧度
+  const rotSwing = Math.sin(this.time * swingSpeed) * rotationAmount;
+
+  ctx.save();
+  ctx.translate(this.dragX, this.dragY);
+  ctx.rotate(rotSwing);
+  ctx.translate(-this.dragX, -this.dragY);
+
+  drawCard(ctx, {
+    x: this.dragX - size / 2 + swing,
+    y: this.dragY - size / 2,
+    w: size,
+    h: size
+  }, this.drag.cell, {
+    hovered: true,
+    scale: 1.1,
+  });
+
+  ctx.restore();
+}
     // Craft / Inventory panels can be opened right from the main menu, reusing
     // the same in-game panel drawers.
     this.renderBag();
     this.renderCraft();
-    if (this.bonusOpen) this.renderBonusModal();
-    this.settings.draw(ctx, W / 2, H / 2);
-    if (this.drag) {
-      const size = 60;
-      drawCard(ctx, { x: this.dragX - size / 2, y: this.dragY - size / 2, w: size, h: size }, this.drag.cell, {
-        hovered: true,
-        scale: 1.1,
-      });
-    }
+    // Bonus 面板（常驻主菜单，无按钮；参考 MainMenu._drawBonusPanel）。
+    // 桌面/手机版都在右上角（顶部栏已移到左上角，右上角空闲）。
+    // 面板区域点击不穿透（见 menuClick）。
+
 
     // Mobile: suggest fullscreen + show current control scheme
     if (this.isMobile) {
@@ -6170,41 +7040,190 @@ private bagLayout() {
       ctx.restore();
     }
 
-    // Draw last: this floating panel intentionally overlays every main-menu
-    // control while it is open.
+    // Draw last: these floating panels intentionally overlay every main-menu
+    // control while open.
     this.mobGallery.draw(ctx, this.time, W, H);
+    this.changelog.draw(ctx, W, H);
     // Account panel overlays everything when open.
     this.accountSystem.draw(ctx);
-  }
 
-  private bonusModalRect(): Rect {
-    const isMobileLayout = this.isMobile || this.w < 640;
-    const w = Math.min(isMobileLayout ? 300 : 350, this.w - 24);
-    const h = Math.min(isMobileLayout ? 240 : 290, this.h - 24);
-    return { x: (this.w - w) / 2, y: (this.h - h) / 2, w, h };
-  }
-
-  private renderBonusModal() {
-    const ctx = this.ctx;
-    const r = this.bonusModalRect();
-    ctx.save();
-    ctx.fillStyle = "rgba(0,0,0,0.55)";
-    ctx.fillRect(0, 0, this.w, this.h);
-    panel(ctx, r);
-    text(ctx, "DAILY LOOT BONUS", r.x + r.w / 2, r.y + 38, 24, "#ffe763");
-    text(ctx, `Streak: ${this.bonus.streakDays} day${this.bonus.streakDays === 1 ? "" : "s"}`, r.x + r.w / 2, r.y + 76, 17, "#ffffff");
-    if (this.bonus.isActive) {
-      text(ctx, `ACTIVE  ×${this.bonus.currentMultiplier}`, r.x + r.w / 2, r.y + 120, 28, "#73e58b");
-      text(ctx, `${this.bonus.remainingTimeText} remaining`, r.x + r.w / 2, r.y + 150, 17, "rgba(255,255,255,0.82)");
-      text(ctx, "Extra card copies apply to every mob drop.", r.x + r.w / 2, r.y + 184, 14, "rgba(255,255,255,0.72)");
-    } else {
-      text(ctx, `Today's reward: ×${this.bonus.nextBonusMultiplier} drops for 1 hour`, r.x + r.w / 2, r.y + 124, 17, "#ffffff");
-      text(ctx, "Claim once each day to build your streak.", r.x + r.w / 2, r.y + 157, 14, "rgba(255,255,255,0.72)");
+    // ─── "Coming soon" toast（未实现按钮的点击反馈）───
+    if (this.menuToast && this.time < this.menuToast.until) {
+      ctx.save();
+      const alphaT = Math.min(1, (this.menuToast.until - this.time) * 2.5);
+      ctx.globalAlpha = alphaT;
+      const tw = Math.min(300, W - 40);
+      const th = 44;
+      const tx = W / 2 - tw / 2;
+      const ty = H - 150;
+      roundRect(ctx, tx, ty, tw, th, 10);
+      ctx.fillStyle = 'rgba(20,24,34,0.92)';
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(255,231,99,0.6)';
+      ctx.stroke();
+      text(ctx, this.menuToast.text, W / 2, ty + th / 2, 15, '#ffe763');
+      ctx.restore();
+    } else if (this.menuToast) {
+      this.menuToast = null;
     }
-    const claim = { x: r.x + 28, y: r.y + r.h - 66, w: r.w - 56, h: 40 };
-    button(ctx, claim, this.bonus.isActive ? "BONUS ACTIVE" : this.bonus.canClaim() ? "CLAIM BONUS" : "COME BACK TOMORROW", this.bonus.isActive ? "#477c56" : "#d99a26", hit(claim, this.mx, this.my), 17);
-    ctx.restore();
   }
+
+  /**
+   * Bonus 面板（参考 MainMenu._drawBonusPanel）：绘制在右上角
+   * this.extraBonusButton 矩形内。适配本游戏的 BonusSystem API。
+   */
+  private _drawBonusPanel(ctx: CanvasRenderingContext2D, fontSize: number) {
+    const [px, py, pw, ph] = this.extraBonusButton;
+    const bonusSys = this.bonus;
+    if (!bonusSys) return;
+
+    // ===== 检测手机版 =====
+    const isMobile = this.isMobile || this.w < 640;
+    const scale = isMobile ? 0.7 : 1; // 手机版缩小到 70%
+
+    // 如果是手机版，调整面板位置和大小
+    let drawPx = px, drawPy = py, drawPw = pw, drawPh = ph;
+    if (isMobile) {
+        // 面板居中，缩小尺寸
+        const centerX = px + pw / 2;
+        const centerY = py + ph / 10;
+        drawPw = pw * scale;
+        drawPh = ph * scale;
+        drawPx = centerX - drawPw / 2;
+        drawPy = centerY - drawPh / 2;
+    }
+
+    const streakDays = bonusSys.streakDays || 0;
+    const canClaim = bonusSys.canClaim();
+    const isActive = bonusSys.isActive;
+    const currentMult = bonusSys.isActive ? bonusSys.currentMultiplier : 1;
+    const nextMult = bonusSys.nextBonusMultiplier;
+
+    let remainingTime = "00:00";
+    if (bonusSys.isActive) {
+        const remaining = Math.max(0, bonusSys.remainingSeconds || 0);
+        const minutes = Math.floor(remaining / 60);
+        const seconds = Math.floor(remaining % 60);
+        remainingTime = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+
+    const panelColor = [220, 170, 40];
+    const adj = (rgb: number[], f: number) => rgb.map(c => Math.max(0, Math.min(255, Math.floor(c * f))));
+
+    // 手机版字体缩小
+    const fs = isMobile ? fontSize * 0.7 : fontSize;
+    const titleFs = isMobile ? fs + 1 : fs + 2;
+    const multFs = isMobile ? fs + 3 : fs + 6;
+    const btnFs = isMobile ? fs - 3 : fs - 2;
+    const statusFs = isMobile ? fs - 5 : fs - 4;
+
+    ctx.fillStyle = `rgb(${adj(panelColor, 1.1).join(',')})`;
+    ctx.beginPath();
+    ctx.roundRect(drawPx, drawPy, drawPw, drawPh, 14 * (isMobile ? 0.7 : 1));
+    ctx.fill();
+
+    ctx.fillStyle = `rgb(${adj(panelColor, 0.78).join(',')})`;
+    ctx.beginPath();
+    ctx.roundRect(drawPx, drawPy, drawPw, drawPh / 2, 14 * (isMobile ? 0.7 : 1));
+    ctx.fill();
+
+    ctx.strokeStyle = `rgb(${adj(panelColor, 0.55).join(',')})`;
+    ctx.lineWidth = isMobile ? 2 : 4;
+    ctx.beginPath();
+    ctx.roundRect(drawPx, drawPy, drawPw, drawPh, 14 * (isMobile ? 0.7 : 1));
+    ctx.stroke();
+
+    // 标题
+    const titleY = drawPy + (isMobile ? 12 : 18);
+    this.drawStrokedText(ctx, `Daily Streak #${streakDays}`, drawPx + drawPw / 2, titleY, titleFs, 'center', 'white');
+
+    // 星星和倍数
+    const starY = drawPy + (isMobile ? 32 : 48);
+    const starSize = isMobile ? 14 : 20;
+    ctx.font = `${Math.floor(isMobile ? starSize : starSize + 12)}px ${FONT_FAMILY}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.strokeStyle = 'black';
+    ctx.lineWidth = isMobile ? 2 : 3;
+    ctx.strokeText('⭐', drawPx + drawPw / 2 - (isMobile ? 14 : 20), starY);
+    ctx.fillStyle = 'white';
+    ctx.fillText('⭐', drawPx + drawPw / 2 - (isMobile ? 14 : 20), starY);
+    this.drawStrokedText(ctx, `${nextMult}x`, drawPx + drawPw / 2 + (isMobile ? 12 : 18), starY, multFs, 'center', 'white');
+
+    // 按钮尺寸
+    const btnW = drawPw - (isMobile ? 12 : 20);
+    const btnH = Math.max(isMobile ? 18 : 24, drawPh * (isMobile ? 0.15 : 0.18));
+    const btn1X = drawPx + (isMobile ? 6 : 10);
+    const btn1Y = drawPy + (isMobile ? 46 : 70);
+
+    this._bonusClaimRect = [btn1X, btn1Y, btnW, btnH];
+    const claimHover = this.hoveredButton === 'bonus_claim';
+    let claimColor = canClaim ? (claimHover ? [255, 235, 100] : [255, 215, 0]) : (claimHover ? [180, 180, 180] : [140, 140, 140]);
+
+    // Claim 按钮
+    ctx.fillStyle = `rgb(${claimColor.join(',')})`;
+    ctx.beginPath();
+    ctx.roundRect(btn1X, btn1Y, btnW, btnH, isMobile ? 5 : 8);
+    ctx.fill();
+    ctx.fillStyle = `rgb(${adj(claimColor, 0.85).join(',')})`;
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(btn1X, btn1Y, btnW, btnH, isMobile ? 5 : 8);
+    ctx.clip();
+    ctx.fillRect(btn1X, btn1Y, btnW, btnH / 2);
+    ctx.restore();
+    ctx.strokeStyle = `rgb(${adj(claimColor, 0.65).join(',')})`;
+    ctx.lineWidth = isMobile ? 2 : 3;
+    ctx.beginPath();
+    ctx.roundRect(btn1X, btn1Y, btnW, btnH, isMobile ? 5 : 8);
+    ctx.stroke();
+
+    const claimLabel = isMobile ? 'Claim' : 'Claim Rewards';
+    this.drawStrokedText(ctx, claimLabel, btn1X + btnW / 2, btn1Y + btnH / 2, btnFs, 'center', '#ffffff');
+
+    // Extra Bonus 按钮
+    const btn2X = drawPx + (isMobile ? 6 : 10);
+    const btn2Y = btn1Y + btnH + (isMobile ? 4 : 8);
+    this._bonusExtraRect = [btn2X, btn2Y, btnW, btnH];
+
+    const extraActive = (this.extraBonusActive && Date.now() < this.extraBonusExpireTime) ||
+                        this.extraBonusPermanent || this.rubyMembershipActive;
+    const extraHover = this.hoveredButton === 'bonus_extra';
+    let extraColor: number[], extraText: string;
+    if (extraActive) {
+        extraColor = extraHover ? [80, 180, 80] : [60, 160, 60];
+        extraText = isMobile ? `Extra (${remainingTime})` : `Extra Bonus (${remainingTime})`;
+    } else {
+        extraColor = extraHover ? [150, 150, 150] : [120, 120, 120];
+        extraText = isMobile ? 'Extra (inactive)' : 'Extra Bonus (inactive)';
+    }
+
+    ctx.fillStyle = `rgb(${extraColor.join(',')})`;
+    ctx.beginPath();
+    ctx.roundRect(btn2X, btn2Y, btnW, btnH, isMobile ? 5 : 8);
+    ctx.fill();
+    ctx.fillStyle = `rgb(${adj(extraColor, 0.75).join(',')})`;
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(btn2X, btn2Y, btnW, btnH, isMobile ? 5 : 8);
+    ctx.clip();
+    ctx.fillRect(btn2X, btn2Y, btnW, btnH / 2);
+    ctx.restore();
+    ctx.strokeStyle = `rgb(${adj(extraColor, 0.55).join(',')})`;
+    ctx.lineWidth = isMobile ? 2 : 3;
+    ctx.beginPath();
+    ctx.roundRect(btn2X, btn2Y, btnW, btnH, isMobile ? 5 : 8);
+    ctx.stroke();
+    this.drawStrokedText(ctx, extraText, btn2X + btnW / 2, btn2Y + btnH / 2, btnFs, 'center', 'white');
+
+    // 底部状态文字
+    if (isActive) {
+        const statusY = drawPy + drawPh - (isMobile ? 6 : 8);
+        const statusText = isMobile ? `${currentMult}x ${remainingTime}` : `Active: ${currentMult}x  ·  ${remainingTime}`;
+        this.drawStrokedText(ctx, statusText, drawPx + drawPw / 2, statusY, statusFs, 'center', 'rgba(255,255,255,0.8)');
+    }
+}
 
   private field(x: number, y: number, w: number, h: number, value: string, placeholder: string, focused: boolean) {
     const ctx = this.ctx;
@@ -6246,12 +7265,16 @@ private bagLayout() {
     const antBonus = antennaeViewBonus(this.slots);
     this.viewZoom = Math.max(0.35, zoom - antBonus);
 
-    // Draw background
+    // 地面每帧直接绘制（不缓存）；cache canvas 只缓存墙壁（drawWallsCached），
+    // 每帧 blit 一张 drawImage，重建时先清理上一帧。
     const groundColor = BIOME_BACKGROUNDS[this.currentBiome]?.ground_color || [30, 174, 99];
     if (this.currentBiome === "Ocean" || this.currentBiome === "Desert") {
       this.drawWavesDirect(ctx, { x: this.camX, y: this.camY }, groundColor);
     } else {
       this.drawBackgroundPattern(ctx, { x: this.camX, y: this.camY }, groundColor);
+    }
+    if (this.settings.cacheCanvas) {
+      this.drawWallsCached(ctx, { x: this.camX, y: this.camY });
     }
 
     ctx.save();
@@ -6270,8 +7293,8 @@ private bagLayout() {
     ctx.fillRect(-ob, this.camY - viewH, ob, viewH * 2);
     ctx.fillRect(this.worldW, this.camY - viewH, ob, viewH * 2);
 
-    // walls
-    this.drawWallsFromData(ctx, { x: this.camX, y: this.camY });
+    // walls（缓存开启时由 drawWallsCached blit 墙壁缓存，避免重复绘制）
+    if (!this.settings.cacheCanvas) this.drawWallsFromData(ctx, { x: this.camX, y: this.camY });
 
     // entities
     const list = [...this.ents.values()].sort((a, b) => a.kind - b.kind || a.y - b.y);
@@ -6282,6 +7305,7 @@ private bagLayout() {
       if (e.kind === ENT.PETAL) this.drawPetalEnt(e);
       else if (e.kind === ENT.MOB) this.drawMobEnt(e);
       else if (e.kind === ENT.PLAYER) this.drawPlayerEnt(e);
+      else if (e.kind === ENT.PROJECTILE) this.drawProjectileEnt(e);
     }
 
     // Draw the burst produced when a Rose reaches the flower.
@@ -6314,20 +7338,43 @@ private bagLayout() {
       ctx.restore();
       text(ctx, map.name, this.w / 2, this.h / 2 - 120, 44 + (1 - this.mapFlash) * 6, "#ffffff");
     }
-
+    // Chat system overlay (bottom-left, above hotbar)
+    this.chat.width = Math.min(400, this.w * 0.35);
+    // 手机版：再往上抬一点（在快捷栏上面一点点）
+    const chatLift = this.isMobile || this.w < 640 ? 76 : 50;
+    this.chat.draw(this.ctx, this.h - this.hotbarHeight() + chatLift);
     this.renderHud();
     this.renderBag();
     this.renderCraft();
-    // Chat system overlay (bottom-left, above hotbar)
-    this.chat.width = Math.min(400, this.w * 0.35);
-    this.chat.draw(this.ctx, this.h - this.hotbarHeight() + 50);
-    if (this.drag) {
-      const size = 60;
-      drawCard(ctx, { x: this.dragX - size / 2, y: this.dragY - size / 2, w: size, h: size }, this.drag.cell, {
-        hovered: true,
-        scale: 1.1,
-      });
-    }
+
+if (this.drag) {
+  const size = 60;
+  // 摆动动画：使用正弦波产生左右摆动
+  const swingAmount = 10; // 摆动幅度（像素）
+  const swingSpeed = 6; // 摆动速度
+  const swing = Math.sin(this.time * swingSpeed) * swingAmount;
+
+  // 添加轻微的旋转摆动
+  const rotationAmount = 0.09; // 弧度
+  const rotSwing = Math.sin(this.time * swingSpeed) * rotationAmount;
+
+  ctx.save();
+  ctx.translate(this.dragX, this.dragY);
+  ctx.rotate(rotSwing);
+  ctx.translate(-this.dragX, -this.dragY);
+
+  drawCard(ctx, {
+    x: this.dragX - size / 2 + swing,
+    y: this.dragY - size / 2,
+    w: size,
+    h: size
+  }, this.drag.cell, {
+    hovered: true,
+    scale: 1.1,
+  });
+
+  ctx.restore();
+}
     if (!this.alive) this.renderDeath();
     // The AFK prompt sits above the death screen: answering it matters even
     // while dead, since an idle corpse still holds a server slot.
@@ -6560,7 +7607,10 @@ private bagLayout() {
   }
 drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
     if (!this.walls.length) return;
-
+    if (this.settings.lowQualityWall) {
+        this.drawWallsLegacy(ctx, c);
+        return;
+    }
     const cx = Math.round(c.x * 100) / 100;
     const cy = Math.round(c.y * 100) / 100;
     const viewScale = Math.round((this.viewZoom || 1) * 100) / 100;
@@ -6699,134 +7749,143 @@ drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
 
     ctx.restore();
 }
-  _drawWallsLegacy(ctx: CanvasRenderingContext2D, cameraOffset: { x: number; y: number }, wallData: string) {
-    const size = Math.sqrt(wallData.length) | 0;
+  private drawWallsLegacy(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
+    if (!this.walls.length) return;
 
-    const cellW = this.worldW / size;
-    const cellH = this.worldH / size;
-
-    const cx = cameraOffset.x;
-    const cy = cameraOffset.y;
-
+    // Draw directly from the authoritative wall rectangles received from the
+    // sim. The previous renderer converted walls to a 64px raster first; that
+    // rounded every rectangle outward and could also cache an empty grid before
+    // the server's wall list arrived (Garden then had collision but no visible
+    // walls). Direct rectangles keep the drawn footprint identical to collision
+    // for every biome.
+    const cx = c.x;
+    const cy = c.y;
     const viewScale = this.viewZoom || 1;
     const vw = this.w / viewScale;
     const vh = this.h / viewScale;
-
     const left = cx - vw / 2;
     const right = cx + vw / 2;
     const top = cy - vh / 2;
     const bottom = cy + vh / 2;
+    const pad = 80 / viewScale;
 
-    const BUFFER_BLOCKS = 12;
-    const pad = cellW * BUFFER_BLOCKS * viewScale;
+    const visibleWalls = this.walls.filter((w) =>
+      w.x + w.w >= left - pad && w.x <= right + pad &&
+      w.y + w.h >= top - pad && w.y <= bottom + pad,
+    );
+    if (!visibleWalls.length) return;
+
+    if (!this.wallPattern || this._wallPatternBiome !== this.currentBiome) {
+      const s = 512, cv = document.createElement('canvas');
+      cv.width = cv.height = s;
+      const g = cv.getContext('2d');
+      if (g) {
+        const b = BIOME_BACKGROUNDS[this.currentBiome]?.wall_color || [80, 80, 80];
+        g.fillStyle = `rgb(${b[0]},${b[1]},${b[2]})`;
+        g.fillRect(0, 0, s, s);
+        g.fillStyle = `rgba(${Math.max(0, b[0] - 25)}, ${Math.max(0, b[1] - 25)}, ${Math.max(0, b[2] - 25)}, .5)`;
+        for (let i = 0; i < 17; i++) {
+          const r = 5 + Math.random() * 10;
+          const x = Math.random() * s;
+          const y = Math.random() * s;
+          g.beginPath();
+          g.arc(x, y, r, 0, Math.PI * 2);
+          g.fill();
+        }
+      }
+      this.wallPattern = ctx.createPattern(cv, 'repeat');
+      this._wallPatternBiome = this.currentBiome;
+    }
+
+    const path = new Path2D();
+    for (const w of visibleWalls) path.rect(w.x, w.y, w.w, w.h);
+    const exteriorPath = this.wallExteriorPath(visibleWalls, this.walls);
 
     const bgConfig = BIOME_BACKGROUNDS[this.currentBiome];
     const wallColor = bgConfig?.wall_color || [80, 80, 80];
-
-    // 初始化 Pattern
-    if (!this._wallPatternLegacy || this._wallPatternLegacyBiome !== this.currentBiome) {
-        const s = 512, cv = document.createElement('canvas');
-        cv.width = cv.height = s;
-        const g = cv.getContext('2d');
-        if (g) {
-          g.fillStyle = `rgb(${wallColor[0]},${wallColor[1]},${wallColor[2]})`;
-          g.fillRect(0, 0, s, s);
-
-          g.fillStyle = `rgba(${Math.max(0, wallColor[0] - 25)}, ${Math.max(0, wallColor[1] - 25)}, ${Math.max(0, wallColor[2] - 25)}, .5)`;
-          for (let i = 0; i < 17; i++) {
-              const r = 5 + Math.random() * 10;
-              const x = Math.random() * s;
-              const y = Math.random() * s;
-              g.beginPath();
-              g.arc(x, y, r, 0, Math.PI * 2);
-              g.fill();
-          }
-        }
-
-        this._wallPatternLegacy = ctx.createPattern(cv, 'repeat');
-        this._wallPatternLegacyBiome = this.currentBiome;
-    }
-
-    // 计算颜色（匹配高质量模式）
     const darkColor = `rgb(${Math.max(0, wallColor[0] - 50)}, ${Math.max(0, wallColor[1] - 50)}, ${Math.max(0, wallColor[2] - 50)})`;
     const groundColor = bgConfig?.ground_color || [80, 80, 80];
-    const lightColor = `rgba(${Math.min(255, groundColor[0] - 30)}, ${Math.min(255, groundColor[1] - 30)}, ${Math.min(255, groundColor[2] - 30)}, 0.4)`;
-
-    // renderGame already applied the camera transform, so cells are drawn at
-    // raw world coordinates (no second -camera offset) and the pattern stays
-    // aligned without a counter-translation.
-    ctx.save();
-    ctx.lineJoin = 'round';
-    ctx.lineCap = 'round';
-
-    // Border widths are authored in screen pixels but stroked in world space.
+    const lightColor = `rgba(${Math.max(0, groundColor[0] - 30)}, ${Math.max(0, groundColor[1] - 30)}, ${Math.max(0, groundColor[2] - 30)}, 0.4)`;
     const outlineScale = 1 / viewScale;
 
-    const startX = Math.max(0, Math.floor((left - pad) / cellW));
-    const endX = Math.min(size, Math.ceil((right + pad) / cellW));
-    const startY = Math.max(0, Math.floor((top - pad) / cellH));
-    const endY = Math.min(size, Math.ceil((bottom + pad) / cellH));
+    ctx.save();
+    ctx.lineJoin = 'round';
+    // Exterior sides are stroked as individual path segments after internal
+    // shared spans have been removed. Butt caps prevent rounded caps from
+    // showing at places where two neighbouring wall rectangles meet.
+    ctx.lineCap = 'butt';
 
-    // ==========================================
-    // 步骤 1：第一圈粗边 —— 浅色外部框 (36px)
-    // ==========================================
-    ctx.strokeStyle = lightColor;
-    ctx.lineWidth = 36 * outlineScale;
-    for (let y = startY; y < endY; y++) {
-        for (let x = startX; x < endX; x++) {
-            if (wallData[y * size + x] === '1') {
-                const px = x * cellW;
-                const py = y * cellH;
-                ctx.strokeRect(px, py, cellW, cellH);
-            }
-        }
+    // Clip all decoration to the wall path. This prevents the art from
+    // extending past the collision rectangles, which made Desert/Ocean walls
+    // appear larger than the actual blocked area.
+    ctx.clip(path);
+    ctx.fillStyle = this.wallPattern || `rgb(${wallColor[0]},${wallColor[1]},${wallColor[2]})`;
+    ctx.fill(path);
+
+    if (!this.settings.lowQualityWall) {
+      ctx.strokeStyle = lightColor;
+      ctx.lineWidth = 28 * outlineScale;
+      ctx.stroke(exteriorPath);
     }
 
-    // ==========================================
-    // 步骤 2：第一遍填充 —— 盖掉向内侵入的浅色边
-    // ==========================================
-    if (this._wallPatternLegacy) {
-      ctx.fillStyle = this._wallPatternLegacy;
-    }
-    for (let y = startY; y < endY; y++) {
-        for (let x = startX; x < endX; x++) {
-            if (wallData[y * size + x] === '1') {
-                const px = x * cellW;
-                const py = y * cellH;
-                ctx.fillRect(px - 0.5, py - 0.5, cellW + 1, cellH + 1);
-            }
-        }
-    }
-
-    // ==========================================
-    // 步骤 3：第二圈粗边 —— 深色内部框 (12px)
-    // ==========================================
     ctx.strokeStyle = darkColor;
-    ctx.lineWidth = 12 * outlineScale;
-    for (let y = startY; y < endY; y++) {
-        for (let x = startX; x < endX; x++) {
-            if (wallData[y * size + x] === '1') {
-                const px = x * cellW;
-                const py = y * cellH;
-                ctx.strokeRect(px, py, cellW, cellH);
-            }
-        }
-    }
-
-    // ==========================================
-    // 步骤 4：最终填充 —— 盖掉向内侵入的深色边，留下纯正图案
-    // ==========================================
-    for (let y = startY; y < endY; y++) {
-        for (let x = startX; x < endX; x++) {
-            if (wallData[y * size + x] === '1') {
-                const px = x * cellW;
-                const py = y * cellH;
-                ctx.fillRect(px - 0.5, py - 0.5, cellW + 1, cellH + 1);
-            }
-        }
-    }
+    ctx.lineWidth = (this.settings.lowQualityWall ? 4 : 10) * outlineScale;
+    ctx.stroke(exteriorPath);
 
     ctx.restore();
+  }
+
+
+  /**
+   * 墙壁缓存：cache canvas 只缓存墙壁（不缓存地面）。
+   * 相机跨瓦片 / 缩放 / 换图 / 墙壁数量变化时重建；重建前先 clearRect
+   * 清理上一帧，避免残留旧墙壁像素。地面每帧直接绘制，墙壁每帧 blit
+   * 一张 drawImage。
+   */
+  private drawWallsCached(
+    context: CanvasRenderingContext2D,
+    cameraOffset: { x: number; y: number },
+  ) {
+    const w = this.w, h = this.h, zoom = this.viewZoom || 1;
+    // Cache tile = a chunk in world space. We rebuild the bitmap when the
+    // camera crosses a tile boundary so the cached content stays accurate
+    // even though it is only re-rasterised occasionally.
+    const tile = 256;
+    const tileX = Math.floor(cameraOffset.x / tile);
+    const tileY = Math.floor(cameraOffset.y / tile);
+    const key = `${this.mapId}|${this.currentBiome}|${zoom.toFixed(3)}|${tileX}|${tileY}|${this.walls.length}`;
+    if (
+      !this._groundWallCache ||
+      this._groundWallCache.width !== w ||
+      this._groundWallCache.height !== h ||
+      this._groundWallCacheKey !== key ||
+      this._groundWallCacheBiome !== this.currentBiome ||
+      this._groundWallCacheMap !== this.mapId
+    ) {
+      if (!this._groundWallCache || this._groundWallCache.width !== w || this._groundWallCache.height !== h) {
+        this._groundWallCache = document.createElement("canvas");
+        this._groundWallCache.width = w;
+        this._groundWallCache.height = h;
+        this._groundWallCtx = this._groundWallCache.getContext("2d");
+      }
+      const off = this._groundWallCtx;
+      if (!off || !this._groundWallCache) return;
+      // 清理上一帧（旧墙壁像素），避免残留
+      off.setTransform(1, 0, 0, 1, 0, 0);
+      off.clearRect(0, 0, w, h);
+      off.save();
+      off.translate(w / 2, h / 2);
+      off.scale(zoom, zoom);
+      off.translate(-cameraOffset.x, -cameraOffset.y);
+      // 只缓存墙壁：复用实时绘制函数（drawWallsFromData），
+      // 保证与关闭缓存时的外观完全一致。世界变换已在上方设置。
+      this.drawWallsFromData(off, cameraOffset);
+      off.restore();
+      this._groundWallCacheKey = key;
+      this._groundWallCacheBiome = this.currentBiome;
+      this._groundWallCacheMap = this.mapId;
+    }
+    if (this._groundWallCache) context.drawImage(this._groundWallCache, 0, 0);
   }
 
   drawWavesDirect(context: CanvasRenderingContext2D, cameraOffset: { x: number; y: number }, groundColor: [number, number, number]) {
@@ -7122,14 +8181,69 @@ drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
     const bob = Math.sin(this.time * 4 + e.id) * 3;
     const size = 46;
     const stack = Math.max(1, Math.round(e.hp * 255));
+
+    // 只有"确定被玩家吸"（服务器标记 suction，即掉落物落入磁铁吸取范围、
+    // 正在被快速吸向玩家）的掉落物才会缩小淡出；玩家靠近但未被吸取时
+    // 保持原大小、完全不透明。
+    let scale = 1;
+    let alpha = 1;
+    if (e.suction) {
+      const me = this.ents.get(this.selfId);
+      if (me) {
+        const dx = me.x - e.x;
+        const dy = me.y - e.y;
+        const d = Math.hypot(dx, dy);
+        const SUCK_START = 220; // world px — start shrinking at this distance
+        const SUCK_END = 24;    // world px — fully gone once this close
+        if (d < SUCK_START) {
+          const t = Math.max(0, Math.min(1, (d - SUCK_END) / (SUCK_START - SUCK_END)));
+          scale = 0.2 + t * 0.8;   // 0.2x near the player → 1.0x at SUCK_START
+          alpha = 0.25 + t * 0.75;
+        }
+      }
+    }
+
+    const finalSize = size * scale;
+    this.ctx.save();
+    this.ctx.globalAlpha = alpha;
     drawCard(
       this.ctx,
-      { x: e.x - size / 2, y: e.y - size / 2 + bob, w: size, h: size },
+      { x: e.x - finalSize / 2, y: e.y - finalSize / 2 + bob * scale, w: finalSize, h: finalSize },
       { item: e.type, rarity: e.team, count: stack },
       { dim: 0.94 },
     );
-    }
+    this.ctx.restore();
+  }
 
+private drawProjectileEnt(e: Ent) {
+  const ctx = this.ctx;
+  ctx.save();
+  ctx.translate(e.x, e.y);
+  ctx.rotate(e.angle + Math.PI);
+  // 判断来源类型
+  const isFromItem = e.type === 52;
+  const isFromEnemy = e.type === 16 || e.type === 5;
+
+  // 大小：物品固定，生物随稀有度缩放
+  const scale = isFromItem ? 0.4 : (0.3 + (e.rarity || 0) * 0.15);
+
+  // ---- 绘制 Missile 形状 ----
+  ctx.beginPath();
+  ctx.moveTo(-50 * scale, 0);
+  ctx.lineTo(10 * scale, -20 * scale);
+  ctx.lineTo(10 * scale, 20 * scale);
+  ctx.closePath();
+
+  const color = '#3a3a3a';
+
+  ctx.fillStyle = color;
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 15 * scale;
+  ctx.strokeStyle = color;
+  ctx.stroke();
+  ctx.fill();
+  ctx.restore();
+}
   private drawPetalEnt(e: Ent) {
     const ctx = this.ctx;
     // Petal snapshots pack the cell rarity into the team byte (see sendState),
@@ -7275,33 +8389,159 @@ drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
   private renderHud() {
     const ctx = this.ctx;
     const shortMobile = this.isMobile && this.w > this.h && this.h <= 600;
-    // xp / level bar
-    const barW = shortMobile ? Math.min(238, this.w * 0.38) : Math.min(340, this.w * 0.32);
-    const statusH = shortMobile ? 54 : 66;
-    panel(ctx, { x: 16, y: 16, w: barW, h: statusH }, "rgba(18,24,32,0.75)");
-    const need = xpForLevel(this.level + 1);
-    const prev = xpForLevel(this.level);
-    const pct = Math.max(0, Math.min(1, (this.xp - prev) / Math.max(1, need - prev)));
-    text(ctx, `Lv ${this.level} ${this.playerName}`, 30, shortMobile ? 32 : 36, shortMobile ? 14 : 16, "#ffe763", "left");
-    healthBar(ctx, 30, shortMobile ? 43 : 50, barW - 28, shortMobile ? 12 : 14, pct, "#ffd34a");
-    text(ctx, `${this.xp} XP`, 30 + (barW - 28) / 2, shortMobile ? 49 : 57, shortMobile ? 9 : 11, "#3a2b00");
+    // HUD scale: shrink the entire top-left player panel (avatar, HP, XP)
+    // on mobile or narrow viewports so it doesn't dominate the screen.
+    // Desktop keeps the original size; phones with h<=600 get a tighter
+    // ~0.55x scale that still leaves every label readable.
+    let hudScale = 1;
+    if (this.isMobile || this.w < 640) {
+      if (this.h <= 600 && this.w > this.h) hudScale = 0.55;
+      else hudScale = 0.75;
+    }
+    const _s = (v: number) => v * hudScale;
+    // 左上角玩家信息面板（参照目标 UI 排版）
+    const avatarSize = 60;
+    const VAvatarSize = _s(60);
+const avatarX = _s(20);
+const avatarY = _s(20);
 
-    // health — sits just above the dual-row hotbar
-    const hpW = Math.min(300, this.w * 0.28);
-    const hpY = this.h - this.hotbarHeight() - 26;
-    healthBar(ctx, this.w / 2 - hpW / 2, hpY, hpW, 18, this.hp / Math.max(1, this.maxHp), "#57e36a");
-    // Shield bar: white bar centered within the health bar (max shield = maxHp).
+
+// 头像 - 绘制玩家花朵
+const avatarCX = avatarX + VAvatarSize / 2;
+const avatarCY = avatarY + VAvatarSize;
+const me = this.ents.get(this.selfId);
+if (me) {
+    ctx.save();
+    // 计算当前玩家的 spread/contract 状态（复用 drawPlayerEnt 的逻辑）
+    const uiBusy = this.drag !== null;
+    const isSpaceDown = this.keys.has("Space") || this.mobileSpreadActive;
+    const isShiftDown = this.keys.has("ShiftLeft") || this.keys.has("ShiftRight") || this.keys.has("Shift") || this.mobileContractActive;
+    const spreadMode = (this.mouseDown && !uiBusy) || isSpaceDown;
+    const contractMode = this.rightDown || isShiftDown;
+    const worldMouseX = (this.mx - this.w / 2) / this.viewZoom + this.camX;
+    const worldMouseY = (this.my - this.h / 2) / this.viewZoom + this.camY;
+
+    // 创建临时 ent 用于绘制
+    const tempEnt: Ent = {
+        ...me,
+        x: avatarCX,
+        y: avatarCY,
+        radius: _s(avatarSize / 2 - 4),
+        spreadMode,
+        contractMode,
+        mousePosition: { x: worldMouseX, y: worldMouseY },
+        health: this.hp,
+        maxHealth: this.maxHp,
+    };
+
+    drawDefaultSkin(ctx, avatarCX, avatarCY, _s(avatarSize / 2 - 4), tempEnt);
+
+    // 绘制触角和第三只眼（复用 drawPlayerEnt 中的逻辑）
+    let bestAnt = -1, bestEye = -1;
+    for (let i = 0; i < this.slots.length; i++) {
+        const cell = this.slots[i];
+        if (!cell) continue;
+        if (cell.item === ANTENNAE_ITEM && cell.rarity > bestAnt) bestAnt = cell.rarity;
+        if (cell.item === THIRD_EYE_ITEM && cell.rarity > bestEye) bestEye = cell.rarity;
+    }
+    if (bestAnt >= 0) drawPlayerAntennae(ctx, avatarCX, avatarCY, _s(avatarSize / 2 - 5), bestAnt, this.time);
+    if (bestEye >= 0) drawPlayerThirdEye(ctx, avatarCX, avatarCY, _s(avatarSize / 2 - 5), bestEye, this.time);
+
+    ctx.restore();
+} else {
+
+    ctx.save();
+    ctx.fillStyle = "#2a2a2a";
+    ctx.beginPath();
+    ctx.arc(avatarCX, avatarCY, avatarSize / 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#4CAF50";
+    ctx.lineWidth = _s(3);
+    ctx.stroke();
+    ctx.fillStyle = "#ffffff";
+    ctx.font = `bold ${_s(24)}px ${FONT_FAMILY || "Arial"}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    const initial = this.playerName ? this.playerName.charAt(0).toUpperCase() : "P";
+    ctx.fillText(initial, avatarCX, avatarCY);
+    ctx.restore();
+}
+    ctx.lineWidth = _s(1.4);
+    // 用户名
+    ctx.fillStyle = "#4CAF50";
+    ctx.font = `bold ${_s(22)}px ${FONT_FAMILY || "Arial"}`;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+        ctx.strokeText(`@${this.playerName}`, avatarX + avatarSize + _s(14), avatarY + _s(30));
+    ctx.fillText(`@${this.playerName}`, avatarX + avatarSize + _s(14), avatarY + _s(30));
+
+
+    // 血条背景
+    const barX = avatarX + avatarSize + _s(15);
+    const barY = avatarY + _s(40);
+    const barW = _s(250);
+    const barH = _s(26);
+    roundRect(ctx, barX, barY, barW, barH, _s(20));
+    ctx.fillStyle = "#333333";
+    ctx.fill();
+
+    // 血条
+    const hpPct = Math.max(0, Math.min(1, this.hp / Math.max(1, this.maxHp)));
+    const hpBarW = _s(240) * hpPct;
+    if (hpBarW > 0) {
+      roundRect(ctx, barX + _s(5), barY + _s(3), hpBarW, _s(20), _s(16));
+      ctx.fillStyle = "#8BC34A";
+      ctx.fill();
+    }
+
+    // 护盾条（叠加在血条内部）
     if (this.shield > 0) {
       const shieldPct = Math.min(1, this.shield / Math.max(1, this.maxHp));
-      const shieldW = (hpW - 4) * shieldPct;
-      const shieldX = this.w / 2 - shieldW / 2;
-      ctx.save();
-      roundRect(ctx, shieldX, hpY + 6, shieldW, 6, 3);
-      ctx.fillStyle = "rgba(255,255,255,0.85)";
-      ctx.fill();
-      ctx.restore();
+      const shieldW = _s(230) * shieldPct;
+      if (shieldW > 0) {
+        roundRect(ctx, barX + _s(6), barY + _s(5), shieldW, _s(16), _s(16));
+        ctx.fillStyle = "rgba(255,255,255,0.9)";
+        ctx.fill();
+      }
     }
-    text(ctx, `${Math.max(0, Math.round(this.hp))} / ${this.maxHp}`, this.w / 2, hpY + 9, 12, "#ffffff");
+
+    // 血条文字
+    ctx.fillStyle = "#ffffff";
+    ctx.font = `bold ${_s(15)}px ${FONT_FAMILY || "Arial"}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.strokeText(`${Math.max(0, Math.round(this.hp))} / ${this.maxHp}`, barX + barW / 2, barY + barH / 2);
+    ctx.fillText(`${Math.max(0, Math.round(this.hp))} / ${this.maxHp}`, barX + barW / 2, barY + barH / 2);
+
+    // 等级背景
+    const lvlX = barX;
+    const lvlY = barY + barH + _s(8);
+    const lvlW = _s(150);
+    const lvlH = _s(20);
+    roundRect(ctx, lvlX, lvlY, lvlW, lvlH, _s(20));
+
+    ctx.fillStyle = "#333333";
+    ctx.fill();
+
+    // 等级进度
+    const need = xpForLevel(this.level + 1);
+    const prev = xpForLevel(this.level);
+    const xpPct = Math.max(0, Math.min(1, (this.xp - prev) / Math.max(1, need - prev)));
+    const xpW = _s(130) * xpPct;
+    if (xpW > 0) {
+      roundRect(ctx, lvlX + _s(3), lvlY + _s(2), xpW, _s(16), _s(16));
+      ctx.fillStyle = "#FFC107";
+      ctx.fill();
+    }
+
+    // 等级文字
+    ctx.fillStyle = "#FFFFFF";
+    ctx.font = `bold ${_s(14)}px ${FONT_FAMILY || "Arial"}`;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.strokeText(`Level ${this.level}`, lvlX + _s(20), lvlY + lvlH / 2);
+    ctx.fillText(`Level ${this.level}`, lvlX + _s(20), lvlY + lvlH / 2);
+    ctx.fillStyle = "#aaaaaa";
 
     // buttons
     for (const b of this.hudButtons()) button(ctx, b.rect, b.label, b.color, hit(b.rect, this.mx, this.my), shortMobile ? 13 : 16);
@@ -7818,8 +9058,7 @@ drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
     const submitting = this.craftPhase === "rotating" || this.craftPhase === "waiting";
     const spin = this.craftSpin > 0 ? ease.inOutCubic(1 - this.craftSpin / 0.8) * Math.PI * 2 : 0;
 
-    text(ctx, "Combine cards to upgrade rarity", p.x + p.w * 0.38, layout.craftBottom - 46 * layout.scale, 11 * layout.scale, "rgba(255,255,255,0.85)");
-    text(ctx, "Click: load 5 cards · Shift+click: load all (unlimited)", p.x + p.w * 0.38, layout.craftBottom - 34 * layout.scale, 9 * layout.scale, "rgba(255,255,255,0.55)");
+    text(ctx, "Click: load 5 cards · Shift+click: load all (unlimited)", p.x + p.w * 0.38, layout.craftBottom - 18 * layout.scale, 9 * layout.scale, "rgba(255,255,255,0.55)");
 
     // Draw animated slots (pentagon with rotation/contraction)
     layout.bigSlots.forEach((baseRect, i) => {
@@ -7870,7 +9109,7 @@ drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
     const y = layout.infoY;
     const sc = layout.scale;
     if (!sel) {
-      text(ctx, "Pick a card from inventory below", layout.cx, y + 10 * sc, 12 * sc, "rgba(255,255,255,0.75)");
+      text(ctx, "Pick a card from inventory below", layout.cx, y - 45 * sc, 12 * sc, "rgba(255,255,255,0.75)");
       return;
     }
     const def = ITEMS[sel.item];
@@ -8121,7 +9360,7 @@ drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
     ctx.fillStyle = "rgba(8,10,14,0.66)";
     ctx.fillRect(0, 0, this.w, this.h);
     text(ctx, "You were shredded!", this.w / 2, this.h / 2 - 70, 42, "#ff8080");
-    text(ctx, `Level ${this.level} · ${this.xp} XP · you keep 100% on respawn`, this.w / 2, this.h / 2 - 20, 17, "#ffffff");
+    text(ctx, `click Respawn to continue`, this.w / 2, this.h / 2 - 20, 17, "#ffffff");
     const bw = 180;
     const cx = this.w / 2;
     const r1 = { x: cx - bw - 10, y: this.h / 2 + 40, w: bw, h: 52 };

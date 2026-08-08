@@ -509,19 +509,19 @@ case 5: { // Bubble — 透明泡泡
       // Authored with leaf ellipses 40x60 at r=65 plus a r=28 hub. The measured
       // ink box is 203x223 centered on (22.5, -0.5), so scale by its half-height
       // and shift by that offset to sit dead center in the cell.
-      const k = (size * 1.2) / 111.5;
+      const k = (size * 1.1) / 100;
       ctx.save();
       ctx.scale(k, k);
-      ctx.translate(-22.5, 0.5);
+      ctx.translate(-10, 0.5);
       const leaf = (a: number) => {
         ctx.save();
         ctx.rotate(a);
         ctx.beginPath();
-        ctx.ellipse(0, -65, 40, 60, 0, 0, Math.PI * 2);
+        ctx.ellipse(0, -65, 45, 65, 0, 0, Math.PI * 2);
         ctx.fillStyle = "#2d6833";
         ctx.fill();
         ctx.beginPath();
-        ctx.ellipse(0, -65, 30, 50, 0, 0, Math.PI * 2);
+        ctx.ellipse(0, -65, 20, 40, 0, 0, Math.PI * 2);
         ctx.fillStyle = "#4e9a52";
         ctx.fill();
         ctx.restore();
@@ -1130,7 +1130,7 @@ case 46: { // Orange — three oranges with leaves
   // spin 是旋转角度，世界绘制时 spin 会随时间变化（有数值），卡片绘制时 spin = 0
   const isWorld = Math.abs(spin) > 0.01;
 
-  const R2 = isWorld ? 8 : 14;
+  const R2 = isWorld ? 8 : 13;
   const spacing = isWorld ? size * 0.35 : size * 0.5;
 
   const drawOrangeWithLeaf = (ox2: number, oy2: number, rotation: number) => {
@@ -1141,7 +1141,7 @@ case 46: { // Orange — three oranges with leaves
     ctx.arc(0, 0, R2, 0, Math.PI * 2);
     ctx.fillStyle = def.color;
     ctx.fill();
-    ctx.lineWidth = Math.max(2, R2 * 0.18);
+    ctx.lineWidth = Math.max(3, R2 * 0.25);
     ctx.strokeStyle = def.outline;
     ctx.stroke();
 
@@ -1190,6 +1190,28 @@ case 46: { // Orange — three oranges with leaves
           ctx.stroke();
       break;
     }
+    case 52: {
+
+  const scale = size/40
+
+  // ---- 绘制 Missile 形状 ----
+  ctx.beginPath();
+  ctx.moveTo(-40 * scale, 0);
+  ctx.lineTo(30 * scale, -20 * scale);
+  ctx.lineTo(30 * scale, 20 * scale);
+  ctx.closePath();
+
+  const color = '#3a3a3a';
+
+  ctx.fillStyle = color;
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 15 * scale;
+  ctx.strokeStyle = color;
+  ctx.stroke();
+  ctx.fill();
+
+      break;
+    }
     default: {
       switch (def.shape) {
         case "circle": {
@@ -1226,7 +1248,7 @@ case 46: { // Orange — three oranges with leaves
           if (isCircleEgg) {
             // Draw circle arrangement
             const overlapPercent = 0.15 + 0.05 * count;
-            const shapeRadius = size * 0.79; // Eggs 15% smaller (was 0.935) — rounded to 2 s.f.
+            const shapeRadius = size * 0.75; // Eggs 15% smaller (was 0.935) — rounded to 2 s.f.
             const effectiveDiameter = shapeRadius * 2 * (1 - overlapPercent);
             let centerDistance = 0;
             if (count === 1) {
@@ -1247,12 +1269,13 @@ case 46: { // Orange — three oranges with leaves
               ctx.beginPath();
               ctx.arc(ex, ey, shapeRadius, 0, Math.PI * 2);
               ctx.fill();
+              ctx.lineWidth =  shapeRadius * 0.35;
               ctx.stroke();
             }
           } else {
             // Draw narrow ellipse arrangement
             const overlapPercent = 0.15;
-            const shapeRadius = size * 1.04; // Ellipse eggs 15% smaller (was 1.224) — rounded to 2 s.f.
+            const shapeRadius = size * 1.05; // Ellipse eggs 15% smaller (was 1.224) — rounded to 2 s.f.
             const rx = shapeRadius * 0.6; // 较短的半径
             const ry = shapeRadius;       // 较长的半径
             const angleStep = (Math.PI * 2) / count;
@@ -1274,6 +1297,7 @@ case 46: { // Orange — three oranges with leaves
               ctx.beginPath();
               ctx.ellipse(ex, ey, rx, ry, 0, 0, Math.PI * 2);
               ctx.fill();
+              ctx.lineWidth =  shapeRadius * 0.23;
               ctx.stroke();
             }
           }
@@ -2038,7 +2062,8 @@ const drawCrab = () => {
     const arc = 24 * scale / 3;
     const xFL = -wFront / 2, xFR = wFront / 2, xBL = -wBack / 2, xBR = wBack / 2;
     const yF = -H / 2, yB = H / 2;
-
+ctx.lineJoin = 'round';
+ctx.lineCap = 'round';
     ctx.fillStyle = css(bodyColor);
     ctx.strokeStyle = css(bodyStrokeColor);
     ctx.lineWidth = 8 * scale / 2;
@@ -2339,67 +2364,106 @@ const drawSoldierAnt = () => {
     ctx.restore();
     ctx.restore();
   };
-
-  const drawCactus = () => {
+const drawCactus = () => {
     const scaledSize = (radius * 2) / 1.4;
     const cactusColor = friendly ? [255, 215, 0] : [100, 200, 100];
     const outlineColor = friendly ? [200, 160, 0] : [50, 150, 50];
+
+    // 刺的数量随稀有度增加
     const baseSpikes = 8;
     const spikesPerRarity = 2;
     const spikeCount = Math.max(8, baseSpikes + rarity * spikesPerRarity);
-    const baseRadius = scaledSize * 0.6;
-    const spikeHeight = scaledSize * 0.2;
-    const currentBaseRadius = baseRadius + Math.sin(t * 3) * 1.5;
-    const angleStep = (Math.PI * 2) / spikeCount;
-    const spikeWidthFactor = 0.3;
-    const tips: { x: number; y: number; angle: number }[] = [];
+
+    // 星形身体参数（八瓣）
+    const outerRadius = scaledSize * 0.6;
+    const innerRadius = outerRadius * (40 / 52);
+    const points = spikeCount;
+    const angleStep = (Math.PI * 2) / points;
+    const spikeHeight = scaledSize * 0.1;
+
     ctx.save();
-    for (let i = 0; i < spikeCount; i++) {
-      const a = i * angleStep;
-      tips.push({ x: x + Math.cos(a) * (currentBaseRadius + spikeHeight), y: y + Math.sin(a) * (currentBaseRadius + spikeHeight), angle: a });
+
+    // ===== 1. 计算刺的位置（从星形尖端伸出） =====
+    const tips: { x: number; y: number; angle: number; tipX: number; tipY: number }[] = [];
+    for (let i = 0; i < points; i++) {
+        const a = i * angleStep - Math.PI / 2;
+        // 星形尖端位置
+        const tipX = x + outerRadius * Math.cos(a);
+        const tipY = y + outerRadius * Math.sin(a);
+        // 刺从尖端伸出
+        const spikeTipX = tipX + Math.cos(a) * spikeHeight;
+        const spikeTipY = tipY + Math.sin(a) * spikeHeight;
+        tips.push({
+            x: spikeTipX,
+            y: spikeTipY,
+            angle: a,
+            tipX: tipX,
+            tipY: tipY
+        });
     }
-    ctx.fillStyle = "rgb(30,30,30)";
-    const triHeight = scaledSize * 0.13;
-    const triWidth = scaledSize * 0.1;
-    const offsetDistance = spikeHeight * 0.6;
+
+    // ===== 3. 绘制刺（在身体之上） =====
     for (const pos of tips) {
-      ctx.save();
-      ctx.translate(pos.x - Math.cos(pos.angle) * offsetDistance, pos.y - Math.sin(pos.angle) * offsetDistance);
-      ctx.rotate(pos.angle);
-      ctx.beginPath();
-      ctx.moveTo(triHeight, 0);
-      ctx.lineTo(0, -triWidth / 2);
-      ctx.lineTo(0, triWidth / 2);
-      ctx.closePath();
-      ctx.fill();
-      ctx.restore();
+        ctx.save();
+        // 从星形尖端位置开始绘制刺
+        ctx.translate(pos.tipX, pos.tipY);
+        ctx.rotate(pos.angle);
+
+        // 刺的尺寸
+        const spikeLength = spikeHeight * 1.2;
+        const spikeWidth = spikeLength * 0.3;
+
+        // 刺的颜色（比身体深一些）
+        const spikeColor = friendly ? [180, 140, 20] : [60, 160, 60];
+
+        // 绘制刺（三角形）
+        ctx.beginPath();
+        ctx.moveTo(0, -spikeWidth);
+        ctx.lineTo(spikeLength, 0);
+        ctx.lineTo(0, spikeWidth);
+        ctx.closePath();
+
+        // 使用刺的颜色而不是黑色
+        ctx.fillStyle = `#000000`;
+        ctx.fill();
+
+        // 刺的描边（使用轮廓颜色）
+        ctx.strokeStyle = `#000000`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.restore();
     }
+
+    // ===== 2. 绘制星形身体 =====
     ctx.beginPath();
-    for (let i = 0; i < spikeCount; i++) {
-      const centerAngle = i * angleStep;
-      const leftAngle = centerAngle - angleStep * spikeWidthFactor;
-      const rightAngle = centerAngle + angleStep * spikeWidthFactor;
-      const nextLeftAngle = (i + 1) * angleStep - angleStep * spikeWidthFactor;
-      const leftX = x + Math.cos(leftAngle) * currentBaseRadius;
-      const leftY = y + Math.sin(leftAngle) * currentBaseRadius;
-      const rightX = x + Math.cos(rightAngle) * currentBaseRadius;
-      const rightY = y + Math.sin(rightAngle) * currentBaseRadius;
-      const nextLeftX = x + Math.cos(nextLeftAngle) * currentBaseRadius;
-      const nextLeftY = y + Math.sin(nextLeftAngle) * currentBaseRadius;
-      if (i === 0) ctx.moveTo(leftX, leftY);
-      ctx.quadraticCurveTo(tips[i].x, tips[i].y, rightX, rightY);
-      ctx.lineTo(nextLeftX, nextLeftY);
+    const startX = x + outerRadius * Math.cos(-Math.PI / 2);
+    const startY = y + outerRadius * Math.sin(-Math.PI / 2);
+    ctx.moveTo(startX, startY);
+
+    for (let i = 0; i < points; i++) {
+        const nextOuterAngle = (i + 1) * angleStep - Math.PI / 2;
+        const innerAngle = i * angleStep + angleStep / 2 - Math.PI / 2;
+
+        const cpX = x + innerRadius * Math.cos(innerAngle);
+        const cpY = y + innerRadius * Math.sin(innerAngle);
+        const nextX = x + outerRadius * Math.cos(nextOuterAngle);
+        const nextY = y + outerRadius * Math.sin(nextOuterAngle);
+
+        ctx.quadraticCurveTo(cpX, cpY, nextX, nextY);
     }
     ctx.closePath();
+
+    // 填充星形身体
     ctx.fillStyle = css(cactusColor);
     ctx.fill();
     ctx.strokeStyle = css(outlineColor);
-    ctx.lineWidth = baseRadius * 0.1;
+    ctx.lineWidth = Math.max(2, scaledSize * 0.05);
     ctx.lineJoin = "round";
     ctx.stroke();
-    ctx.restore();
-  };
 
+    ctx.restore();
+};
   const drawShell = () => {
     const scaledSize = radius * 2 * 1.3;
     if (scaledSize <= 0) return;
@@ -2570,7 +2634,7 @@ const drawSoldierAnt = () => {
   };
 
   const drawStarfish = () => {
-    const baseScale = radius * 3;
+    const baseScale = radius * 3.5;
     const lightColor = friendly ? "rgb(255, 235, 120)" : "rgb(255, 150, 80)";
     const darkColor = friendly ? "rgb(255, 215, 0)" : "rgb(200, 90, 40)";
     ctx.save();
