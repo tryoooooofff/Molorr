@@ -166,8 +166,12 @@ function buildItemBiomeMap(): Map<number, Set<string>> {
       const mob = MOBS[mobId];
       if (!mob) continue;
       for (const drop of mob.drops) {
-        if (!map.has(drop.item)) map.set(drop.item, new Set());
-        map.get(drop.item)!.add(m.name);
+        let dropBiomes = map.get(drop.item);
+        if (!dropBiomes) {
+          dropBiomes = new Set();
+          map.set(drop.item, dropBiomes);
+        }
+        dropBiomes.add(m.name);
       }
     }
   }
@@ -2807,7 +2811,12 @@ class ChangelogPanel {
   visible = false;
   scrollY = 0;
   logs: ChangelogLogGroup[] = [
-
+    {
+      date: "8th October 2026",
+      entries: [
+        "- Add achievement system",
+      ]
+    },
     {
       date: "7th October 2026",
       entries: [
@@ -3093,6 +3102,715 @@ class ChangelogPanel {
   }
 }
 
+// =====================================================================
+// AchievementSystem — 成就系统
+// 解锁弹窗 / 星星奖励 / 成就面板 (All · Complete · Incomplete 筛选)
+// 进度与解锁状态保存在 localStorage (key: achievements_v1)
+// =====================================================================
+
+interface AchievementDef {
+  id: string;
+  group: string;
+  stars: number;
+  title: string;
+  desc: string;
+  check: (s: Record<string, any>) => boolean;
+}
+
+class AchievementSystem {
+  game: GameClient;
+  achievements: AchievementDef[];
+  unlocked: Set<string>;
+  stats: Record<string, any>;
+  pendingPopups: AchievementDef[];
+  activePopup: AchievementDef | null;
+  popupTimer: number;
+  POPUP_DURATION = 4.0;
+  panelOpen = false;
+  _panelScrollY = 0;
+  _filter = "All";
+  _playTimeAccum = 0;
+
+  constructor(gameInstance: GameClient) {
+    this.game = gameInstance;
+    this.achievements = this._buildAchievements();
+    this.unlocked = new Set();
+    this.stats = this._defaultStats();
+    this.pendingPopups = [];
+    this.activePopup = null;
+    this.popupTimer = 0;
+    this.load();
+  }
+
+  /** Canvas 实际尺寸(与游戏 HUD 使用同一坐标系)。 */
+  _size(): { W: number; H: number } {
+    const W = this.game.viewWidth ?? (window as any).WIDTH ?? window.innerWidth;
+    const H = this.game.viewHeight ?? (window as any).HEIGHT ?? window.innerHeight;
+    return { W, H };
+  }
+
+  _buildAchievements(): AchievementDef[] {
+    return [
+      { id: 'get_rare', group: 'items', stars: 5, title: 'Rare Find', desc: 'Obtain a Rare item', check: s => s.highestRarity >= 2 },
+      { id: 'get_epic', group: 'items', stars: 10, title: 'Epic Haul', desc: 'Obtain an Epic item', check: s => s.highestRarity >= 3 },
+      { id: 'get_legendary', group: 'items', stars: 20, title: 'Legendary', desc: 'Obtain a Legendary item', check: s => s.highestRarity >= 4 },
+      { id: 'get_mythic', group: 'items', stars: 50, title: 'Mythic Power', desc: 'Obtain a Mythic item', check: s => s.highestRarity >= 5 },
+      { id: 'get_ultra', group: 'items', stars: 100, title: 'Ultra Rare', desc: 'Obtain an Ultra item', check: s => s.highestRarity >= 6 },
+      { id: 'get_super', group: 'items', stars: 200, title: 'Super Human', desc: 'Obtain a Super item', check: s => s.highestRarity >= 7 },
+      { id: 'get_omega', group: 'items', stars: 500, title: 'Omega Collector', desc: 'Obtain an Omega item', check: s => s.highestRarity >= 8 },
+      { id: 'get_eternal', group: 'items', stars: 2000, title: 'Eternal Chosen', desc: 'Obtain an Eternal item', check: s => s.highestRarity >= 9 },
+      { id: 'tunnel', group: 'explore', stars: 30, title: 'Through the Rift', desc: 'Enter a Spacetime Tunnel', check: s => s.tunnelsEntered >= 1 },
+      { id: 'dmg_1m', group: 'combat', stars: 50, title: 'Million Dealer', desc: 'Deal 1,000,000 damage to one enemy', check: s => s.maxSingleEnemyDamage >= 1000000 },
+      { id: 'tank_10k', group: 'combat', stars: 100, title: 'Iron Petal', desc: 'Take 10,000 damage without dying', check: s => s.damageWithoutDying >= 10000 },
+      { id: 'first_digger', group: 'combat', stars: 20, title: 'Grave Robber', desc: 'Kill your first Digger', check: s => s.diggersKilled >= 1 },
+      { id: 'massive_killer', group: 'combat', stars: 10, title: 'Massive Killer', desc: 'Kill 1000 mobs', check: s => s.enemiesKilled >= 1000 },
+      { id: 'DEVIL', group: 'combat', stars: 300, title: 'DEVIL', desc: 'Kill 1000000 mobs', check: s => s.enemiesKilled >= 1000000 },
+      { id: 'kill_10000_enemies', group: 'combat', stars: 100, title: 'Master Hunter', desc: 'Kill 10,000 enemies', check: s => s.enemiesKilled >= 10000 },
+      { id: 'play_1h', group: 'time', stars: 30, title: 'Getting Started', desc: 'Play for 1 hour', check: s => s.totalPlayMinutes >= 60 },
+      { id: 'play_50h', group: 'time', stars: 100, title: 'Dedicated', desc: 'Play for 50 hours', check: s => s.totalPlayMinutes >= 3000 },
+      { id: 'play_100h', group: 'time', stars: 300, title: 'Veteran', desc: 'Play for 100 hours', check: s => s.totalPlayMinutes >= 6000 },
+      { id: 'play_500h', group: 'time', stars: 1000, title: 'Legend', desc: 'Play for 500 hours', check: s => s.totalPlayMinutes >= 30000 },
+      { id: 'play_1000h', group: 'time', stars: 5000, title: 'Immortal', desc: 'Play for 1000 hours', check: s => s.totalPlayMinutes >= 60000 },
+      // ========== 🆕 蜜蜂击杀 ==========
+      { id: 'beekeeper', group: 'combat', stars: 30, title: 'Beekeeper', desc: 'Kill 1,000 Bees', check: s => (s.mobKills?.Bee || 0) >= 1000 },
+      { id: 'beekeeper_elite', group: 'combat', stars: 100, title: 'Beekeeper???', desc: 'Kill 10,000 Bees', check: s => (s.mobKills?.Bee || 0) >= 10000 },
+      { id: 'beekeeper_master', group: 'combat', stars: 150, title: 'Queen Beekeeper', desc: 'Kill 100,000 Bees', check: s => (s.mobKills?.Bee || 0) >= 100000 },
+      { id: 'ant_killer', group: 'combat', stars: 50, title: 'Ant Killer', desc: 'Kill 2,000 Ants', check: s => (s.mobKills?.Ant || 0) >= 2000 },
+      { id: 'ant_hater', group: 'combat', stars: 80, title: 'Ant Hater', desc: 'Kill 15,000 Ants', check: s => (s.mobKills?.Ant || 0) >= 15000 },
+      { id: 'ant_extremist', group: 'combat', stars: 200, title: 'Ant Extremist', desc: 'Kill 100,000 Ants', check: s => (s.mobKills?.Ant || 0) >= 100000 },
+      // ========== 🆕 地狱生物击杀 (Hel) ==========
+      { id: 'helno', group: 'combat', stars: 150, title: 'HELNO', desc: 'Kill 10,000 Hel creatures', check: s => (s.mobKills?.Hel || 0) >= 10000 },
+      { id: 'helno_elite', group: 'combat', stars: 200, title: 'HELNO???', desc: 'Kill 50,000 Hel creatures', check: s => (s.mobKills?.Hel || 0) >= 50000 },
+      { id: 'helno_master', group: 'combat', stars: 500, title: 'HELNO MASTER', desc: 'Kill 200,000 Hel creatures', check: s => (s.mobKills?.Hel || 0) >= 200000 },
+      { id: 'hater', group: 'combat', stars: 100, title: 'Hater', desc: 'Kill 10,000 of the same type & rarity', check: s => s.maxSameTypeRarityKills >= 10000 },
+      { id: 'insanity', group: 'combat', stars: 200, title: 'Insanity', desc: 'Kill 50,000 of the same type & rarity', check: s => s.maxSameTypeRarityKills >= 50000 },
+      { id: 'obsession', group: 'combat', stars: 500, title: 'Obsession', desc: 'Kill 200,000 of the same type & rarity', check: s => s.maxSameTypeRarityKills >= 200000 },
+      { id: 'level_100', group: 'combat', stars: 10, title: 'Getting Better...', desc: 'Reach player level 100', check: s => (s.playerLevel || 1) >= 100 },
+      { id: 'level_200', group: 'combat', stars: 50, title: 'Become a Pro!', desc: 'Reach player level 200', check: s => (s.playerLevel || 1) >= 200 },
+      { id: 'level_250', group: 'combat', stars: 150, title: 'NoLife', desc: 'Reach player level 250', check: s => (s.playerLevel || 1) >= 250 },
+      { id: 'level_300', group: 'combat', stars: 500, title: 'The Absolutely Best!', desc: 'Reach player level 300', check: s => (s.playerLevel || 1) >= 300 },
+      { id: 'level_350', group: 'combat', stars: 1000, title: 'A Semi-Admin!', desc: 'Reach player level 350', check: s => (s.playerLevel || 1) >= 350 },
+    ];
+  }
+
+  _defaultStats(): Record<string, any> {
+    return {
+      highestRarity: 0,
+      tunnelsEntered: 0,
+      maxSingleEnemyDamage: 0,
+      damageWithoutDying: 0,
+      diggersKilled: 0,
+      totalPlayMinutes: 0,
+      enemiesKilled: 0,           // ✅ 添加
+      itemsCollected: 0,          // ✅ 添加
+      playerLevel: 1,             // ✅ 添加
+      petalsCrafted: 0,
+      mobKills: {},
+      highestRarityKilled: 0,
+      maxSameTypeRarityKills: 0,
+    };
+  }
+
+  load() {
+    try {
+      const raw = localStorage.getItem('achievements_v1');
+      if (raw) {
+        const data = JSON.parse(raw);
+        this.unlocked = new Set(data.unlocked || []);
+        this.stats = { ...this._defaultStats(), ...data.stats };
+      }
+    } catch (e) { /* ignore corrupted save */ }
+  }
+
+  save() {
+    try {
+      localStorage.setItem('achievements_v1', JSON.stringify({
+        unlocked: [...this.unlocked],
+        stats: this.stats,
+      }));
+    } catch (e) { /* storage full / unavailable */ }
+  }
+
+  onItemObtained(rarity: string) {
+    const RARITY_ORDER = ['Common', 'Unusual', 'Rare', 'Epic', 'Legendary', 'Mythic', 'Ultra', 'Super', 'Omega', 'Eternal'];
+    const idx = RARITY_ORDER.indexOf(rarity);
+    if (idx > this.stats.highestRarity) {
+      this.stats.highestRarity = idx;
+      this._checkAll();
+      this.save();
+    }
+  }
+
+  onTunnelEntered() {
+    this.stats.tunnelsEntered = (this.stats.tunnelsEntered || 0) + 1;
+    this._checkAll();
+    this.save();
+  }
+
+  /** 服务端不广播“对敌人造成伤害”事件时保持未接线;由未来协议扩展触发。 */
+  onDamageDealtToEnemy(enemy: any, amount: number) {
+    if (!enemy._achDmg) enemy._achDmg = 0;
+    enemy._achDmg += amount;
+    if (enemy._achDmg > this.stats.maxSingleEnemyDamage) {
+      this.stats.maxSingleEnemyDamage = enemy._achDmg;
+      this._checkAll();
+      this.save();
+    }
+  }
+
+  onPlayerTookDamage(amount: number) {
+    this.stats.damageWithoutDying = (this.stats.damageWithoutDying || 0) + amount;
+    this._checkAll();
+  }
+
+  onPlayerDied() {
+    this.stats.damageWithoutDying = 0;
+  }
+
+  onPlayerLevel(level: number) {
+    if (level !== (this.stats.playerLevel || 1)) {
+      this.stats.playerLevel = level;
+      this._checkAll();
+      this.save();
+    }
+  }
+
+  /**
+   * 击杀统计。
+   * @param mobType   生物编号 (EVT.KILL 的 value = MOBS 数组下标)
+   * @param mobName   生物名称 (MOBS[mobType].name;仅作兜底,部分生物不在本地 defs 中)
+   * @param enemyRarity 稀有度名称 (RARITIES[rarity].name)
+   */
+  onEnemyKilled(mobType: number, mobName: string, enemyRarity: string | null = null) {
+    // 通用击杀统计
+    this.stats.enemiesKilled = (this.stats.enemiesKilled || 0) + 1;
+
+    // ========== 🆕 特定生物击杀统计 ==========
+    // 按编号优先 (defs.ts MOBS),名称兜底(覆盖尚未收录在本地 defs 的生物)
+    // 蚂蚁检测 — 编号: Soldier Ant=3, Worker Ant=10, Ant Hole=13
+    const antTypeIds = [3, 10, 13];
+    const antTypes = ["Worker Ant", "Soldier Ant", "Queen Ant", "WorkerFireAnt", "SoldierFireAnt", "BabyFireAnt", "FireAntOvermind", "GoldenAnt", "Worker Termite", "Soldier Termite"];
+    if (antTypeIds.includes(mobType) || antTypes.includes(mobName)) {
+      this.stats.mobKills.Ant = (this.stats.mobKills.Ant || 0) + 1;
+    }
+
+    // 蜜蜂检测 — 编号: Bee=1, Hive=15, Hornet=16
+    const beeTypeIds = [1, 15, 16];
+    const beeTypes = ["Bee", "QueenBee", "HelBee", "HelQueenBee", "Wasp", "Hornet", "HelHornet"];
+    if (beeTypeIds.includes(mobType) || beeTypes.includes(mobName)) {
+      this.stats.mobKills.Bee = (this.stats.mobKills.Bee || 0) + 1;
+    }
+
+    // 地狱生物检测 (Hel系列) — 编号未收录在本地 defs,按名称匹配
+    const helTypes = ["HelWorm", "HelSpider", "HelBee", "HelHornet", "HelBeetle", "Dragon", "ToxicDragon", "HelJellyfish", "HelQueenBee", "HelDigger", "HelBeekeeper", "HelHive", "FireStorm"];
+    if (helTypes.includes(mobName)) {
+      this.stats.mobKills.Hel = (this.stats.mobKills.Hel || 0) + 1;
+    }
+
+    // 蜘蛛检测 — 编号: Spider=17
+    if (mobType === 17 || mobName === "HelSpider" || mobName === "ArcticSpider") {
+      this.stats.mobKills.Spider = (this.stats.mobKills.Spider || 0) + 1;
+    }
+
+    // 龙检测 — 编号未收录在本地 defs,按名称匹配
+    if (mobName === "Dragon" || mobName === "ToxicDragon" || mobName === "Ice Dragon") {
+      this.stats.mobKills.Dragon = (this.stats.mobKills.Dragon || 0) + 1;
+    }
+
+    // ========== 🆕 同类型同稀有度击杀追踪 ==========
+    if (enemyRarity) {
+      // 用编号作为键:编号全局唯一,且不受名称拼写影响
+      const key = `${mobType}_${enemyRarity}`;
+      if (!this.stats._typeRarityKills) this.stats._typeRarityKills = {};
+      this.stats._typeRarityKills[key] = (this.stats._typeRarityKills[key] || 0) + 1;
+
+      const current = this.stats._typeRarityKills[key];
+      if (current > (this.stats.maxSameTypeRarityKills || 0)) {
+        this.stats.maxSameTypeRarityKills = current;
+      }
+    }
+
+    // Boss检测 (根据稀有度或类型)
+    const bossRarities = ["Ultra", "Super", "Omega", "Eternal"];
+    if (enemyRarity && bossRarities.includes(enemyRarity)) {
+      this.stats.bossKilled = (this.stats.bossKilled || 0) + 1;
+    }
+
+    // Digger 类型特殊统计 — 编号未收录在本地 defs,按名称匹配
+    const diggerTypes = ["Digger", "TrashDigger", "MudDigger", "Biologist", "PirateDigger", "FrostDigger", "HelDigger", "GraveDigger", "AlienDigger"];
+    if (diggerTypes.includes(mobName)) {
+      this.stats.diggersKilled = (this.stats.diggersKilled || 0) + 1;
+    }
+
+    // 稀有度击杀统计
+    if (enemyRarity) {
+      const rarityOrder = ["Common", "Unusual", "Rare", "Epic", "Legendary", "Mythic", "Ultra", "Super", "Omega", "Eternal"];
+      const idx = rarityOrder.indexOf(enemyRarity);
+      if (idx > (this.stats.highestRarityKilled || 0)) {
+        this.stats.highestRarityKilled = idx;
+      }
+    }
+
+    // ✅ 关键修复：每次击杀后立即检查成就并保存
+    this._checkAll();
+    this.save();
+  }
+
+  tickPlayTime(dtSeconds: number) {
+    this._playTimeAccum = (this._playTimeAccum || 0) + dtSeconds;
+    if (this._playTimeAccum >= 60) {
+      this.stats.totalPlayMinutes += Math.floor(this._playTimeAccum / 60);
+      this._playTimeAccum %= 60;
+      this._checkAll();
+      this.save();
+    }
+  }
+
+  _checkAll() {
+    for (const ach of this.achievements) {
+      if (!this.unlocked.has(ach.id) && ach.check(this.stats)) {
+        this._unlock(ach);
+      }
+    }
+  }
+
+  _unlock(ach: AchievementDef) {
+    this.unlocked.add(ach.id);
+    this.save();
+    const shop = (window as any).gameInstance?.shopSystem;
+    if (shop) shop.addStars(ach.stars, true);
+    this.pendingPopups.push(ach);
+    console.log(`🏆 Achievement unlocked: ${ach.title} (+${ach.stars}⭐)`);
+  }
+
+  update(dt: number) {
+    this.tickPlayTime(dt);
+    this._tickPopups(dt);
+  }
+
+  /** 仅推进解锁弹窗计时(不累计游玩时长)。主菜单也调用,避免弹窗冻结。 */
+  _tickPopups(dt: number) {
+    if (this.activePopup) {
+      this.popupTimer -= dt;
+      if (this.popupTimer <= 0) {
+        this.activePopup = null;
+        const next = this.pendingPopups.shift();
+        if (next) {
+          this.activePopup = next;
+          this.popupTimer = this.POPUP_DURATION;
+        }
+      }
+    } else if (this.pendingPopups.length > 0) {
+      const next = this.pendingPopups.shift();
+      if (next) {
+        this.activePopup = next;
+        this.popupTimer = this.POPUP_DURATION;
+      }
+    }
+  }
+
+  drawStrokedText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, fontSize = 14, textAlign: CanvasTextAlign = 'center', fillColor = 'white') {
+    ctx.save();
+    ctx.font = ` ${fontSize}px "${FONT_FAMILY} Black", ${FONT_FAMILY}`;
+    ctx.textAlign = textAlign;
+    ctx.textBaseline = 'middle';
+    ctx.strokeStyle = 'black';
+    ctx.lineWidth = 4;
+    ctx.lineJoin = 'round';
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = fillColor;
+    ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  drawPopup(ctx: CanvasRenderingContext2D) {
+    if (!this.activePopup) return;
+    const { W, H } = this._size();
+    const ach = this.activePopup;
+    const progress = Math.max(0, this.popupTimer / this.POPUP_DURATION);
+    const SLIDE_T = 0.25;
+    let slideX = 0;
+    if (progress > 1 - SLIDE_T) {
+      const t = (1 - progress) / SLIDE_T;
+      slideX = (1 - Math.pow(1 - t, 3)) * 300;
+    } else if (progress < SLIDE_T) {
+      const t = progress / SLIDE_T;
+      slideX = (1 - Math.pow(1 - t, 3)) * 300;
+    }
+    const PW = 280, PH = 80;
+    const px = W - PW - 20 + slideX;
+    const py = H - PH - 90;
+    ctx.save();
+    ctx.globalAlpha = Math.min(1, progress * 4);
+    ctx.fillStyle = 'rgba(10,10,25,0.92)';
+    ctx.beginPath(); ctx.roundRect(px, py, PW, PH, 12); ctx.fill();
+    ctx.fillStyle = '#ffd700';
+    ctx.beginPath(); ctx.roundRect(px, py, 5, PH, [12, 0, 0, 12]); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,215,0,0.6)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.roundRect(px, py, PW, PH, 12); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,215,0,0.15)';
+    ctx.beginPath(); ctx.roundRect(px + 10, py + 10, 60, 60, 8); ctx.fill();
+    this.drawStrokedText(ctx, '🏆', px + 40, py + 40, 28, 'center', 'white');
+    this.drawStrokedText(ctx, 'Achievement Unlocked!', px + 80, py + 20, 10, 'left', 'rgba(255,215,0,0.9)');
+    this.drawStrokedText(ctx, ach.title, px + 80, py + 40, 15, 'left', 'white');
+    this.drawStrokedText(ctx, ach.desc, px + 80, py + 57, 9, 'left', 'rgba(200,200,200,0.85)');
+    this.drawStrokedText(ctx, `+${this._fmtNum(ach.stars)}⭐`, px + PW - 12, py + 40, 13, 'right', '#ffd700');
+    ctx.restore();
+  }
+
+  _easeOut(t: number) { return 1 - Math.pow(1 - t, 3); }
+
+  _fmtNum(n: number): string {
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return n.toString();
+  }
+
+  _getProgress(ach: AchievementDef): number {
+    const s = this.stats;
+    switch (ach.id) {
+      case 'play_1h': return Math.min(1, s.totalPlayMinutes / 60);
+      case 'play_50h': return Math.min(1, s.totalPlayMinutes / 3000);
+      case 'play_100h': return Math.min(1, s.totalPlayMinutes / 6000);
+      case 'play_500h': return Math.min(1, s.totalPlayMinutes / 30000);
+      case 'play_1000h': return Math.min(1, s.totalPlayMinutes / 60000);
+      case 'dmg_1m': return Math.min(1, s.maxSingleEnemyDamage / 1000000);
+      case 'tank_10k': return Math.min(1, s.damageWithoutDying / 10000);
+      case 'massive_killer': return Math.min(1, (s.enemiesKilled || 0) / 1000);
+      case 'kill_10000_enemies': return Math.min(1, (s.enemiesKilled || 0) / 10000);
+      case 'DEVIL': return Math.min(1, (s.enemiesKilled || 0) / 1000000);
+      case 'first_digger': return Math.min(1, s.diggersKilled);
+      case 'tunnel': return Math.min(1, s.tunnelsEntered);
+      case 'level_100': return Math.min(1, (s.playerLevel || 1) / 100);
+      case 'level_200': return Math.min(1, (s.playerLevel || 1) / 200);
+      case 'level_250': return Math.min(1, (s.playerLevel || 1) / 250);
+      case 'level_300': return Math.min(1, (s.playerLevel || 1) / 300);
+      case 'level_350': return Math.min(1, (s.playerLevel || 1) / 350);
+
+      // ========== 🆕 添加这些成就的进度 ==========
+      case 'beekeeper': return Math.min(1, (s.mobKills?.Bee || 0) / 1000);
+      case 'beekeeper_elite': return Math.min(1, (s.mobKills?.Bee || 0) / 10000);
+      case 'beekeeper_master': return Math.min(1, (s.mobKills?.Bee || 0) / 100000);
+      case 'ant_killer': return Math.min(1, (s.mobKills?.Ant || 0) / 2000);
+      case 'ant_hater': return Math.min(1, (s.mobKills?.Ant || 0) / 15000);
+      case 'ant_extremist': return Math.min(1, (s.mobKills?.Ant || 0) / 100000);
+      case 'helno': return Math.min(1, (s.mobKills?.Hel || 0) / 10000);
+      case 'helno_elite': return Math.min(1, (s.mobKills?.Hel || 0) / 50000);
+      case 'helno_master': return Math.min(1, (s.mobKills?.Hel || 0) / 200000);
+      case 'hater': return Math.min(1, (s.maxSameTypeRarityKills || 0) / 10000);
+      case 'insanity': return Math.min(1, (s.maxSameTypeRarityKills || 0) / 50000);
+      case 'obsession': return Math.min(1, (s.maxSameTypeRarityKills || 0) / 200000);
+
+      default: return 0;
+    }
+  }
+
+  drawStyledButton(ctx: CanvasRenderingContext2D, text: string, rect: number[], baseColor: number[], fontSize = 16) {
+    const [x, y, w, h] = rect;
+
+    const adjust = (rgb: number[], f: number) => rgb.map(c => Math.max(0, Math.min(255, Math.floor(c * f))));
+    const darkColor = `rgb(${adjust(baseColor, 0.85).join(',')})`;
+    const lightColor = `rgb(${baseColor.join(',')})`;
+    const strokeColor = `rgb(${adjust(baseColor, 0.5).join(',')})`;
+
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 10);
+    ctx.fillStyle = lightColor;
+    ctx.fill();
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, 10);
+    ctx.clip();
+    ctx.fillStyle = darkColor;
+    ctx.fillRect(x, y, w, h / 2);
+    ctx.restore();
+
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    if (text) {
+      ctx.font = ` ${fontSize}px ${FONT_FAMILY}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.strokeStyle = 'black';
+      ctx.lineWidth = 3;
+      ctx.lineJoin = 'round';
+      ctx.strokeText(text, x + w / 2, y + h / 2);
+      ctx.fillStyle = 'white';
+      ctx.fillText(text, x + w / 2, y + h / 2);
+    }
+  }
+
+  _getFilteredList(): AchievementDef[] {
+    let list = this.achievements;
+    if (this._filter === 'Complete') {
+      list = list.filter(a => this.unlocked.has(a.id));
+    } else if (this._filter === 'Incomplete') {
+      list = list.filter(a => !this.unlocked.has(a.id));
+    }
+    return list;
+  }
+
+  /** 面板几何(屏幕坐标)。小屏幕时整体等比缩小。 */
+  _panelRect(W: number, H: number): { x: number; y: number; w: number; h: number; scale: number; PW: number; PH: number } {
+    const PW = 720, PH = 640;
+    const scale = Math.min(1, W / 760, H / 700);
+    return { x: W / 2 - (PW * scale) / 2, y: H / 2 - (PH * scale) / 2, w: PW * scale, h: PH * scale, scale, PW, PH };
+  }
+
+  /** 命中测试:点击是否落在面板内(含缩放)。 */
+  panelContains(x: number, y: number): boolean {
+    if (!this.panelOpen) return false;
+    const { W, H } = this._size();
+    const r = this._panelRect(W, H);
+    return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  }
+
+  drawPanel(ctx: CanvasRenderingContext2D) {
+    if (!this.panelOpen) return;
+
+    const { W, H } = this._size();
+    const r = this._panelRect(W, H);
+    const scale = r.scale;
+    const px = r.x, py = r.y;
+    const PW = r.PW, PH = r.PH;
+
+    ctx.save();
+
+    // 小屏幕整体缩放(保持内部坐标不变)
+    if (scale < 1) {
+      ctx.translate(W / 2, H / 2);
+      ctx.scale(scale, scale);
+      ctx.translate(-W / 2, -H / 2);
+    }
+
+    // ───────────── 主背景（更深绿） ─────────────
+    ctx.fillStyle = '#1faa66';
+    ctx.fillRect(px, py, PW, PH);
+
+    ctx.strokeStyle = '#0d5c3a';
+    ctx.lineWidth = 6;
+    ctx.strokeRect(px, py, PW, PH);
+
+    // 标题
+    this.drawStrokedText(ctx, 'Achievements', px + PW / 2, py + 40, 32);
+
+    // ───────────── 关闭按钮 ─────────────
+    this.drawStyledButton(
+      ctx,
+      'X',
+      [px + PW - 50, py + 10, 40, 35],
+      [220, 80, 80],
+      18
+    );
+
+    // ───────────── 总进度条 ─────────────
+    const total = this.achievements.length;
+    const unlocked = this.unlocked.size;
+
+    const barW = 420, barH = 24;
+    const barX = px + (PW - barW) / 2;
+    const barY = py + 70;
+    ctx.fillStyle = '#145a3b';
+    ctx.fillRect(barX, barY, barW, barH);
+    ctx.fillStyle = '#6df2a3';
+    ctx.fillRect(barX, barY, barW * (unlocked / total), barH);
+    ctx.strokeStyle = '#064429';
+    ctx.lineWidth = 5;
+    ctx.strokeRect(barX, barY, barW, barH);
+    this.drawStrokedText(
+      ctx,
+      `unlocked ${unlocked}/${total}`,
+      barX + barW / 2,
+      barY + barH / 2,
+      16
+    );
+
+    // ───────────── 筛选按钮 ─────────────
+    const filters = ['All', 'Complete', 'Incomplete'];
+    this._filter = this._filter || 'All';
+
+    filters.forEach((f, i) => {
+      const bx = px + PW / 2 - 150 + i * 110;
+      const by = py + 110;
+
+      let color = [160, 160, 160];
+
+      if (this._filter === f) {
+        if (f === 'All') color = [170, 120, 255];
+        if (f === 'Complete') color = [120, 220, 120];
+        if (f === 'Incomplete') color = [255, 120, 180];
+      }
+
+      this.drawStyledButton(ctx, f, [bx, by, 100, 34], color, 14);
+    });
+
+    // ───────────── 成就列表(像素级滚动) ─────────────
+    const startY = py + 170;
+    const itemW = 300, itemH = 95;
+    const gap = 14;
+    const viewportRows = 4;
+
+    let list = this._getFilteredList();
+
+    // 像素级滚动:偏移量直接是像素,与背包面板一致
+    const rowH = itemH + gap;
+    const contentH = Math.max(0, Math.ceil(list.length / 2) * rowH - gap);
+    const viewportH = viewportRows * rowH - gap;
+    const maxScroll = Math.max(0, contentH - viewportH);
+    this._panelScrollY = Math.max(0, Math.min(maxScroll, this._panelScrollY));
+
+    const startRow = Math.floor(this._panelScrollY / rowH);
+    const yOff = -(this._panelScrollY % rowH);
+    // 多取一行用于滚动衔接,避免滚动时底部闪空
+    list = list.slice(startRow * 2, startRow * 2 + (viewportRows + 1) * 2);
+
+    // 裁剪:滚出视口的卡片不越界
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px + 40 - 2, startY - 2, itemW * 2 + gap + 4, viewportH + 4);
+    ctx.clip();
+
+    list.forEach((ach, i) => {
+      const col = i % 2;
+      const row = Math.floor(i / 2);
+
+      const ix = px + 40 + col * (itemW + gap);
+      const iy = startY + row * rowH + yOff;
+
+      const done = this.unlocked.has(ach.id);
+
+      // 卡片背景（深一点）
+      ctx.fillStyle = done ? '#3ecf8e' : '#2fa36a';
+      ctx.fillRect(ix, iy, itemW, itemH);
+
+      ctx.strokeStyle = '#0d5c3a';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(ix, iy, itemW, itemH);
+
+      // 标题
+      this.drawStrokedText(ctx, ach.title, ix + 12, iy + 20, 15, 'left');
+
+      // 星星
+      this.drawStrokedText(
+        ctx,
+        `${this._fmtNum(ach.stars)} ⭐`,
+        ix + itemW - 10,
+        iy + 20,
+        13,
+        'right',
+        '#FFD700'
+      );
+
+      // 描述
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.font = `12px ${FONT_FAMILY}`;
+      ctx.textAlign = 'left';
+      ctx.fillText(ach.desc, ix + 12, iy + 42);
+
+      // 进度条
+      const pX = ix + 12;
+      const pY = iy + 60;
+      const pW = itemW - 24;
+      const pH = 18;
+
+      ctx.fillStyle = '#145a3b';
+      ctx.fillRect(pX, pY, pW, pH);
+
+      let progress = done ? 1 : this._getProgress(ach);
+      progress = Math.max(0, Math.min(1, progress));
+
+      const padding = 3; // 内边距
+
+      // 实际可用宽度（减去左右padding）
+      const innerW = pW - padding * 2;
+      const innerH = pH - padding * 2;
+
+      // 进度条（不会贴边）
+      ctx.fillStyle = '#7dffb5';
+      ctx.fillRect(
+        pX + padding,
+        pY + padding,
+        innerW * progress,
+        innerH
+      );
+
+      if (done) {
+        this.drawStrokedText(ctx, 'DONE', pX + pW / 2, pY + pH / 2, 12);
+      } else {
+        this.drawStrokedText(
+          ctx,
+          `${Math.floor(progress * 100)}%`,
+          pX + pW / 2,
+          pY + pH / 2,
+          11
+        );
+      }
+    });
+
+    // 结束列表裁剪
+    ctx.restore();
+
+    ctx.restore();
+  }
+
+  handleClick(x: number, y: number): boolean {
+    if (!this.panelOpen) return false;
+    const { W, H } = this._size();
+    const r = this._panelRect(W, H);
+
+    // 点击在面板外 → 不处理(由 GameClient 关闭面板)
+    if (x < r.x || x > r.x + r.w || y < r.y || y > r.y + r.h) return false;
+
+    // 屏幕坐标 → 设计坐标(抵消缩放)
+    const scale = r.scale;
+    const dx = (x - W / 2) / scale + W / 2;
+    const dy = (y - H / 2) / scale + H / 2;
+    const px = W / 2 - r.PW / 2;
+    const py = H / 2 - r.PH / 2;
+    const PW = r.PW, PH = r.PH;
+
+    // ───────────── 关闭按钮 ─────────────
+    const closeX = px + PW - 50;
+    const closeY = py + 10;
+    if (dx >= closeX && dx <= closeX + 40 && dy >= closeY && dy <= closeY + 35) {
+      this.panelOpen = false;
+      return true;
+    }
+
+    // ───────────── 筛选按钮 ─────────────
+    const filters = ['All', 'Complete', 'Incomplete'];
+    for (let i = 0; i < filters.length; i++) {
+      const bx = px + PW / 2 - 150 + i * 110;
+      const by = py + 110;
+      if (dx >= bx && dx <= bx + 100 && dy >= by && dy <= by + 34) {
+        this._filter = filters[i];
+        this._panelScrollY = 0;
+        return true;
+      }
+    }
+
+    // 面板内部的其他点击(列表区域) → 吞掉,不穿透到游戏世界
+    return true;
+  }
+
+  handleScroll(deltaY: number) {
+    if (!this.panelOpen) return;
+    const list = this._getFilteredList();
+    const itemH = 95, gap = 14;
+    const rowH = itemH + gap;
+    const contentH = Math.max(0, Math.ceil(list.length / 2) * rowH - gap);
+    const viewportH = 4 * rowH - gap;
+    const maxScroll = Math.max(0, contentH - viewportH);
+    this._panelScrollY = Math.max(0, Math.min(maxScroll, this._panelScrollY + deltaY));
+  }
+
+  togglePanel() { this.panelOpen = !this.panelOpen; }
+}
+
 export class GameClient {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -3101,6 +3819,9 @@ export class GameClient {
   private time = 0;
   private w = 800;
   private h = 600;
+  /** Public read-only view size (used by overlay systems such as AchievementSystem). */
+  get viewWidth(): number { return this.w; }
+  get viewHeight(): number { return this.h; }
 private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map();
  private _wallDataCache: Map<string, string> = new Map(); // 低质量墙壁缓存
   // scene
@@ -3121,6 +3842,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   /** Main-menu bestiary; kill counts are tracked locally by mob + rarity. */
   private mobGallery = new MobGallery();
   private changelog = new ChangelogPanel();
+  private achievements: AchievementSystem;
   private chat = new ChatSystem();
   private vk = new VirtualKeyboard();
   /** Canvas-painted account panel (local-storage based). */
@@ -3355,7 +4077,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private lastTouchTime = 0;
 
   // Dual-row quick-slot bar (main + secondary)
-  quickSlot!: QuickSlot;
+  quickSlot: QuickSlot;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -3369,6 +4091,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     if (typeof window !== "undefined") {
       (window as any).gameInstance = this;
     }
+    this.achievements = new AchievementSystem(this);
     this.loadLocal();
   }
 
@@ -3900,6 +4623,7 @@ private handlePacket(data: Uint8Array) {
     case S2C.STATS: {
       this.xp = r.u32();
       this.level = r.u16();
+      this.achievements.onPlayerLevel(this.level);
       this.hp = r.u16();
       this.maxHp = r.u16();
       this.mapId = r.u8();
@@ -3987,19 +4711,24 @@ private handlePacket(data: Uint8Array) {
           life: 1.6,
           vy: -22,
         });
+        this.achievements.onItemObtained(RARITIES[rarity]?.name);
         break;
       case EVT.HIT:
         this.floaters.push({ x, y, msg: `-${value}`, color: "#ff6f6f", life: 0.9, vy: -40 });
+        // EVT.HIT = 玩家受到伤害(服务端在玩家位置推送,见 sim.ts applyDamage)
+        this.achievements.onPlayerTookDamage(value);
         break;
       case EVT.KILL:
         this.killFeed = this.killFeed.slice(0, 5);
         this.mobGallery.recordKill(value, rarity);
+        this.achievements.onEnemyKilled(value, MOBS[value]?.name ?? "", RARITIES[rarity]?.name ?? null);
         break;
       case EVT.CRAFT_OK:
         this.craftMsg = value > 1 ? `Crafted ${value}x ${RARITIES[rarity].name} ${ITEMS[item].name}!` : `Crafted ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
         this.craftLogCrafted += value;
         this.craftLogLast = this.craftMsg;
         this.craftResolve({ item, rarity, count: value });
+        this.achievements.onItemObtained(RARITIES[rarity]?.name);
         break;
       case EVT.CRAFT_FAIL:
         this.craftMsg = value > 0 ? `Craft failed... ${value} petal${value === 1 ? "" : "s"} lost.` : "Craft failed.";
@@ -4012,6 +4741,7 @@ private handlePacket(data: Uint8Array) {
         this.craftLogCrafted += value || 1;
         this.craftLogLast = this.craftMsg;
         this.craftResolve({ item, rarity, count: value || 1 });
+        this.achievements.onItemObtained(RARITIES[rarity]?.name);
         break;
       case EVT.ORACLE_FAIL:
         this.craftRefused("Oracle refused — check the requirement and cooldown.");
@@ -4058,6 +4788,7 @@ private handlePacket(data: Uint8Array) {
       case EVT.DEATH:
         this.alive = false;
         this.floaters.length = 0;
+        this.achievements.onPlayerDied();
         break;
     }
     this.saveDirty = true;
@@ -4225,6 +4956,11 @@ private handlePacket(data: Uint8Array) {
         }
       }
       this.updateDebugThroughput(dt);
+      // Achievement popups + play-time tracking (game scene only)
+      this.achievements.update(dt);
+    } else {
+      // 主菜单:只推进弹窗计时,不累计游玩时长
+      this.achievements._tickPopups(dt);
     }
   }
 
@@ -5094,6 +5830,12 @@ private bagLayout() {
       e.preventDefault();
       return;
     }
+    // Achievement panel: Escape closes it in any scene.
+    if (this.achievements.panelOpen && e.code === "Escape") {
+      this.achievements.panelOpen = false;
+      e.preventDefault();
+      return;
+    }
     if (this.scene === "menu" && this.mobGallery.handleKey(e.key)) {
       e.preventDefault();
       return;
@@ -5381,6 +6123,7 @@ private bagLayout() {
         !this.mobGallery.visible &&
         !this.settings.panelOpen &&
         !this.accountSystem.panelOpen &&
+        !this.achievements.panelOpen &&
         this.changelog.beginTouch(p.x, p.y, this.w, this.h)
       ) return;
       this.menuClick(p.x, p.y);
@@ -5465,6 +6208,14 @@ private bagLayout() {
     if (this.accountSystem.panelOpen && this.accountSystem.handleWheel(e.deltaY)) {
       e.preventDefault();
       e.stopPropagation();
+      return;
+    }
+    // Achievement panel: scroll the achievement grid (only while the cursor
+    // is over the panel so the wheel keeps working elsewhere).
+    if (this.achievements.panelOpen && this.achievements.panelContains(this.mx, this.my)) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.achievements.handleScroll(e.deltaY);
       return;
     }
     if (this.scene === "menu" && this.changelog.visible) {
@@ -5847,7 +6598,8 @@ private bagLayout() {
         const layer = document.createElement('canvas');
         layer.width = Math.ceil(pad * 2);
         layer.height = Math.ceil(pad * 2);
-        const lctx = layer.getContext('2d')!;
+        const lctx = layer.getContext('2d');
+        if (!lctx) break;
         const gap = s * 0.05;
         const drawAtomWithGap = (atomX: number, atomY: number, atomRadius: number) => {
           lctx.save();
@@ -5982,7 +6734,7 @@ private bagLayout() {
     // Bonus 面板常驻主菜单：面板区域内的点击一律由面板处理并吞掉，
     // 不会穿透到下方的按钮（防止点开其它面板）。
     // 其它模态面板（画廊/日志/账号/设置/背包/合成）打开时不触发 bonus。
-    if (!this.mobGallery.visible && !this.changelog.visible && !this.accountSystem.panelOpen && !this.settings.panelOpen && this.bagAnim < 0.4 && this.craftAnim < 0.4) {
+    if (!this.mobGallery.visible && !this.changelog.visible && !this.accountSystem.panelOpen && !this.settings.panelOpen && !this.achievements.panelOpen && this.bagAnim < 0.4 && this.craftAnim < 0.4) {
       if (this.hitArr(this.extraBonusButton, mx, my)) {
         if (this.hitArr(this._bonusClaimRect, mx, my)) {
           if (this.bonus.canClaim() && this.bonus.claim()) this.sendBonusStatus();
@@ -6000,6 +6752,11 @@ private bagLayout() {
     }
     if (this.settings.panelOpen) {
       this.settings.handleClick(mx, my);
+      return;
+    }
+    if (this.achievements.panelOpen) {
+      if (this.achievements.handleClick(mx, my)) return;
+      this.achievements.panelOpen = false;
       return;
     }
     if (this.mobGallery.visible) {
@@ -6051,8 +6808,19 @@ private bagLayout() {
       this.changelog.toggle();
       return;
     }
+    // 成就面板：主菜单奖杯图标入口（成就面板的唯一入口,游戏内 HUD 不设按钮）。
+    if (actions.top_achievement && hit(actions.top_achievement, mx, my)) {
+      this.focus = null;
+      this.bagOpen = false;
+      this.craftOpen = false;
+      this.settings.close();
+      if (this.mobGallery.visible) this.mobGallery.close();
+      this.changelog.close();
+      this.achievements.togglePanel();
+      return;
+    }
     // 尚未实现的按钮：先绘制，点击返回 "Coming soon"（暂无实际功能代码）。
-    for (const id of ['top_shop', 'top_hunting_quest', 'top_talent', 'top_achievement']) {
+    for (const id of ['top_shop', 'top_hunting_quest', 'top_talent']) {
       if (actions[id] && hit(actions[id], mx, my)) { this.showMenuToast('Coming soon'); return; }
     }
 
@@ -6166,6 +6934,13 @@ private bagLayout() {
     }
     if (this.settings.panelOpen) {
       this.settings.handleClick(mx, my);
+      return;
+    }
+    // Achievement panel: modal while open — clicks inside are swallowed,
+    // clicks outside close it.
+    if (this.achievements.panelOpen) {
+      if (this.achievements.handleClick(mx, my)) return;
+      this.achievements.panelOpen = false;
       return;
     }
     if (this.bagAnim > 0.4) {
@@ -7046,6 +7821,8 @@ if (this.drag) {
     this.changelog.draw(ctx, W, H);
     // Account panel overlays everything when open.
     this.accountSystem.draw(ctx);
+    // Achievement panel (主菜单奖杯图标入口,与游戏内共用)
+    this.achievements.drawPanel(ctx);
 
     // ─── "Coming soon" toast（未实现按钮的点击反馈）───
     if (this.menuToast && this.time < this.menuToast.until) {
@@ -7376,6 +8153,9 @@ if (this.drag) {
   ctx.restore();
 }
     if (!this.alive) this.renderDeath();
+    // Achievement unlock popup (bottom-right) + panel (centered, on top of HUD)
+    this.achievements.drawPopup(ctx);
+    this.achievements.drawPanel(ctx);
     // The AFK prompt sits above the death screen: answering it matters even
     // while dead, since an idle corpse still holds a server slot.
     if (this.afkAnim > 0.01) this.renderAfkCheck();
@@ -7652,7 +8432,7 @@ drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
     // 纹理缓存
     const biomeKey = this.currentBiome;
     if (!this.wallPatternCache) this.wallPatternCache = new Map();
-    let cachedPattern = this.wallPatternCache.get(biomeKey);
+    let cachedPattern = this.wallPatternCache.get(biomeKey) ?? null;
 
     if (!cachedPattern) {
       const s = 512, cv = document.createElement('canvas');
@@ -7673,9 +8453,9 @@ drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
         }
       }
       cachedPattern = ctx.createPattern(cv, 'repeat');
-      this.wallPatternCache.set(biomeKey, cachedPattern);
+      if (cachedPattern) this.wallPatternCache.set(biomeKey, cachedPattern);
     }
-    this.wallPattern = cachedPattern;
+    if (cachedPattern) this.wallPattern = cachedPattern;
     this._wallPatternBiome = this.currentBiome;
 
     const bgConfig = BIOME_BACKGROUNDS[this.currentBiome];
@@ -7707,7 +8487,7 @@ drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
     ctx.rect(left - pad, top - pad, (right - left) + pad * 2, (bottom - top) + pad * 2);
     ctx.clip();
 
-    ctx.fillStyle = this.wallPattern;
+    ctx.fillStyle = this.wallPattern ?? `rgb(${wallColor[0]},${wallColor[1]},${wallColor[2]})`;
     ctx.beginPath();
     for (const poly of visiblePolygons) {
       if (poly.length < 3) continue;
@@ -7736,7 +8516,7 @@ drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
     ctx.rect(left - pad, top - pad, (right - left) + pad * 2, (bottom - top) + pad * 2);
     ctx.clip();
 
-    ctx.fillStyle = this.wallPattern;
+    ctx.fillStyle = this.wallPattern ?? `rgb(${wallColor[0]},${wallColor[1]},${wallColor[2]})`;
     ctx.beginPath();
     for (const poly of visiblePolygons) {
       if (poly.length < 3) continue;
@@ -8906,7 +9686,7 @@ if (me) {
   /** Dedicated Result Card rendering — larger, pulsing, with rarity glow (new) */
   private renderResultCard(ctx: CanvasRenderingContext2D, layout: ReturnType<GameClient["craftLayout"]>) {
     if (!this.craftPending) return;
-    const rr = (layout as any).resultRect as Rect;
+    const rr = layout.resultRect;
     const rarity = this.craftPending.rarity;
     const color = this.rarityRgb(rarity);
 
@@ -9082,7 +9862,7 @@ if (me) {
       ctx.fill();
       ctx.restore();
 
-      if (!filled) return;
+      if (!filled || !sel) return;
 
       ctx.save();
       if (this.craftSpin > 0) {
@@ -9099,7 +9879,7 @@ if (me) {
         ctx.scale(fill.scale, fill.scale);
         ctx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2));
       }
-      drawCard(ctx, { ...r, y: r.y + bob }, { item: sel!.item, rarity: sel!.rarity, count: Math.max(1, slotCount) }, {
+      drawCard(ctx, { ...r, y: r.y + bob }, { item: sel.item, rarity: sel.rarity, count: Math.max(1, slotCount) }, {
         scale: this.craftSpin > 0 ? 1.06 : 1,
       });
       ctx.restore();
