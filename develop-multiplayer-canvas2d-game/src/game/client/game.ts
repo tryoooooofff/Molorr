@@ -12282,76 +12282,6 @@ if (me) {
     ctx.fillText(`Level ${this.level}`, lvlX + _s(20), lvlY + lvlH / 2);
     ctx.fillStyle = "#aaaaaa";
 
-
-    // ---- 队友信息（小队成员，最多4人） ----
-    const squadMates = Array.from(this.ents.values()).filter(
-      e => e.kind === ENT.PLAYER && e.team === TEAM.SQUAD && e.id !== this.selfId
-    ).slice(0, 4);
-
-    if (squadMates.length > 0) {
-      const squadScale = hudScale * 0.6;
-      const _sq = (v: number) => v * squadScale;
-      const squadAvatarSize = 36;
-      const squadBarW = _sq(160);
-      const squadBarH = _sq(14);
-      const gapY = _sq(6);
-
-      let squadY = lvlY + lvlH + _sq(14);
-
-      for (const mate of squadMates) {
-        const sAvatarX = _sq(20);
-        const sAvatarY = squadY;
-        const sAvatarCX = sAvatarX + _sq(squadAvatarSize) / 2;
-        const sAvatarCY = sAvatarY + _sq(squadAvatarSize) / 2;
-
-        // 队友头像（花朵）
-        ctx.save();
-        const mateEnt: Ent = {
-          ...mate,
-          x: sAvatarCX,
-          y: sAvatarCY,
-          radius: _sq(squadAvatarSize / 2 - 2),
-          spreadMode: false,
-          contractMode: false,
-        };
-        drawDefaultSkin(ctx, sAvatarCX, sAvatarCY, _sq(squadAvatarSize / 2 - 2), mateEnt);
-        ctx.restore();
-
-        // 队友名字
-        ctx.fillStyle = "#4CAF50";
-        ctx.font = `bold ${_sq(14)}px ${FONT_FAMILY || "Arial"}`;
-        ctx.textAlign = "left";
-        ctx.textBaseline = "alphabetic";
-        ctx.strokeText(mate.name || "?", sAvatarX + _sq(squadAvatarSize) + _sq(8), sAvatarY + _sq(18));
-        ctx.fillText(mate.name || "?", sAvatarX + _sq(squadAvatarSize) + _sq(8), sAvatarY + _sq(18));
-
-        // 队友血条背景
-        const sBarX = sAvatarX + _sq(squadAvatarSize) + _sq(8);
-        const sBarY = sAvatarY + _sq(22);
-        roundRect(ctx, sBarX, sBarY, squadBarW, squadBarH, _sq(7));
-        ctx.fillStyle = "#333333";
-        ctx.fill();
-
-        // 队友血条前景
-        const mateHpPct = Math.max(0, Math.min(1, mate.hp));
-        const mateHpW = (squadBarW - _sq(4)) * mateHpPct;
-        if (mateHpW > 0) {
-          roundRect(ctx, sBarX + _sq(2), sBarY + _sq(2), mateHpW, squadBarH - _sq(4), _sq(5));
-          ctx.fillStyle = "#8BC34A";
-          ctx.fill();
-        }
-
-        // 血条百分比文字
-        ctx.fillStyle = "#ffffff";
-        ctx.font = `bold ${_sq(10)}px ${FONT_FAMILY || "Arial"}`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.strokeText(`${Math.round(mateHpPct * 100)}%`, sBarX + squadBarW / 2, sBarY + squadBarH / 2);
-        ctx.fillText(`${Math.round(mateHpPct * 100)}%`, sBarX + squadBarW / 2, sBarY + squadBarH / 2);
-
-        squadY += _sq(squadAvatarSize) + gapY;
-      }
-    }
     // ---- 最近的 Ultra+ 生物血条（屏幕顶部中央） ----
     if (this.nearestUltraPlus) {
       const target = this.nearestUltraPlus;
@@ -12405,6 +12335,81 @@ if (me) {
       ctx.strokeText(hpText, barCenterX, barY + barH / 2);
       ctx.fillText(hpText, barCenterX, barY + barH / 2);
       ctx.restore();
+    }
+
+
+    // ---- 队友信息（在玩家自己信息下方，更小） ----
+    const teammates = Array.from(this.ents.values()).filter(
+      e => e.kind === ENT.PLAYER && e.team === TEAM.SELF && e.id !== this.selfId
+    );
+
+    if (teammates.length > 0) {
+      const teammateScale = hudScale * 0.58;
+      const _ts = (v: number) => v * teammateScale;
+      const tmAvatarSize = 34;
+      const tmGap = _ts(6);
+      const tmStartY = avatarY + VAvatarSize + _s(14);
+
+      teammates.forEach((tm, idx) => {
+        const tmY = tmStartY + idx * (_ts(tmAvatarSize) + tmGap);
+        const tmX = _s(20);
+        const tmCX = tmX + _ts(tmAvatarSize) / 2;
+        const tmCY = tmY + _ts(tmAvatarSize) / 2;
+
+        // 头像背景
+        ctx.save();
+        ctx.fillStyle = "#2a2a2a";
+        ctx.beginPath();
+        ctx.arc(tmCX, tmCY, _ts(tmAvatarSize) / 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "#4CAF50";
+        ctx.lineWidth = _ts(2);
+        ctx.stroke();
+
+        // 名字首字母
+        ctx.fillStyle = "#ffffff";
+        ctx.font = `bold ${_ts(14)}px ${FONT_FAMILY || "Arial"}`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        const initial = tm.name ? tm.name.charAt(0).toUpperCase() : "T";
+        ctx.fillText(initial, tmCX, tmCY);
+        ctx.restore();
+
+        // 名字
+        ctx.fillStyle = "#4CAF50";
+        ctx.font = `bold ${_ts(13)}px ${FONT_FAMILY || "Arial"}`;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "alphabetic";
+        ctx.strokeText(tm.name || "Teammate", tmX + _ts(tmAvatarSize) + _ts(8), tmY + _ts(16));
+        ctx.fillText(tm.name || "Teammate", tmX + _ts(tmAvatarSize) + _ts(8), tmY + _ts(16));
+
+        // 血条背景
+        const tmBarX = tmX + _ts(tmAvatarSize) + _ts(8);
+        const tmBarY = tmY + _ts(22);
+        const tmBarW = _ts(140);
+        const tmBarH = _ts(12);
+        roundRect(ctx, tmBarX, tmBarY, tmBarW, tmBarH, _ts(8));
+        ctx.fillStyle = "#333333";
+        ctx.fill();
+
+        // 血条
+        const tmHpPct = Math.max(0, Math.min(1, tm.hp));
+        const tmHpW = _ts(132) * tmHpPct;
+        if (tmHpW > 0) {
+          roundRect(ctx, tmBarX + _ts(2), tmBarY + _ts(2), tmHpW, _ts(8), _ts(6));
+          ctx.fillStyle = "#8BC34A";
+          ctx.fill();
+        }
+
+        // 血条文字（百分比）
+        ctx.fillStyle = "#ffffff";
+        ctx.font = `bold ${_ts(9)}px ${FONT_FAMILY || "Arial"}`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        const tmHpText = `${Math.round(tmHpPct * 100)}%`;
+        ctx.strokeText(tmHpText, tmBarX + tmBarW / 2, tmBarY + tmBarH / 2);
+        ctx.fillText(tmHpText, tmBarX + tmBarW / 2, tmBarY + tmBarH / 2);
+      });
     }
 
     // buttons
