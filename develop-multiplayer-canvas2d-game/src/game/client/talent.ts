@@ -3,10 +3,23 @@
  * ------------------------------------------------------------
  * 天赋点来源：玩家等级（每级 1 点）。
  * 面板布局：左下角 500×600 硬裁剪区，中心为玩家花朵，
- * 9 条天赋分支以旋转星形绽开，滚轮/触摸拖动旋转视角。
+ * 7 条天赋分支以旋转星形绽开，滚轮/触摸拖动旋转视角。
  * 存档：localStorage("talent_system_v2")。
  *
  * 遵循 tsconfig（strict / ES2017 / isolatedModules），所有成员显式类型化。
+ *
+ * ─────────────────────────────────────────────────────────────
+ * 2026-08 裁剪说明
+ * 早先的 9 分支里有 `reloadTime`（重新读作「reload speed」）
+ * 与 `fluidSpeed`。两者都没在 sim 里实际生效 ——
+ * `reload` 分支本身已经按 1 − reduction 处理 reload 时长，
+ * 不需要再叠一个乘子；fluid 是早期原型留下的字段，从未在
+ * 任一调用点被读取。
+ * 所以这两个分支在 v3 里被一并删除，UI 旋转星也收成 7 瓣。
+ * 存档读路径里遇到旧版本的 `reloadTime` / `fluidSpeed` 等级
+ * 会当作无效 key 忽略（不会破坏已有存档），但 getLevels()
+ * 不再暴露这两个 key。
+ * ─────────────────────────────────────────────────────────────
  */
 
 // =====================================================================
@@ -39,15 +52,26 @@ export interface TalentPetalLike {
   reloadTime?: number;
 }
 
-/** 天赋系统计算出的全部加成，供宿主写回/渲染。 */
+/**
+ * 天赋系统计算出的全部加成，供宿主写回/渲染。
+ * 字段集必须和 sim.ts `TalentBonuses` + protocol.ts `TALENT_KEYS` 严格同步：
+ * 服务器读取的 `TALENT_KEYS` 顺序就是这里的 wire 顺序，UI 上看到的星形
+ * 顺序也由这张表驱动——任一处漂移都会导致模拟和服务端读到的等级对不上。
+ */
 export interface TalentBonuses {
+  /** 减法：reload 时长直接扣掉这个比例（0..0.5）。 */
   reloadReduction: number;
+  /** 乘子：花瓣伤害。 */
   petalDmgMult: number;
+  /** 乘子：召唤物伤害。 */
   summonDmgMult: number;
+  /** 乘子：召唤物最大生命。 */
   summonHpMult: number;
+  /** 乘子：玩家最大生命。 */
   healthMult: number;
+  /** 乘子：玩家移速。 */
   speedMult: number;
-  reloadTimeMult: number;
+  /** 乘子：玩家身体接触伤害。 */
   bodyDamageMult: number;
 }
 
@@ -148,14 +172,16 @@ export class TalentSystem {
   private _pendingSync = false;
 
   // ── 原始天赋树数据定义 ──
+  // 7 分支（v3）：reload / petalDamage / summonDamage / summonHealth / health / speed / bodyDamage
+  // 删除了 v2 的 reloadTime + fluidSpeed（见文件头说明）。
   private trees: Record<string, TalentBranch> = {
-    reload:       { label: "Reload",      emoji: "RED",  maxLevel: 7, level: 0, effect: 0.015, desc: "–1.5% reload time per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
-    petalDamage:  { label: "Petal Dmg",   emoji: "DMG",  maxLevel: 7, level: 0, effect: 0.02, desc: "+2% petal damage per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
-    summonDamage: { label: "Summon Dmg",  emoji: "SDM",  maxLevel: 7, level: 0, effect: 0.05, desc: "+5% summon damage per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
-    summonHealth: { label: "Summon HP",   emoji: "SHP",  maxLevel: 7, level: 0, effect: 0.05, desc: "+5% summon health per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
-    health:       { label: "Health",      emoji: "HP",   maxLevel: 7, level: 0, effect: 0.05, desc: "+5% max health per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
-    speed:        { label: "Speed",       emoji: "SPE",  maxLevel: 7, level: 0, effect: 0.05, desc: "+5% move speed per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
-    bodyDamage:   { label: "Body Dmg",    emoji: "BDY",  maxLevel: 7, level: 0, effect: 0.04, desc: "+4% body damage per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
+    reload:       { label: "Reload",     emoji: "RED", maxLevel: 7, level: 0, effect: 0.05, desc: "–5% reload time per level",   color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
+    petalDamage:  { label: "Petal Dmg",  emoji: "DMG", maxLevel: 7, level: 0, effect: 0.05, desc: "+5% petal damage per level",  color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
+    summonDamage: { label: "Summon Dmg", emoji: "SDM", maxLevel: 7, level: 0, effect: 0.05, desc: "+5% summon damage per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
+    summonHealth: { label: "Summon HP",  emoji: "SHP", maxLevel: 7, level: 0, effect: 0.05, desc: "+5% summon health per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
+    health:       { label: "Health",     emoji: "HP",  maxLevel: 7, level: 0, effect: 0.05, desc: "+5% max health per level",    color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
+    speed:        { label: "Speed",      emoji: "SPE", maxLevel: 7, level: 0, effect: 0.05, desc: "+5% move speed per level",    color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
+    bodyDamage:   { label: "Body Dmg",   emoji: "BDY", maxLevel: 7, level: 0, effect: 0.04, desc: "+4% body damage per level",   color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
   };
 
   private readonly TIER_PALETTES: (null | { fill: string; glow: string })[] = [
@@ -203,6 +229,7 @@ export class TalentSystem {
   }
 
   private _getThemeColor(key: string): string {
+    // 7 分支配色（v3）。reloadTime / fluidSpeed 已删除，不再分配颜色。
     const colors: Record<string, string> = {
       reload: "#b085e6", petalDamage: "#61cb85", summonDamage: "#46cdcf",
       summonHealth: "#8ca1ad", health: "#3d72de", speed: "#e36387",
@@ -245,7 +272,7 @@ export class TalentSystem {
     const data = {
       talentPoints: this.talentPoints,
       trees: {} as Record<string, number>,
-      version: 2,
+      version: 3,
     };
     for (const [k, t] of Object.entries(this.trees)) {
       data.trees[k] = t.level;
@@ -267,6 +294,8 @@ export class TalentSystem {
       const data = JSON.parse(raw) as { talentPoints?: number; trees?: Record<string, number> };
       this.talentPoints = data.talentPoints || 0;
       for (const [k, v] of Object.entries(data.trees || {})) {
+        // 仅接受当前 trees 里实际存在的 key —— 旧版本的 reloadTime /
+        // fluidSpeed 等级会自然被忽略，不会回填到新分支。
         if (this.trees[k]) {
           this.trees[k].level = Math.min(v, this.trees[k].maxLevel);
         }
@@ -375,8 +404,13 @@ export class TalentSystem {
   applyToPlayer(): void {
     if (!this.host) return;
 
+    // 7 分支 → TalentBonuses 字段顺序（与 sim.ts / protocol.ts 保持一致）。
+    // reloadReduction 是「减法」语义：level × 0.05，封顶 0.5。
+    const reloadLvl = this.trees.reload?.level ?? 0;
+    const reloadReduction = Math.min(0.5, reloadLvl * (this.trees.reload?.effect ?? 0.05));
+
     const bonuses: TalentBonuses = {
-      reloadReduction: (this.trees.reload?.level ?? 0) * (this.trees.reload?.effect ?? 0.015),
+      reloadReduction,
       petalDmgMult: 1 + (this.trees.petalDamage?.level ?? 0) * (this.trees.petalDamage?.effect ?? 0.05),
       summonDmgMult: 1 + (this.trees.summonDamage?.level ?? 0) * (this.trees.summonDamage?.effect ?? 0.05),
       summonHpMult: 1 + (this.trees.summonHealth?.level ?? 0) * (this.trees.summonHealth?.effect ?? 0.05),
@@ -665,7 +699,6 @@ export class TalentSystem {
         ctx.ellipse(0, 0, symR * 0.7, symR * 1.0, 0, 0, Math.PI * 2);
         ctx.fill();
         break;
-      case "damage":
       case "summonDamage":
         ctx.beginPath();
         ctx.ellipse(0, 0, symR * 0.7, symR * 1.0, 0, 0, Math.PI * 2);
@@ -1009,7 +1042,7 @@ export class TalentSystem {
     return sx >= this.panelX && sx <= this.panelX + this.W && sy >= this.panelY && sy <= this.panelY + this.H;
   }
 
-  /** 天赋等级汇总（调试/存档展示用）。 */
+  /** 天赋等级汇总（调试/存档展示用）。仅返回当前 trees 中实际存在的分支。 */
   getLevels(): Record<string, number> {
     const out: Record<string, number> = {};
     for (const [k, t] of Object.entries(this.trees)) out[k] = t.level;
