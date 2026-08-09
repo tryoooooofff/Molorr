@@ -2894,10 +2894,20 @@ class ChangelogPanel {
   openAnim = 0;
   scrollY = 0;
   logs: ChangelogLogGroup[] = [
+      {
+      date: "9th October 2026",
+      entries: [
+        "- Added talent system",
+        "- Updated the quick slot and inventory interaction, which should be better",
+        "- Added enemy health bar for high rarity mobs, which should be higher than Mythic"
+      ]
+    },
     {
       date: "8th October 2026",
       entries: [
-        "- Add achievement system",
+        "- Added achievement system",
+        "- Added shop system and redeem code. If you see here, here is a code for you: M4SVGK",
+        "- Balanced the health of mobs","- Increase 50% of the mob spawn rates",
       ]
     },
     {
@@ -5062,9 +5072,9 @@ class ShopSystem {
         maxUses: 1,
       });
     };
-    add("123TRY", [{ type: "DNA", rarity: "Ultra", count: 1 }, { type: "Leaf", rarity: "Super", count: 1 }], 30);
-    add("MOBILE", [{ type: "DNA", rarity: "Ultra", count: 1 }, { type: "Stick", rarity: "Ultra", count: 3 }, { type: "Air", rarity: "Super", count: 1 }, { stars: 10000 }], 30);
-    add("TCS341", [{ type: "Tesseract", rarity: "Legendary", count: 1 }, { type: "Cube", rarity: "Legendary", count: 1 }, { type: "Square", rarity: "Legendary", count: 1 }, { stars: 1145 }], 10);
+    add("123TRY", [{ type: "Fang", rarity: "Ultra", count: 1 }, { type: "Leaf", rarity: "Super", count: 1 }], 30);
+    add("MOBILE", [{ type: "Fang", rarity: "Ultra", count: 1 }, { type: "Stick", rarity: "Ultra", count: 3 }, { type: "Air", rarity: "Super", count: 1 }, { stars: 10000 }], 30);
+    add("M4SVGK", [{ type: "Wing", rarity: "Legendary", count: 1 }, { type: "Leaf", rarity: "Legendary", count: 1 }, { type: "Coin", rarity: "Mythic", count: 1 }, { stars: 1145 }], 10);
     add("XXY30391F", [{ stars: 100000 }], 30);
     add("WELCOME", [{ type: "Wing", rarity: "Epic", count: 5 }, { type: "Leaf", rarity: "Epic", count: 3 }, { stars: 50 }], 30);
     add("1354679", [{ membership: "ruby", duration: 10, stars: 5000 }], 30);
@@ -6329,6 +6339,8 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   shopSystem: ShopSystem;
   /** 商店星星(⭐)货币,存入本地存档 SaveData.stars。 */
   stars = 10;
+  /** 视野内最近的 Ultra+ 生物（rarity >= 6），用于顶部 HUD 血条显示。 */
+  private nearestUltraPlus: Ent | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -7359,6 +7371,28 @@ private handlePacket(data: Uint8Array) {
       if (this.snapshotStalled) e.seen += dt;
       else if (this.time - e.seen > 0.6) this.ents.delete(e.id);
     }
+
+    // ---- 检测视野内最近的 Ultra+ 生物（Ultra=6, Super=7, Omega=8, Eternal=9） ----
+    {
+      let nearest: Ent | null = null;
+      let nearestDistSq = Infinity;
+      const me = this.ents.get(this.selfId);
+      if (me) {
+        for (const ent of this.ents.values()) {
+          if (ent.kind === ENT.MOB && ent.rarity >= 6) {
+            const dx = ent.x - me.x;
+            const dy = ent.y - me.y;
+            const distSq = dx * dx + dy * dy;
+            if (distSq < nearestDistSq) {
+              nearestDistSq = distSq;
+              nearest = ent;
+            }
+          }
+        }
+      }
+      this.nearestUltraPlus = nearest;
+    }
+
     for (let i = this.floaters.length - 1; i >= 0; i--) {
       const f = this.floaters[i];
       f.life -= dt;
@@ -12248,6 +12282,131 @@ if (me) {
     ctx.fillText(`Level ${this.level}`, lvlX + _s(20), lvlY + lvlH / 2);
     ctx.fillStyle = "#aaaaaa";
 
+
+    // ---- 队友信息（小队成员，最多4人） ----
+    const squadMates = Array.from(this.ents.values()).filter(
+      e => e.kind === ENT.PLAYER && e.team === TEAM.SQUAD && e.id !== this.selfId
+    ).slice(0, 4);
+
+    if (squadMates.length > 0) {
+      const squadScale = hudScale * 0.6;
+      const _sq = (v: number) => v * squadScale;
+      const squadAvatarSize = 36;
+      const squadBarW = _sq(160);
+      const squadBarH = _sq(14);
+      const gapY = _sq(6);
+
+      let squadY = lvlY + lvlH + _sq(14);
+
+      for (const mate of squadMates) {
+        const sAvatarX = _sq(20);
+        const sAvatarY = squadY;
+        const sAvatarCX = sAvatarX + _sq(squadAvatarSize) / 2;
+        const sAvatarCY = sAvatarY + _sq(squadAvatarSize) / 2;
+
+        // 队友头像（花朵）
+        ctx.save();
+        const mateEnt: Ent = {
+          ...mate,
+          x: sAvatarCX,
+          y: sAvatarCY,
+          radius: _sq(squadAvatarSize / 2 - 2),
+          spreadMode: false,
+          contractMode: false,
+        };
+        drawDefaultSkin(ctx, sAvatarCX, sAvatarCY, _sq(squadAvatarSize / 2 - 2), mateEnt);
+        ctx.restore();
+
+        // 队友名字
+        ctx.fillStyle = "#4CAF50";
+        ctx.font = `bold ${_sq(14)}px ${FONT_FAMILY || "Arial"}`;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "alphabetic";
+        ctx.strokeText(mate.name || "?", sAvatarX + _sq(squadAvatarSize) + _sq(8), sAvatarY + _sq(18));
+        ctx.fillText(mate.name || "?", sAvatarX + _sq(squadAvatarSize) + _sq(8), sAvatarY + _sq(18));
+
+        // 队友血条背景
+        const sBarX = sAvatarX + _sq(squadAvatarSize) + _sq(8);
+        const sBarY = sAvatarY + _sq(22);
+        roundRect(ctx, sBarX, sBarY, squadBarW, squadBarH, _sq(7));
+        ctx.fillStyle = "#333333";
+        ctx.fill();
+
+        // 队友血条前景
+        const mateHpPct = Math.max(0, Math.min(1, mate.hp));
+        const mateHpW = (squadBarW - _sq(4)) * mateHpPct;
+        if (mateHpW > 0) {
+          roundRect(ctx, sBarX + _sq(2), sBarY + _sq(2), mateHpW, squadBarH - _sq(4), _sq(5));
+          ctx.fillStyle = "#8BC34A";
+          ctx.fill();
+        }
+
+        // 血条百分比文字
+        ctx.fillStyle = "#ffffff";
+        ctx.font = `bold ${_sq(10)}px ${FONT_FAMILY || "Arial"}`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.strokeText(`${Math.round(mateHpPct * 100)}%`, sBarX + squadBarW / 2, sBarY + squadBarH / 2);
+        ctx.fillText(`${Math.round(mateHpPct * 100)}%`, sBarX + squadBarW / 2, sBarY + squadBarH / 2);
+
+        squadY += _sq(squadAvatarSize) + gapY;
+      }
+    }
+    // ---- 最近的 Ultra+ 生物血条（屏幕顶部中央） ----
+    if (this.nearestUltraPlus) {
+      const target = this.nearestUltraPlus;
+      const rarityInfo = RARITIES[target.rarity];
+      const targetName = MOBS[target.type]?.name ?? "Unknown";
+      const barCenterX = this.w / 2;
+      const barY = 30;
+      const barW = Math.min(340, Math.max(220, this.w * 0.38));
+      const barH = 28;
+      const barX = barCenterX - barW / 2;
+      const rarityColor = rarityInfo?.color ?? "#ff4444";
+
+      ctx.save();
+      // 名字（稀有度色 + 黑描边）
+      ctx.font = `bold 18px ${FONT_FAMILY || "Arial"}`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.strokeStyle = "#000000";
+      ctx.lineWidth = 4;
+      ctx.lineJoin = "round";
+      ctx.strokeText(`${rarityInfo?.name ?? ""} ${targetName}`, barCenterX, barY - 5);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(`${rarityInfo?.name ?? ""} ${targetName}`, barCenterX, barY - 5);
+
+      // 血条背景（深灰圆角）
+      roundRect(ctx, barX, barY, barW, barH, 14);
+      ctx.fillStyle = "#333333";
+      ctx.fill();
+      ctx.strokeStyle = "#333333";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+
+      // 血条前景（稀有度颜色，基于 displayHp 平滑过渡）
+      const pct = Math.max(0, Math.min(1, target.displayHp ?? target.hp));
+      const fillW = Math.max(0, (barW - 4) * pct);
+      if (fillW > 0) {
+        roundRect(ctx, barX + 2, barY + 2, fillW, barH - 4, 12);
+        ctx.fillStyle ="#66cc00";
+        ctx.fill();
+      }
+
+      // 血条文字（百分比，白色居中）
+      ctx.fillStyle = "#ffffff";
+      ctx.font = `bold 14px ${FONT_FAMILY || "Arial"}`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      const hpText = `${Math.round(pct * 100)}%`;
+      ctx.strokeStyle = "#000000";
+      ctx.lineWidth = 3;
+      ctx.lineJoin = "round";
+      ctx.strokeText(hpText, barCenterX, barY + barH / 2);
+      ctx.fillText(hpText, barCenterX, barY + barH / 2);
+      ctx.restore();
+    }
+
     // buttons
     for (const b of this.hudButtons()) button(ctx, b.rect, b.label, b.color, hit(b.rect, this.mx, this.my), shortMobile ? 13 : 16);
 
@@ -12263,7 +12422,7 @@ if (me) {
     ctx.fillStyle = "rgba(255,255,255,0.16)";
     for (const w of this.walls) ctx.fillRect(w.x * sx, w.y * sy, Math.max(1, w.w * sx), Math.max(1, w.h * sy));
     for (const e of this.ents.values()) {
-      if (e.kind === ENT.MOB) ctx.fillStyle = e.team === TEAM.HOSTILE ? "rgba(255,120,120,0.8)" : "rgba(140,255,170,0.9)";
+      if (e.kind === ENT.MOB) continue;
       else if (e.kind === ENT.PLAYER) ctx.fillStyle = e.team === TEAM.SELF ? "#ffe763" : "#9ad4ff";
       else continue;
       const size = e.team === TEAM.SELF ? 4 : 3;
