@@ -39,7 +39,7 @@ export function getStingerPetalCount(rarity: number): number {
  */
 export function getFixedPetalCount(itemId: number): number {
   // Basic (id: 0) - 永远 1 个
-  if (itemId === 0) return 1;
+  if (itemId === 31) return 1;
   // Pearl (id: 6) - 永远 1 个
   if (itemId === 6) return 1;
   // Bubble (id: 5) - 永远 1 个
@@ -367,7 +367,7 @@ export function drawItemIcon(
   // visual area and is centered on the cell. `k` scales the shape, while
   // (ox, oy) (in units of `size`) re-centers shapes whose geometry is offset.
   const ICON_NORM: Record<number, { k: number; ox: number; oy: number }> = {
-    0: { k: 0.66, ox: 0, oy: 0.5 },      // Basic: shrink a bit + center the petal ring
+    31: { k: 0.66, ox: 0, oy: 0.5 },
     7: { k: 1.25, ox: 0.375, oy: 0 },    // Wing: enlarge + shift right (it sat too far left)
     9: { k: 1.25, ox: 0.15, oy: 0.28 },  // Stick: enlarge + re-center
     21: { k: 2.55, ox: 0, oy: 0 },
@@ -382,19 +382,7 @@ export function drawItemIcon(
   ctx.strokeStyle = def.outline;
   ctx.fillStyle = def.color;
   switch (def.id) {
-    case 0: { // Basic (Light)
-      const count = getLightPetalCount(rarity);
-      for(let i=0;i<count;i++){
-        const a = (i * 2 * Math.PI / count) - Math.PI / 2;
-        const px = size * 1.0 * Math.cos(a);
-        const py = -size * 0.5 + size * 1.0 * Math.sin(a);
-        ctx.beginPath();
-        ctx.arc(px, py, size * 0.8, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-      }
-      break;
-    }
+
     case 1: { // Leaf
       ctx.beginPath();
       ctx.moveTo(0, size);
@@ -736,14 +724,29 @@ case 28: {
   ctx.restore();
   break;
 }
+    case 31: { // light
+      const count = getLightPetalCount(rarity);
+      for(let i=0;i<count;i++){
+        const a = (i * 2 * Math.PI / count) - Math.PI / 2;
+        const px = size * 1.0 * Math.cos(a);
+        const py = -size * 0.5 + size * 1.0 * Math.sin(a);
+        ctx.beginPath();
+        ctx.arc(px, py, size * 0.8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.lineWidth = size*0.25;
+        ctx.stroke();
+      }
+      break;
+    }
     case 36: { // Iris — a single, notably small purple ball
       ctx.beginPath();
       ctx.arc(0, 0, size * 0.52, 0, Math.PI * 2);
       ctx.fill();
-      ctx.lineWidth = Math.max(1.2, size * 0.12);
+      ctx.lineWidth = Math.max(2, size * 0.2);
       ctx.stroke();
       break;
     }
+
     case 19: { // Honey — a flat-topped hexagon (honeycomb cell)
       const radius = size;
       const sides = 6;
@@ -783,7 +786,7 @@ case 28: {
       ctx.scale(k, k);
       // Cancels the shape's centroid drift after rotation so the triangle
       // stays centered in the icon cell instead of sliding toward a corner.
-      ctx.translate(4.4, 8.3);
+      ctx.translate(1, 8.3);
       ctx.rotate((-28 * Math.PI) / 180);
       const pts = [
         { x: 0, y: -70 },
@@ -888,12 +891,7 @@ case 28: {
       break;
     }
     case 39: { // Magnet — a two-tone horseshoe magnet (red pole / blue pole)
-      // Authored on a 300×300 canvas around (cx, cy) = (150, 115). The drawn
-      // shape spans x 89..211 and y 54..186, so its bounding box is centered on
-      // (150, 120) and measures 122×132. Scaling by size/66 makes the magnet
-      // read at a full `size` half-height, matching round petals like Pearl
-      // instead of sitting noticeably small, and the translate below moves that
-      // bounding-box center onto the icon origin.
+
       const cx = 150;
       const cy = 115;
       const radius = 45;
@@ -1786,12 +1784,12 @@ export function drawMob(
   };
 
   const drawJellyfish = () => {
-    const scaledSize = radius * 2.2;
+    const scaledSize = radius * 2.0;
     const BODY = friendly ? "rgba(255,215,0,0.8)" : "rgba(200,215,235,0.8)";
     const STROKE = friendly ? "rgba(255,235,120,0.85)" : "rgba(240,240,240,0.9)";
     const TENT = friendly ? "rgba(200,160,0,0.9)" : "rgba(220,230,245,0.85)";
     const scale = scaledSize / 180;
-    const R = 80 * scale;
+    const R = 86 * scale;
     ctx.save();
     ctx.translate(x, y + Math.sin(t * 1.5) * 5);
     ctx.rotate(angle + Math.PI);
@@ -1835,7 +1833,7 @@ export function drawMob(
   };
 
   const drawHornet = () => {
-    const scale = (radius * 2) / 110;
+    const scale = (radius * 2) / 120;
     const colors = friendly
       ? { body: "#ffe667", stroke: "#d1bb54", dark: "#333333", stingerColor: "#333333" }
       : { body: "#ffd363", stroke: "#d3ad46", dark: "#333333", stingerColor: "#333333" };
@@ -1844,8 +1842,8 @@ export function drawMob(
     ctx.rotate(angle + Math.PI / 2);
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    const bodyW = 55 * scale;
-    const bodyH = 75 * scale;
+    const bodyW = 50 * scale;
+    const bodyH = 70 * scale;
     const strokeWidth = 12 * scale;
     ctx.beginPath();
     ctx.moveTo(-20 * scale, 50 * scale);
@@ -2262,7 +2260,7 @@ const drawSoldierAnt = () => {
   };
 
   const drawScorpion = () => {
-    const scale = (radius * 2) / 100;
+    const scale = (radius * 2) / 120;
     const bodyColor = friendly ? "#FFD700" : "#b59646";
     const darkColor = friendly ? "#B8860B" : "#8d7435";
     const legColor = friendly ? "#DAA520" : "#5a3e1a";
@@ -2640,8 +2638,8 @@ const drawCactus = () => {
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(t * 5.2);
-    const outerR = baseScale * 0.45;
-    const innerR = baseScale * 0.14;
+    const outerR = baseScale * 0.5;
+    const innerR = baseScale * 0.12;
     const coords: { x: number; y: number; angle: number; isTip: boolean }[] = [];
     for (let i = 0; i < 10; i++) {
       const a = (i * Math.PI) / 5 - Math.PI / 2;
