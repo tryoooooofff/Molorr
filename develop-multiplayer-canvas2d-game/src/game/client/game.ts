@@ -33,6 +33,7 @@ import {
   Wall,
   bagCellIndex,
   isBagCell,
+  isHotbarCell,
   isMainCell,
   craftChanceFor,
   getSummonCount,
@@ -79,6 +80,8 @@ import {
 import { QuickSlot, QuickSlotHost } from "./quickSlot";
 import { BonusSystem } from "./bonus";
 import { MobGallery } from "./mobGallery";
+import { TalentSystem } from "./talent";
+import type { TalentBonuses, TalentHost, TalentPetalLike } from "./talent";
 
 interface Ent {
   id: number;
@@ -256,6 +259,8 @@ class SettingsSystem {
 
     // UI状态
     panelOpen: boolean = false;
+    /** 面板划入动画进度(0=关闭,1=完全展开;参考背包 bagAnim,由 GameClient.update 驱动)。 */
+    openAnim: number = 0;
     panelRect: [number, number, number, number] | null = null;
     /** Design-space scale factor (design coords → screen coords). */
     panelScale: number = 1;
@@ -604,6 +609,8 @@ class SettingsSystem {
         this.maxScrollOffset = Math.max(0, totalContentHeight - contentH);
 
         ctx.save();
+        // 划入动画:淡入 + 从屏幕底部滑入(ease.outCubic,与背包面板一致)
+        ctx.globalAlpha = Math.min(1, this.openAnim * 1.6);
         ctx.lineJoin = "round";
         // Scale the entire panel + contents uniformly around the panel's
         // top-left corner. We translate to the corner, scale, then translate
@@ -612,6 +619,7 @@ class SettingsSystem {
         ctx.translate(panelX, panelY);
         ctx.scale(scale, scale);
         ctx.translate(-panelX, -panelY);
+        ctx.translate(0, (1 - ease.outCubic(this.openAnim)) * (viewH + 20));
 
         // 背景
         ctx.fillStyle = '#B4B4B4';
@@ -864,18 +872,26 @@ class SettingsSystem {
             this._scrollThumbRect = null;
         }
 
-        // 关闭按钮
+        // 关闭按钮(与成就面板同款:红色渐变圆角按钮)
         const closeX = panelX + panelW - 35, closeY = panelY + 10, closeSize = 25;
-        ctx.fillStyle = '#e74c3c';
+        const closeR: [number, number, number, number] = [closeX, closeY, closeSize, closeSize];
+        const closeC = [220, 80, 80];
+        const adjC = (f: number) => `rgb(${closeC.map(c => Math.min(255, Math.max(0, Math.floor(c * f)))).join(",")})`;
         ctx.beginPath();
-        if (ctx.roundRect) {
-            ctx.roundRect(closeX, closeY, closeSize, closeSize, 6);
-        } else {
-            ctx.rect(closeX, closeY, closeSize, closeSize);
-        }
+        if (ctx.roundRect) ctx.roundRect(...closeR, 8); else ctx.rect(...closeR);
+        ctx.fillStyle = adjC(1);
         ctx.fill();
-        ctx.strokeStyle = '#000000';
-        ctx.lineWidth = 2;
+        ctx.save();
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(...closeR, 8); else ctx.rect(...closeR);
+        ctx.clip();
+        ctx.fillStyle = adjC(0.85);
+        ctx.fillRect(closeX, closeY, closeSize, closeSize / 2);
+        ctx.restore();
+        ctx.strokeStyle = adjC(0.5);
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(...closeR, 8); else ctx.rect(...closeR);
         ctx.stroke();
         drawStrokeText('×', closeX + 12.5, closeY + 18, 18);
 
@@ -1051,6 +1067,11 @@ class SettingsSystem {
         this.panelOpen = !this.panelOpen;
         if (this.panelOpen) this.scrollOffset = 0;
         this._forceRedraw();
+    }
+
+    /** 面板划入动画进度推进(目标 = panelOpen)。 */
+    updateOpenAnim(dt: number) {
+        this.openAnim += ((this.panelOpen ? 1 : 0) - this.openAnim) * Math.min(1, dt * 10);
     }
 }
 
@@ -1347,6 +1368,7 @@ class TooltipSystem {
     anchorY: number,
     viewWidth: number,
     viewHeight: number,
+    talentBonuses?: TalentBonuses | null,
   ) {
     const def = ITEMS[cell.item];
     const rarity = RARITIES[cell.rarity];
@@ -1362,8 +1384,28 @@ class TooltipSystem {
     }> = [];
     const mult = rarity.mult;
 
+    // ---- Talent-modulated effective values for petals ----
+    // The `reload` branch subtracts a flat fraction of the base reload, and
+    // the `petalDamage` branch is a straight multiplier on petal damage. The
+    // server applies the same numbers authoritatively (see sim.ts
+    // `applyTalentReload` and the petal-damage line in the petal update),
+    // so this is purely a UI-side display that mirrors what the player
+    // actually gets at the moment.
+    const reloadReduction = Math.max(0, Math.min(0.5, talentBonuses?.reloadReduction ?? 0));
+    const petalDmgMult = talentBonuses?.petalDmgMult ?? 1;
+    const effectiveReload = def.reload > 0 ? def.reload * (1 - reloadReduction) : 0;
+
     if (def.kind !== "trinket") {
-      if (def.damage > 0) statLines.push({ text: `Damage: ${(def.damage * mult).toFixed(0)}`, color: this.STYLES.DAMAGE });
+      if (def.damage > 0) {
+        const baseDmg = def.damage * mult;
+        const finalDmg = baseDmg * petalDmgMult;
+        // Show "+x% talent damage" suffix whenever the talent actually
+        // moves the needle, so a +0% (default) tooltip stays clean.
+        const suffix = petalDmgMult > 1.0001
+          ? { text: `  (+${Math.round((petalDmgMult - 1) * 100)}% talent)`, color: this.STYLES.SPECIAL }
+          : undefined;
+        statLines.push({ text: `Damage: ${finalDmg.toFixed(0)}`, color: this.STYLES.DAMAGE, suffix });
+      }
       if (def.health > 0) statLines.push({ text: `Health: ${(def.health * mult).toFixed(0)}`, color: this.STYLES.HEALTH });
     }
     if (def.heal) {
@@ -1425,7 +1467,10 @@ class TooltipSystem {
     let currentY = y + 24;
     this.drawStrokedText(ctx, def.name, left, currentY, 22, "left", this.STYLES.NAME, 5);
     if (def.reload > 0) {
-      this.drawStrokedText(ctx, `${def.reload.toFixed(1)}s ⟳`, right, currentY, 14, "right", this.STYLES.RELOAD, 4);
+      // Effective reload after the `reload` talent branch, mirrored from
+      // sim.ts `applyTalentReload`. Showing the talent-modified value keeps
+      // the tooltip honest about how fast the petal will actually fire.
+      this.drawStrokedText(ctx, `${effectiveReload.toFixed(1)}s ⟳`, right, currentY, 14, "right", this.STYLES.RELOAD, 4);
     }
 
     currentY += 28;
@@ -1674,6 +1719,10 @@ export class AccountSystem {
   SESSION_STATS_KEY = "flwrr_session_stats";
 
   panelOpen = false;
+  /** 面板划入动画进度(0=关闭,1=完全展开;参考背包 bagAnim,由 GameClient.update 驱动)。 */
+  openAnim = 0;
+  /** 最近一次 draw() 的屏幕高度(供 _drawPanel 计算滑入距离)。 */
+  private _animH = 600;
   panelW = 480;
   panelH = 650;
   panelX = 0;
@@ -1802,6 +1851,11 @@ export class AccountSystem {
     if (this.currentUser) this.saveSessionStats();
   }
 
+  /** 面板划入动画进度推进(目标 = panelOpen)。 */
+  updateOpenAnim(dt: number) {
+    this.openAnim += ((this.panelOpen ? 1 : 0) - this.openAnim) * Math.min(1, dt * 10);
+  }
+
   _clearInputs() {
     for (const k of Object.keys(this.inputs)) { this.inputs[k].value = ""; this.inputs[k].focused = false; }
     this.showPassLogin = this.showPassReg = this.showPassConfirm = false;
@@ -1845,6 +1899,7 @@ export class AccountSystem {
     if (!this.panelOpen) return;
     const W = (window as any).WIDTH || (window as any).innerWidth || ctx.canvas.width;
     const H = (window as any).HEIGHT || (window as any).innerHeight || ctx.canvas.height;
+    this._animH = H;
 
     const isMobileView = H < 640;
     this._isLandscape = isMobileView && W > H;
@@ -1875,12 +1930,15 @@ export class AccountSystem {
   _drawPanel(ctx: CanvasRenderingContext2D) {
     const { panelX: px, panelY: py, panelW: pw, panelH: ph } = this;
     ctx.save();
+    // 划入动画:淡入 + 从屏幕底部滑入(ease.outCubic,与背包面板一致)
+    ctx.globalAlpha = Math.min(1, this.openAnim * 1.6);
 
     if (this._panelScale !== 1) {
       ctx.translate(this._panelCX, this._panelCY);
       ctx.scale(this._panelScale, this._panelScale);
       ctx.translate(-this._panelCX, -this._panelCY);
     }
+    ctx.translate(0, (1 - ease.outCubic(this.openAnim)) * (this._animH + 20));
 
     ctx.fillStyle = "#d94b4b";
     ctx.beginPath();
@@ -1903,7 +1961,7 @@ export class AccountSystem {
 
     this.drawStrokedText(ctx, "Account", px + pw / 2, py + hdrH / 2, 20, "center", "white");
 
-    this._drawStyledButton(ctx, "✕", [px + pw - 38, py + 10, 28, 28], [200, 60, 60], 16);
+    this._drawStyledButton(ctx, "✕", [px + pw - 38, py + 10, 28, 28], [220, 80, 80], 16);
     this._registerBtn("close", px + pw - 38, py + 10, 28, 28);
 
     const contentY = py + hdrH + 10;
@@ -2832,14 +2890,14 @@ interface ChangelogLogGroup {
 
 class ChangelogPanel {
   visible = false;
+  /** 面板划入动画进度(0=关闭,1=完全展开;参考背包 bagAnim,由 GameClient.update 驱动)。 */
+  openAnim = 0;
   scrollY = 0;
   logs: ChangelogLogGroup[] = [
     {
       date: "8th October 2026",
       entries: [
-        "- Added achievement system",
-        "- Added shop system and redeem code system",
-        "- Updated mobile input feeling",
+        "- Add achievement system",
       ]
     },
     {
@@ -2922,6 +2980,11 @@ class ChangelogPanel {
   draw(ctx: CanvasRenderingContext2D, W: number, H: number) {
     if (!this.visible) return;
 
+    ctx.save();
+    // 划入动画:淡入 + 从屏幕底部滑入(ease.outCubic,与背包面板一致)
+    ctx.globalAlpha = Math.min(1, this.openAnim * 1.6);
+    ctx.translate(0, (1 - ease.outCubic(this.openAnim)) * (H + 20));
+
     const panelW = this.panelW;
     const panelH = this.panelH;
     const [px, py] = this.panelPos(W, H);
@@ -2953,14 +3016,28 @@ class ChangelogPanel {
     ctx.fillStyle = '#ffffff';
     ctx.fillText('Changelog', titleX, titleY);
 
-    // --- 关闭按钮 ---
+    // --- 关闭按钮(与成就面板同款:红色渐变圆角按钮) ---
     const closeSize = 38 * s;
     const closeRect: [number, number, number, number] = [px + panelW - 50 * s, py + 12 * s, closeSize, closeSize];
     this.closeRect = closeRect;
-    ctx.fillStyle = '#f44336';
+    const closeC = [220, 80, 80];
+    const adjC = (f: number) => `rgb(${closeC.map(c => Math.min(255, Math.max(0, Math.floor(c * f)))).join(",")})`;
     ctx.beginPath();
     ctx.roundRect(...closeRect, 8 * s);
+    ctx.fillStyle = adjC(1);
     ctx.fill();
+    ctx.save();
+    ctx.beginPath();
+    ctx.roundRect(...closeRect, 8 * s);
+    ctx.clip();
+    ctx.fillStyle = adjC(0.85);
+    ctx.fillRect(closeRect[0], closeRect[1], closeRect[2], closeRect[3] / 2);
+    ctx.restore();
+    ctx.strokeStyle = adjC(0.5);
+    ctx.lineWidth = 3 * s;
+    ctx.beginPath();
+    ctx.roundRect(...closeRect, 8 * s);
+    ctx.stroke();
 
     ctx.font = `${22 * s}px ${FONT_FAMILY}`;
     ctx.strokeStyle = '#000000';
@@ -3066,6 +3143,8 @@ class ChangelogPanel {
       ctx.roundRect(trackX, thumbY, trackW, thumbH, trackW / 2);
       ctx.fill();
     }
+
+    ctx.restore();
   }
 
   handleClick(x: number, y: number, W: number, H: number): boolean {
@@ -3125,6 +3204,11 @@ class ChangelogPanel {
     this.visible = !this.visible;
     if (this.visible) this.scrollY = 0;
   }
+
+  /** 面板划入动画进度推进(目标 = visible)。 */
+  updateOpenAnim(dt: number) {
+    this.openAnim += ((this.visible ? 1 : 0) - this.openAnim) * Math.min(1, dt * 10);
+  }
 }
 
 // =====================================================================
@@ -3152,7 +3236,13 @@ class AchievementSystem {
   popupTimer: number;
   POPUP_DURATION = 4.0;
   panelOpen = false;
+  /** 面板划入动画进度(0=关闭,1=完全展开;参考背包 bagAnim,由 GameClient.update 驱动)。 */
+  openAnim = 0;
   _panelScrollY = 0;
+  /** Touch-based scroll state (mobile) — mirrors SettingsSystem. */
+  touchScrolling = false;
+  private touchStartY = 0;
+  private touchStartOffset = 0;
   _filter = "All";
   _playTimeAccum = 0;
 
@@ -3405,7 +3495,7 @@ class AchievementSystem {
     const shop = (window as any).gameInstance?.shopSystem;
     if (shop) shop.addStars(ach.stars, true);
     this.pendingPopups.push(ach);
-    console.log(`Achievement unlocked: ${ach.title} (+${ach.stars}⭐)`);
+    console.log(`🏆 Achievement unlocked: ${ach.title} (+${ach.stars}⭐)`);
   }
 
   update(dt: number) {
@@ -3582,8 +3672,10 @@ class AchievementSystem {
 
   /** 面板几何(屏幕坐标)。小屏幕时整体等比缩小。 */
   _panelRect(W: number, H: number): { x: number; y: number; w: number; h: number; scale: number; PW: number; PH: number } {
-    const PW = 720, PH = 640;
-    const scale = Math.min(1, W / 760, H / 700);
+    const isMobile = H < 640 || W < 640;
+    const PW = isMobile ? 520 : 720;
+    const PH = isMobile ? 400 : 640;
+    const scale = Math.min(1, W / (PW + 40), H / (PH + 40));
     return { x: W / 2 - (PW * scale) / 2, y: H / 2 - (PH * scale) / 2, w: PW * scale, h: PH * scale, scale, PW, PH };
   }
 
@@ -3595,7 +3687,7 @@ class AchievementSystem {
     return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
   }
 
-  drawPanel(ctx: CanvasRenderingContext2D) {
+    drawPanel(ctx: CanvasRenderingContext2D) {
     if (!this.panelOpen) return;
 
     const { W, H } = this._size();
@@ -3603,8 +3695,11 @@ class AchievementSystem {
     const scale = r.scale;
     const px = r.x, py = r.y;
     const PW = r.PW, PH = r.PH;
+    const isMobile = H < 640 || W < 640;
 
     ctx.save();
+    // 划入动画:淡入 + 从屏幕底部滑入(ease.outCubic,与背包面板一致)
+    ctx.globalAlpha = Math.min(1, this.openAnim * 1.6);
 
     // 小屏幕整体缩放(保持内部坐标不变)
     if (scale < 1) {
@@ -3612,9 +3707,11 @@ class AchievementSystem {
       ctx.scale(scale, scale);
       ctx.translate(-W / 2, -H / 2);
     }
+    ctx.translate(0, (1 - ease.outCubic(this.openAnim)) * (H + 20));
 
     // ───────────── 主背景（更深绿） ─────────────
     ctx.fillStyle = '#1faa66';
+
     ctx.fillRect(px, py, PW, PH);
 
     ctx.strokeStyle = '#0d5c3a';
@@ -3622,24 +3719,27 @@ class AchievementSystem {
     ctx.strokeRect(px, py, PW, PH);
 
     // 标题
-    this.drawStrokedText(ctx, 'Achievements', px + PW / 2, py + 40, 32);
+    this.drawStrokedText(ctx, 'Achievements', px + PW / 2, py + (isMobile ? 32 : 40), isMobile ? 28 : 32);
 
     // ───────────── 关闭按钮 ─────────────
+    const closeBtnSize = isMobile ? 32 : 40;
+    const closeBtnH = isMobile ? 28 : 35;
     this.drawStyledButton(
       ctx,
-      'X',
-      [px + PW - 50, py + 10, 40, 35],
+      '✕',
+      [px + PW - closeBtnSize - 10, py + 10, closeBtnSize, closeBtnH],
       [220, 80, 80],
-      18
+      isMobile ? 15 : 18
     );
 
     // ───────────── 总进度条 ─────────────
     const total = this.achievements.length;
     const unlocked = this.unlocked.size;
 
-    const barW = 420, barH = 24;
+    const barW = isMobile ? 320 : 420;
+    const barH = isMobile ? 20 : 24;
     const barX = px + (PW - barW) / 2;
-    const barY = py + 70;
+    const barY = py + (isMobile ? 58 : 70);
     ctx.fillStyle = '#145a3b';
     ctx.fillRect(barX, barY, barW, barH);
     ctx.fillStyle = '#6df2a3';
@@ -3652,16 +3752,23 @@ class AchievementSystem {
       `unlocked ${unlocked}/${total}`,
       barX + barW / 2,
       barY + barH / 2,
-      16
+      isMobile ? 14 : 16
     );
 
     // ───────────── 筛选按钮 ─────────────
     const filters = ['All', 'Complete', 'Incomplete'];
     this._filter = this._filter || 'All';
 
+    const filterBtnW = isMobile ? 72 : 100;
+    const filterBtnH = isMobile ? 28 : 34;
+    const filterGap = isMobile ? 6 : 8;
+    const filterTotalW = filterBtnW * 3 + filterGap * 2;
+    const filterStartX = px + (PW - filterTotalW) / 2;
+    const filterY = py + (isMobile ? 88 : 110);
+
     filters.forEach((f, i) => {
-      const bx = px + PW / 2 - 150 + i * 110;
-      const by = py + 110;
+      const bx = filterStartX + i * (filterBtnW + filterGap);
+      const by = filterY;
 
       let color = [160, 160, 160];
 
@@ -3671,14 +3778,22 @@ class AchievementSystem {
         if (f === 'Incomplete') color = [255, 120, 180];
       }
 
-      this.drawStyledButton(ctx, f, [bx, by, 100, 34], color, 14);
+      this.drawStyledButton(ctx, f, [bx, by, filterBtnW, filterBtnH], color, isMobile ? 12 : 14);
     });
 
     // ───────────── 成就列表(像素级滚动) ─────────────
-    const startY = py + 170;
-    const itemW = 300, itemH = 95;
-    const gap = 14;
-    const viewportRows = 4;
+    const startY = py + (isMobile ? 128 : 170);
+    const itemW = isMobile ? 200 : 300;
+    const itemH = isMobile ? 70 : 95;
+    const gap = isMobile ? 10 : 14;
+    const viewportRows = isMobile ? 3 : 4;
+    const titleSize = isMobile ? 12 : 15;
+    const starTextSize = isMobile ? 11 : 13;
+    const starIconSize = isMobile ? 5 : 7;
+    const descSize = isMobile ? 12 : 12;
+    const barTextSizeDone = isMobile ? 10 : 12;
+    const barTextSizeProgress = isMobile ? 9 : 11;
+    const sidePad = isMobile ? 50 : 40;
 
     let list = this._getFilteredList();
 
@@ -3697,14 +3812,14 @@ class AchievementSystem {
     // 裁剪:滚出视口的卡片不越界
     ctx.save();
     ctx.beginPath();
-    ctx.rect(px + 40 - 2, startY - 2, itemW * 2 + gap + 4, viewportH + 4);
+    ctx.rect(px + sidePad - 2, startY - 2, itemW * 2 + gap + 4, viewportH + 20);
     ctx.clip();
 
     list.forEach((ach, i) => {
       const col = i % 2;
       const row = Math.floor(i / 2);
 
-      const ix = px + 40 + col * (itemW + gap);
+      const ix = px + sidePad + col * (itemW + gap);
       const iy = startY + row * rowH + yOff;
 
       const done = this.unlocked.has(ach.id);
@@ -3718,31 +3833,31 @@ class AchievementSystem {
       ctx.strokeRect(ix, iy, itemW, itemH);
 
       // 标题
-      this.drawStrokedText(ctx, ach.title, ix + 12, iy + 20, 15, 'left');
+      this.drawStrokedText(ctx, ach.title, ix + 12, iy + (isMobile ? 16 : 20), titleSize, 'left');
 
       // 星星(金铜色图标 + 数量)
       this.drawStrokedText(
         ctx,
         `${this._fmtNum(ach.stars)}`,
         ix + itemW - 24,
-        iy + 20,
-        13,
+        iy + (isMobile ? 16 : 20),
+        starTextSize,
         'right',
         '#FFD700'
       );
-      drawStarIcon(ctx, ix + itemW - 14, iy + 20, 7);
+      drawStarIcon(ctx, ix + itemW - 14, iy + (isMobile ? 16 : 20), starIconSize);
 
       // 描述
       ctx.fillStyle = 'rgba(0,0,0,0.6)';
-      ctx.font = `12px ${FONT_FAMILY}`;
+      ctx.font = `${descSize}px ${FONT_FAMILY}`;
       ctx.textAlign = 'left';
-      ctx.fillText(ach.desc, ix + 12, iy + 42);
+      ctx.fillText(ach.desc, ix + 12, iy + (isMobile ? 34 : 42));
 
       // 进度条
       const pX = ix + 12;
-      const pY = iy + 60;
+      const pY = iy + (isMobile ? 46 : 60);
       const pW = itemW - 24;
-      const pH = 18;
+      const pH = barH;
 
       ctx.fillStyle = '#145a3b';
       ctx.fillRect(pX, pY, pW, pH);
@@ -3766,14 +3881,14 @@ class AchievementSystem {
       );
 
       if (done) {
-        this.drawStrokedText(ctx, 'DONE', pX + pW / 2, pY + pH / 2, 12);
+        this.drawStrokedText(ctx, 'DONE', pX + pW / 2, pY + pH / 2, barTextSizeDone);
       } else {
         this.drawStrokedText(
           ctx,
           `${Math.floor(progress * 100)}%`,
           pX + pW / 2,
           pY + pH / 2,
-          11
+          barTextSizeProgress
         );
       }
     });
@@ -3836,6 +3951,730 @@ class AchievementSystem {
   }
 
   togglePanel() { this.panelOpen = !this.panelOpen; }
+
+  /** 面板划入动画进度推进(目标 = panelOpen)。 */
+  updateOpenAnim(dt: number) {
+    this.openAnim += ((this.panelOpen ? 1 : 0) - this.openAnim) * Math.min(1, dt * 10);
+  }
+
+  /** Begin touch scrolling (mobile). Returns true if the press is inside the panel content area. */
+  beginTouch(x: number, y: number): boolean {
+    if (!this.panelOpen) return false;
+    if (!this.panelContains(x, y)) return false;
+    const { W, H } = this._size();
+    const r = this._panelRect(W, H);
+    // Don't start scroll if hitting the close button or filter tabs
+    const scale = r.scale;
+    const dx = (x - W / 2) / scale + W / 2;
+    const dy = (y - H / 2) / scale + H / 2;
+    const px = W / 2 - r.PW / 2;
+    const py = H / 2 - r.PH / 2;
+    const closeX = px + r.PW - 50;
+    const closeY = py + 10;
+    if (dx >= closeX && dx <= closeX + 40 && dy >= closeY && dy <= closeY + 35) return false;
+    const filters = ['All', 'Complete', 'Incomplete'];
+    for (let i = 0; i < filters.length; i++) {
+      const bx = px + r.PW / 2 - 150 + i * 110;
+      const by = py + 110;
+      if (dx >= bx && dx <= bx + 100 && dy >= by && dy <= by + 34) return false;
+    }
+    this.touchScrolling = true;
+    this.touchStartY = y;
+    this.touchStartOffset = this._panelScrollY;
+    return true;
+  }
+
+  touchMove(y: number) {
+    if (!this.touchScrolling) return;
+    const { W, H } = this._size();
+    const r = this._panelRect(W, H);
+    const scale = r.scale || 1;
+    const deltaY = (y - this.touchStartY) / scale;
+    const list = this._getFilteredList();
+    const itemH = 95, gap = 14;
+    const rowH = itemH + gap;
+    const contentH = Math.max(0, Math.ceil(list.length / 2) * rowH - gap);
+    const viewportH = 4 * rowH - gap;
+    const maxScroll = Math.max(0, contentH - viewportH);
+    this._panelScrollY = Math.max(0, Math.min(maxScroll, this.touchStartOffset - deltaY));
+  }
+
+  endTouch() {
+    this.touchScrolling = false;
+  }
+}
+
+// =====================================================================
+// Challenge System — 每日猎杀挑战(参考 HuntingQuestSystem)
+// ---------------------------------------------------------------------
+// 每天为 Ultra / Super / Omega / Mythic 各生成一个"击杀指定生物"任务:
+//  - 击杀目标生物后任务变为可领取,点击 CLAIM 发放星星(⭐)奖励;
+//  - 领取后当日该生物不会再出现在同稀有度任务中(completedToday);
+//  - 数据存 localStorage,按自然日自动重置。
+// 入口：主菜单顶部 Hunting Quest 图标(top_hunting_quest)。
+// =====================================================================
+
+/** 单个猎杀任务(与 localStorage 序列化结构一致)。 */
+interface HuntingQuest {
+  id: string;            // "ultra" | "super" | "omega" | "mythic"
+  rarity: string;        // RARITIES 名称("Ultra" 等)
+  targetMob: string;     // 目标生物名(ENEMY_DROP_TABLE 键)
+  targetCount: number;
+  currentCount: number;
+  reward: number;        // 星星奖励
+  completed: boolean;
+  /** 已领取标记。替换新任务时创建全新对象,不携带此字段。 */
+  _claimed?: boolean;
+}
+
+/** 领取奖励时的爆发粒子。 */
+interface QuestParticle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  life: number;
+  maxLife: number;
+  size: number;
+  color: [number, number, number];
+  alpha: number;
+}
+
+class ChallengeSystem {
+  game: GameClient;
+  quests: HuntingQuest[] = [];
+  private completedToday = new Map<string, Set<string>>();
+  private lastResetDate: string | null = null;
+  private pendingCompletion: HuntingQuest | null = null;
+  private particles: QuestParticle[] = [];
+
+  /** 面板状态(主菜单,与成就面板同款交互)。 */
+  panelOpen = false;
+  /** 面板划入动画进度(0=关闭,1=完全展开;参考背包 bagAnim,由 GameClient.update 驱动)。 */
+  openAnim = 0;
+  _panelScrollY = 0;
+  touchScrolling = false;
+  private touchStartY = 0;
+  private touchStartOffset = 0;
+
+  /** 最近一次绘制的任务卡矩形(点击命中用,设计坐标)。 */
+  private _cardRects: { quest: HuntingQuest; rect: Rect; claimRect: Rect | null }[] = [];
+
+  private readonly SAVE_KEY = "hunting_quests";
+
+  /** 与参考实现一致的稀有度主题色;未知稀有度回退金色。 */
+  private static readonly RARITY_COLORS: Record<string, [number, number, number]> = {
+    Mythic: [0, 204, 204],
+    Ultra: [204, 84, 144],
+    Super: [116, 191, 116],
+    Omega: [179, 31, 163],
+  };
+
+  constructor(gameInstance: GameClient) {
+    this.game = gameInstance;
+    this.loadQuests();
+    this.checkDailyReset();
+  }
+
+  _size(): { W: number; H: number } {
+    const W = this.game.viewWidth ?? (window as any).WIDTH ?? window.innerWidth;
+    const H = this.game.viewHeight ?? (window as any).HEIGHT ?? window.innerHeight;
+    return { W, H };
+  }
+
+  // ==================== 粒子效果 ====================
+
+  private rarityColor(rarity: string): [number, number, number] {
+    return ChallengeSystem.RARITY_COLORS[rarity] ?? [255, 215, 0];
+  }
+
+  createParticleEffect(x: number, y: number, rarity: string) {
+    const color = this.rarityColor(rarity);
+    const particleCount = 60;
+    for (let i = 0; i < particleCount; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 2 + Math.random() * 6;
+      const lifetime = 0.6 + Math.random() * 0.8;
+      this.particles.push({
+        x,
+        y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        life: lifetime,
+        maxLife: lifetime,
+        size: 3 + Math.random() * 6,
+        color,
+        alpha: 1,
+      });
+    }
+  }
+
+  updateParticles(dt: number) {
+    for (let i = this.particles.length - 1; i >= 0; i--) {
+      const p = this.particles[i];
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.15; // 重力
+      p.life -= dt;
+      p.alpha = p.life / p.maxLife;
+      if (p.life <= 0) this.particles.splice(i, 1);
+    }
+  }
+
+  drawParticles(ctx: CanvasRenderingContext2D) {
+    for (const p of this.particles) {
+      const alpha = Math.min(1, p.alpha * 1.2);
+      ctx.fillStyle = `rgba(${p.color[0]}, ${p.color[1]}, ${p.color[2]}, ${alpha})`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, p.size * (p.life / p.maxLife), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  hasActiveParticles(): boolean {
+    return this.particles.length > 0;
+  }
+
+  // ==================== 任务核心 ====================
+
+  getAvailableMobsByRarity(): Record<string, string[]> {
+    const allMobs = Object.keys(ENEMY_DROP_TABLE ?? {});
+    const mobsByRarity: Record<string, string[]> = {
+      Ultra: [],
+      Super: [],
+      Omega: [],
+      Mythic: [],
+    };
+    for (const mob of allMobs) {
+      if (!mob || mob === "SpacetimeTunnel") continue;
+      const completed = this.completedToday.get(mob) ?? new Set<string>();
+      if (!completed.has("Ultra")) mobsByRarity["Ultra"].push(mob);
+      if (!completed.has("Super")) mobsByRarity["Super"].push(mob);
+      if (!completed.has("Omega")) mobsByRarity["Omega"].push(mob);
+      if (!completed.has("Mythic")) mobsByRarity["Mythic"].push(mob);
+    }
+    return mobsByRarity;
+  }
+
+  getRandomMob(rarity: string, excludeMob: string | null = null): string | null {
+    const mobsByRarity = this.getAvailableMobsByRarity();
+    let available = mobsByRarity[rarity] ?? [];
+    if (excludeMob) available = available.filter((m) => m !== excludeMob);
+    if (available.length === 0) return null;
+    return available[Math.floor(Math.random() * available.length)];
+  }
+
+  initDailyQuests() {
+    this.quests = [];
+    const specs: { id: string; rarity: string; reward: number }[] = [
+      { id: "ultra", rarity: "Ultra", reward: 30 },
+      { id: "super", rarity: "Super", reward: 100 },
+      { id: "omega", rarity: "Omega", reward: 200 },
+      { id: "mythic", rarity: "Mythic", reward: 10 },
+    ];
+    for (const spec of specs) {
+      const targetMob = this.getRandomMob(spec.rarity);
+      if (!targetMob) continue;
+      this.quests.push({
+        id: spec.id,
+        rarity: spec.rarity,
+        targetMob,
+        targetCount: 1,
+        currentCount: 0,
+        reward: spec.reward,
+        completed: false,
+      });
+    }
+    this.saveQuests();
+  }
+
+  checkDailyReset() {
+    const today = new Date().toDateString();
+    if (this.lastResetDate !== today) {
+      this.completedToday.clear();
+      this.lastResetDate = today;
+      this.initDailyQuests();
+      this.saveQuests();
+    }
+  }
+
+  /** 击杀回调:被击杀生物名 + 稀有度名(均由 EVT.KILL 提供)。 */
+  updateProgress(killedMob: string, killedRarity: string): boolean {
+    if (!killedMob || !killedRarity) return false;
+    for (const quest of this.quests) {
+      if (quest.completed) continue;
+      if (quest.rarity === killedRarity && quest.targetMob === killedMob) {
+        quest.currentCount++;
+        if (quest.currentCount >= quest.targetCount && !quest.completed) {
+          quest.completed = true;
+          this.pendingCompletion = quest;
+        }
+        this.saveQuests();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 领取奖励:发放星星、粒子、toast,并替换为同稀有度新任务。 */
+  claimQuest(questId: string, x?: number, y?: number): boolean {
+    const questIndex = this.quests.findIndex((q) => q.id === questId);
+    if (questIndex === -1) return false;
+    const quest = this.quests[questIndex];
+    if (!quest.completed || quest._claimed) return false;
+
+    quest._claimed = true;
+    const { W, H } = this._size();
+    const rewardX = x !== undefined ? x : W / 2;
+    const rewardY = y !== undefined ? y : H / 3;
+
+    // 星星奖励(带动画)
+    if (this.game.shopSystem) {
+      this.game.shopSystem.addStars(quest.reward, true);
+    }
+
+    // 记录今日已完成(该稀有度不再出现同一生物)
+    if (!this.completedToday.has(quest.rarity)) this.completedToday.set(quest.rarity, new Set());
+    this.completedToday.get(quest.rarity)!.add(quest.targetMob);
+
+    // 粒子 + 飘字反馈
+    this.createParticleEffect(rewardX, rewardY, quest.rarity);
+    this.game.showMenuToast(`🎉 Quest Complete! +${quest.reward} Stars`);
+
+    // 替换新任务(全新对象,不带 _claimed)
+    const newMob = this.getRandomMob(quest.rarity, quest.targetMob);
+    if (newMob) {
+      this.quests[questIndex] = {
+        id: quest.id,
+        rarity: quest.rarity,
+        targetMob: newMob,
+        targetCount: 1,
+        currentCount: 0,
+        reward: quest.reward,
+        completed: false,
+      };
+    } else {
+      this.quests.splice(questIndex, 1);
+    }
+
+    this.saveQuests();
+    return true;
+  }
+
+  getCurrentQuests(): HuntingQuest[] {
+    return this.quests;
+  }
+
+  getPendingQuest(): HuntingQuest | null {
+    return this.pendingCompletion;
+  }
+
+  // ==================== 持久化 ====================
+
+  private saveQuests() {
+    try {
+      localStorage.setItem(this.SAVE_KEY, JSON.stringify({
+        quests: this.quests,
+        completedToday: Array.from(this.completedToday.entries()).map(([k, v]) => [k, Array.from(v)]),
+        lastResetDate: this.lastResetDate,
+      }));
+    } catch (e) {
+      console.error("Failed to save quests:", e);
+    }
+  }
+
+  private loadQuests() {
+    try {
+      const saved = localStorage.getItem(this.SAVE_KEY);
+      if (saved) {
+        const data = JSON.parse(saved) as {
+          quests?: HuntingQuest[];
+          completedToday?: [string, string[]][];
+          lastResetDate?: string | null;
+        };
+        this.quests = data.quests ?? [];
+        this.completedToday = new Map();
+        if (data.completedToday) {
+          for (const [rarity, mobs] of data.completedToday) {
+            this.completedToday.set(rarity, new Set(mobs));
+          }
+        }
+        this.lastResetDate = data.lastResetDate ?? null;
+        this.checkDailyReset();
+      } else {
+        this.initDailyQuests();
+      }
+    } catch (e) {
+      console.error("Failed to load quests:", e);
+      this.initDailyQuests();
+    }
+  }
+
+  // ==================== 面板 ====================
+
+  /** 面板几何(屏幕坐标)。小屏幕时整体等比缩小(与成就面板一致)。 */
+  _panelRect(W: number, H: number): { x: number; y: number; w: number; h: number; scale: number; PW: number; PH: number } {
+    const isMobile = H < 640 || W < 640;
+    const PW = isMobile ? 520 : 720;
+    const PH = isMobile ? 430 : 620;
+    const scale = Math.min(1, W / (PW + 40), H / (PH + 40));
+    return { x: W / 2 - (PW * scale) / 2, y: H / 2 - (PH * scale) / 2, w: PW * scale, h: PH * scale, scale, PW, PH };
+  }
+
+  panelContains(x: number, y: number): boolean {
+    if (!this.panelOpen) return false;
+    const { W, H } = this._size();
+    const r = this._panelRect(W, H);
+    return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+  }
+
+  togglePanel() {
+    this.panelOpen = !this.panelOpen;
+    if (this.panelOpen) this._panelScrollY = 0;
+  }
+
+  /** 面板划入动画进度推进(目标 = panelOpen)。 */
+  updateOpenAnim(dt: number) {
+    this.openAnim += ((this.panelOpen ? 1 : 0) - this.openAnim) * Math.min(1, dt * 10);
+  }
+
+  private drawStrokedText(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    x: number,
+    y: number,
+    fontSize = 14,
+    textAlign: CanvasTextAlign = "center",
+    fillColor = "white",
+  ) {
+    ctx.save();
+    ctx.font = ` ${fontSize}px ${FONT_FAMILY}`;
+    ctx.textAlign = textAlign;
+    ctx.textBaseline = "middle";
+    ctx.strokeStyle = "black";
+    ctx.lineWidth = 4;
+    ctx.lineJoin = "round";
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = fillColor;
+    ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  private drawStyledButton(
+    ctx: CanvasRenderingContext2D,
+    text: string,
+    rect: [number, number, number, number],
+    baseColor: [number, number, number],
+    fontSize = 15,
+  ) {
+    const [x, y, w, h] = rect;
+    const adj = (c: [number, number, number], f: number) => c.map((v) => Math.min(255, Math.max(0, Math.floor(v * f))));
+    const dark = `rgb(${adj(baseColor, 0.85).join(",")})`;
+    const light = `rgb(${baseColor.join(",")})`;
+    const stroke = `rgb(${adj(baseColor, 0.5).join(",")})`;
+    ctx.beginPath();
+    roundRect(ctx, x, y, w, h, 8);
+    ctx.fillStyle = light;
+    ctx.fill();
+    ctx.save();
+    ctx.beginPath();
+    roundRect(ctx, x, y, w, h, 8);
+    ctx.clip();
+    ctx.fillStyle = dark;
+    ctx.fillRect(x, y, w, h / 2);
+    ctx.restore();
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    roundRect(ctx, x, y, w, h, 8);
+    ctx.stroke();
+    if (text) {
+      ctx.font = ` ${fontSize}px ${FONT_FAMILY}`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.strokeStyle = "black";
+      ctx.lineWidth = 3;
+      ctx.lineJoin = "round";
+      ctx.strokeText(text, x + w / 2, y + h / 2);
+      ctx.fillStyle = "white";
+      ctx.fillText(text, x + w / 2, y + h / 2);
+    }
+  }
+
+  drawPanel(ctx: CanvasRenderingContext2D) {
+    if (!this.panelOpen) return;
+    this.checkDailyReset();
+
+    const { W, H } = this._size();
+    const r = this._panelRect(W, H);
+    const scale = r.scale;
+    const px = r.x;
+    const py = r.y;
+    const PW = r.PW;
+    const PH = r.PH;
+    const isMobile = H < 640 || W < 640;
+
+    ctx.save();
+    // 划入动画:淡入 + 从屏幕底部滑入(ease.outCubic,与背包面板一致)
+    ctx.globalAlpha = Math.min(1, this.openAnim * 1.6);
+    if (scale < 1) {
+      ctx.translate(W / 2, H / 2);
+      ctx.scale(scale, scale);
+      ctx.translate(-W / 2, -H / 2);
+    }
+    ctx.translate(0, (1 - ease.outCubic(this.openAnim)) * (H + 20));
+
+    // 主背景(深紫蓝主题,与成就面板区分)
+    ctx.fillStyle = "#3b3f6e";
+    ctx.fillRect(px, py, PW, PH);
+    ctx.strokeStyle = "#23264a";
+    ctx.lineWidth = 6;
+    ctx.strokeRect(px, py, PW, PH);
+
+    // 标题 + 关闭按钮
+    this.drawStrokedText(ctx, "Challenges", px + PW / 2, py + (isMobile ? 30 : 40), isMobile ? 26 : 30);
+    const closeBtn: [number, number, number, number] = [px + PW - (isMobile ? 42 : 50), py + 10, isMobile ? 32 : 40, isMobile ? 28 : 35];
+    this.drawStyledButton(ctx, "✕", closeBtn, [220, 80, 80], isMobile ? 15 : 18);
+
+    // 说明行(每日重置)
+    this.drawStrokedText(
+      ctx,
+      `Daily hunts — reset ${new Date().toDateString()}`,
+      px + PW / 2,
+      py + (isMobile ? 62 : 78),
+      isMobile ? 12 : 14,
+      "center",
+      "rgba(255,255,255,0.75)",
+    );
+
+    // 任务卡网格(2 列 × 2 行,像素级滚动)
+    const startY = py + (isMobile ? 82 : 104);
+    const sidePad = isMobile ? 14 : 28;
+    const gap = isMobile ? 10 : 16;
+    const itemW = Math.floor((PW - sidePad * 2 - gap) / 2);
+    const itemH = isMobile ? 150 : 190;
+    const rowH = itemH + gap;
+    const viewportRows = 2;
+    const contentH = Math.max(0, Math.ceil(Math.max(1, this.quests.length) / 2) * rowH - gap);
+    const viewportH = viewportRows * rowH - gap;
+    const maxScroll = Math.max(0, contentH - viewportH);
+    this._panelScrollY = Math.max(0, Math.min(maxScroll, this._panelScrollY));
+
+    const list = this.quests.slice();
+    const startRow = Math.floor(this._panelScrollY / rowH);
+    const yOff = -(this._panelScrollY % rowH);
+    const visible = list.slice(startRow * 2, startRow * 2 + (viewportRows + 1) * 2);
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px + sidePad - 2, startY - 2, itemW * 2 + gap + 4, viewportH + 8);
+    ctx.clip();
+
+    const cardRects: { quest: HuntingQuest; rect: Rect; claimRect: Rect | null }[] = [];
+    visible.forEach((quest, i) => {
+      const col = i % 2;
+      const row = Math.floor(i / 2);
+      const ix = px + sidePad + col * (itemW + gap);
+      const iy = startY + row * rowH + yOff;
+      const color = this.rarityColor(quest.rarity);
+      const done = quest.completed;
+
+      // 卡片背景
+      ctx.fillStyle = "rgba(0,0,0,0.35)";
+      ctx.beginPath();
+      roundRect(ctx, ix, iy, itemW, itemH, 10);
+      ctx.fill();
+      ctx.strokeStyle = `rgba(${color[0]},${color[1]},${color[2]},0.9)`;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      roundRect(ctx, ix, iy, itemW, itemH, 10);
+      ctx.stroke();
+
+      // 稀有度徽章(左上)
+      ctx.fillStyle = `rgba(${color[0]},${color[1]},${color[2]},0.25)`;
+      ctx.beginPath();
+      roundRect(ctx, ix + 12, iy + 10, 96, 24, 6);
+      ctx.fill();
+      this.drawStrokedText(ctx, quest.rarity, ix + 60, iy + 22, isMobile ? 11 : 13, "center", `rgb(${color[0]},${color[1]},${color[2]})`);
+
+      // 奖励(右上 ⭐N)
+      this.drawStrokedText(ctx, `+${quest.reward}`, ix + itemW - 30, iy + 22, isMobile ? 11 : 13, "right", "#ffd700");
+      drawStarIcon(ctx, ix + itemW - 18, iy + 22, isMobile ? 5 : 7);
+
+      // 目标生物绘制(与 MobGallery 一致,使用 drawMob 画生物本体;找不到则回退名字文本)
+      const mobDef = ENEMY_DROP_TABLE[quest.targetMob];
+      const mobId = mobDef ? mobDef.id : MOBS.findIndex((m) => m && m.name === quest.targetMob);
+      const rarityIdx = Math.max(0, RARITIES.findIndex((r) => r.name === quest.rarity));
+      const iconR = isMobile ? 24 : 36;
+      const iconCX = ix + itemW / 2;
+      const iconCY = iy + (isMobile ? 58 : 68);
+      if (mobId >= 0 && typeof drawMob === "function") {
+        // 静止绘制:time 固定为 0,与 MobGallery 一致(生物不播放动画)
+        drawMob(ctx, mobId, iconCX, iconCY, iconR, 0, 0, false, rarityIdx, 1);
+      } else {
+        this.drawStrokedText(ctx, "?", iconCX, iconCY, isMobile ? 20 : 26, "center", "white");
+      }
+
+      // 生物名(图标下方)
+      this.drawStrokedText(ctx, quest.targetMob, ix + itemW / 2, iy + (isMobile ? 88 : 112), isMobile ? 11 : 14, "center", "white");
+
+      // 进度条
+      const pX = ix + 14;
+      const pY = iy + (isMobile ? 102 : 130);
+      const pW = itemW - 28;
+      const pH = isMobile ? 12 : 16;
+      ctx.fillStyle = "rgba(0,0,0,0.45)";
+      ctx.beginPath();
+      roundRect(ctx, pX, pY, pW, pH, 6);
+      ctx.fill();
+      const progress = Math.max(0, Math.min(1, quest.currentCount / Math.max(1, quest.targetCount)));
+      ctx.fillStyle = done ? "rgba(255,215,0,0.95)" : `rgba(${color[0]},${color[1]},${color[2]},0.95)`;
+      ctx.beginPath();
+      roundRect(ctx, pX, pY, Math.max(6, pW * progress), pH, 6);
+      ctx.fill();
+
+      // 状态按钮区
+      let claimRect: Rect | null = null;
+      if (done && !quest._claimed) {
+        const btnW = Math.min(120, itemW - 28);
+        const btnH = isMobile ? 26 : 32;
+        const btnX = ix + itemW / 2 - btnW / 2;
+        const btnY = iy + itemH - btnH - 10;
+        this.drawStyledButton(ctx, "CLAIM", [btnX, btnY, btnW, btnH], [46, 204, 113], isMobile ? 11 : 13);
+        claimRect = { x: btnX, y: btnY, w: btnW, h: btnH };
+      } else if (done) {
+        this.drawStrokedText(ctx, "✓ Claimed", ix + itemW / 2, iy + itemH - 24, isMobile ? 11 : 13, "center", "rgba(255,215,0,0.9)");
+      } else {
+        this.drawStrokedText(ctx, `${quest.currentCount}/${quest.targetCount}`, ix + itemW / 2, iy + itemH - 24, isMobile ? 11 : 13, "center", "rgba(255,255,255,0.7)");
+      }
+
+      cardRects.push({ quest, rect: { x: ix, y: iy, w: itemW, h: itemH }, claimRect });
+    });
+    this._cardRects = cardRects;
+    ctx.restore();
+
+    // 滚动条
+    if (maxScroll > 0) {
+      const barX = px + PW - 14;
+      const barY = startY;
+      const barH = viewportH;
+      const thumbH = Math.max(24, barH * (viewportH / contentH));
+      const thumbY = barY + (this._panelScrollY / maxScroll) * (barH - thumbH);
+      ctx.fillStyle = "rgba(255,255,255,0.25)";
+      ctx.beginPath();
+      roundRect(ctx, barX, barY, 6, barH, 3);
+      ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.7)";
+      ctx.beginPath();
+      roundRect(ctx, barX, thumbY, 6, thumbH, 3);
+      ctx.fill();
+    }
+
+    // 粒子(设计坐标,随面板缩放)
+    this.drawParticles(ctx);
+
+    ctx.restore();
+  }
+
+  handleClick(x: number, y: number): boolean {
+    if (!this.panelOpen) return false;
+    const { W, H } = this._size();
+    const r = this._panelRect(W, H);
+    if (x < r.x || x > r.x + r.w || y < r.y || y > r.y + r.h) return false;
+
+    const scale = r.scale;
+    const dx = (x - W / 2) / scale + W / 2;
+    const dy = (y - H / 2) / scale + H / 2;
+    const px = W / 2 - r.PW / 2;
+    const py = H / 2 - r.PH / 2;
+    const PW = r.PW;
+    const isMobile = H < 640 || W < 640;
+
+    // 关闭按钮
+    const closeX = px + PW - (isMobile ? 42 : 50);
+    const closeY = py + 10;
+    if (dx >= closeX && dx <= closeX + (isMobile ? 32 : 40) && dy >= closeY && dy <= closeY + (isMobile ? 28 : 35)) {
+      this.panelOpen = false;
+      return true;
+    }
+
+    // CLAIM 按钮
+    for (const c of this._cardRects) {
+      if (c.claimRect && dx >= c.claimRect.x && dx <= c.claimRect.x + c.claimRect.w && dy >= c.claimRect.y && dy <= c.claimRect.y + c.claimRect.h) {
+        this.claimQuest(c.quest.id, dx, dy);
+        return true;
+      }
+    }
+
+    // 面板内部其它点击 → 吞掉,不穿透
+    return true;
+  }
+
+  handleScroll(deltaY: number) {
+    if (!this.panelOpen) return;
+    const { W, H } = this._size();
+    const r = this._panelRect(W, H);
+    const isMobile = H < 640 || W < 640;
+    const gap = isMobile ? 10 : 16;
+    const itemW = Math.floor((r.PW - (isMobile ? 28 : 56) - gap) / 2);
+    const itemH = isMobile ? 150 : 190;
+    const rowH = itemH + gap;
+    const contentH = Math.max(0, Math.ceil(Math.max(1, this.quests.length) / 2) * rowH - gap);
+    const viewportH = 2 * rowH - gap;
+    const maxScroll = Math.max(0, contentH - viewportH);
+    this._panelScrollY = Math.max(0, Math.min(maxScroll, this._panelScrollY + deltaY));
+  }
+
+  /** 触摸滚动:面板内按下(避开 ✕ 与 CLAIM 按钮)开始滚动。 */
+  beginTouch(x: number, y: number): boolean {
+    if (!this.panelOpen) return false;
+    if (!this.panelContains(x, y)) return false;
+    const { W, H } = this._size();
+    const r = this._panelRect(W, H);
+    const scale = r.scale;
+    const dx = (x - W / 2) / scale + W / 2;
+    const dy = (y - H / 2) / scale + H / 2;
+    const px = W / 2 - r.PW / 2;
+    const py = H / 2 - r.PH / 2;
+    const isMobile = H < 640 || W < 640;
+    const closeX = px + r.PW - (isMobile ? 42 : 50);
+    const closeY = py + 10;
+    if (dx >= closeX && dx <= closeX + (isMobile ? 32 : 40) && dy >= closeY && dy <= closeY + (isMobile ? 28 : 35)) return false;
+    for (const c of this._cardRects) {
+      if (c.claimRect && dx >= c.claimRect.x && dx <= c.claimRect.x + c.claimRect.w && dy >= c.claimRect.y && dy <= c.claimRect.y + c.claimRect.h) return false;
+    }
+    this.touchScrolling = true;
+    this.touchStartY = y;
+    this.touchStartOffset = this._panelScrollY;
+    return true;
+  }
+
+  touchMove(y: number) {
+    if (!this.touchScrolling) return;
+    const { W, H } = this._size();
+    const r = this._panelRect(W, H);
+    const scale = r.scale || 1;
+    const deltaY = (y - this.touchStartY) / scale;
+    const isMobile = H < 640 || W < 640;
+    const gap = isMobile ? 10 : 16;
+    const itemW = Math.floor((r.PW - (isMobile ? 28 : 56) - gap) / 2);
+    const itemH = isMobile ? 150 : 190;
+    const rowH = itemH + gap;
+    const contentH = Math.max(0, Math.ceil(Math.max(1, this.quests.length) / 2) * rowH - gap);
+    const viewportH = 2 * rowH - gap;
+    const maxScroll = Math.max(0, contentH - viewportH);
+    this._panelScrollY = Math.max(0, Math.min(maxScroll, this.touchStartOffset - deltaY));
+  }
+
+  endTouch() {
+    this.touchScrolling = false;
+  }
+
+  /** 每帧调用:推进粒子、检查跨日重置。 */
+  update(dt: number) {
+    this.checkDailyReset();
+    this.updateParticles(dt);
+  }
 }
 
 // =====================================================================
@@ -3932,6 +4771,8 @@ function drawStarIcon(ctx: CanvasRenderingContext2D, cx: number, cy: number, out
 class ShopSystem {
   game: GameClient;
   visible = false;
+  /** 面板划入动画进度(0=关闭,1=完全展开;参考背包 bagAnim,由 GameClient.update 驱动)。 */
+  openAnim = 0;
   currentTab: "buy" | "membership" | "redeem" = "buy";
 
   message = "";
@@ -3942,6 +4783,11 @@ class ShopSystem {
   // ---- 滚动 ----
   scrollOffset = 0; // buy 页签
   membershipScrollOffset = 0;
+
+  // ---- 触摸滚动状态(移动端;buy/membership 页签可滚动) ----
+  touchScrolling = false;
+  private touchStartY = 0;
+  private touchStartOffset = 0;
 
   // ---- 筛选 ----
   filterSearch = "";
@@ -3966,6 +4812,8 @@ class ShopSystem {
   private tabRects: Record<string, Rect> = {};
   /** 每张商品卡当前选择的稀有度(itemId → RARITIES 下标,重绘不丢)。 */
   private cardRarities = new Map<number, number>();
+  /** 卡片稀有度切换滑动动画(itemId → {t 0..1, dir +1=next/-1=prev, from 旧稀有度})。 */
+  private cardSwitchAnim = new Map<number, { t: number; dir: number; from: number }>();
   private _shopCardRects: { entry: ShopListEntry; rarity: number; rect: Rect; buyRect: Rect; prevRect: Rect; nextRect: Rect }[] = [];
   private _membershipRects: { tier: MembershipTier; rect: Rect }[] = [];
 
@@ -4214,8 +5062,11 @@ class ShopSystem {
         maxUses: 1,
       });
     };
-    add("THANKS", [{ type: "Wing", rarity: "Super", count: 1 }, { type: "Magnet", rarity: "Ultra", count: 1 }, { type: "Pearl", rarity: "Ultra", count: 2 }, { stars: 10000 }], 30);
-    add("WELCOME", [{ type: "Wing", rarity: "Epic", count: 5 }, { type: "Leaf", rarity: "Legendary", count: 3 }, { stars: 50 }], 30);
+    add("123TRY", [{ type: "DNA", rarity: "Ultra", count: 1 }, { type: "Leaf", rarity: "Super", count: 1 }], 30);
+    add("MOBILE", [{ type: "DNA", rarity: "Ultra", count: 1 }, { type: "Stick", rarity: "Ultra", count: 3 }, { type: "Air", rarity: "Super", count: 1 }, { stars: 10000 }], 30);
+    add("TCS341", [{ type: "Tesseract", rarity: "Legendary", count: 1 }, { type: "Cube", rarity: "Legendary", count: 1 }, { type: "Square", rarity: "Legendary", count: 1 }, { stars: 1145 }], 10);
+    add("XXY30391F", [{ stars: 100000 }], 30);
+    add("WELCOME", [{ type: "Wing", rarity: "Epic", count: 5 }, { type: "Leaf", rarity: "Epic", count: 3 }, { stars: 50 }], 30);
     add("1354679", [{ membership: "ruby", duration: 10, stars: 5000 }], 30);
     add("MMMMMM", [{ membership: "platinum", duration: 20, stars: 5000 }], 30);
     add("12354", [{ membership: "diamond", duration: 30, stars: 2000 }], 30);
@@ -4426,11 +5277,15 @@ class ShopSystem {
       // 商品卡:◀▶ 切换稀有度,购买按钮直接购买
       for (const c of this._shopCardRects) {
         if (this.hitRect(c.prevRect, dx, dy)) {
-          this.cardRarities.set(c.entry.item, (c.rarity + 9) % 10);
+          const from = c.rarity;
+          this.cardRarities.set(c.entry.item, (from + 9) % 10);
+          this.cardSwitchAnim.set(c.entry.item, { t: 0, dir: -1, from });
           return true;
         }
         if (this.hitRect(c.nextRect, dx, dy)) {
-          this.cardRarities.set(c.entry.item, (c.rarity + 1) % 10);
+          const from = c.rarity;
+          this.cardRarities.set(c.entry.item, (from + 1) % 10);
+          this.cardSwitchAnim.set(c.entry.item, { t: 0, dir: 1, from });
           return true;
         }
         if (this.hitRect(c.buyRect, dx, dy)) {
@@ -4492,10 +5347,81 @@ class ShopSystem {
     }
   }
 
+  /** 触摸滚动:面板内按下(避开 ✕/页签/搜索框/兑换输入框)开始滚动。
+   *  移动端由 GameClient.onPointerDown → menuClick 转发。 */
+  beginTouch(x: number, y: number, W: number, H: number): boolean {
+    if (!this.visible) return false;
+    const r = this.screenRectVal;
+    if (!r || x < r.x || x > r.x + r.w || y < r.y || y > r.y + r.h) return false;
+    const s = this.panelScale || 1;
+    const dx = W / 2 + (x - W / 2) / s;
+    const dy = H / 2 + (y - H / 2) / s;
+    const px = W / 2 - this.PW / 2;
+    const py = H / 2 - this.PH / 2;
+
+    // 避开交互元素:关闭按钮、页签
+    if (this.hitRect(this.closeBtn, dx, dy)) return false;
+    for (const r2 of Object.values(this.tabRects)) {
+      if (this.hitRect(r2, dx, dy)) return false;
+    }
+    // buy 页签:搜索框 + 卡片按钮(◀/▶ 切换稀有度、购买按钮)
+    if (this.currentTab === "buy") {
+      if (dx >= px + 20 && dx <= px + 370 && dy >= py + 116 && dy <= py + 146) return false;
+      for (const c of this._shopCardRects) {
+        if (this.hitRect(c.prevRect, dx, dy)) return false;
+        if (this.hitRect(c.nextRect, dx, dy)) return false;
+        if (this.hitRect(c.buyRect, dx, dy)) return false;
+      }
+    } else if (this.currentTab === "membership") {
+      // 会员卡整体可点击购买
+      for (const m of this._membershipRects) {
+        if (this.hitRect(m.rect, dx, dy)) return false;
+      }
+    }
+    // redeem 页签:兑换输入框(该页签无滚动,直接放行给点击)
+    if (this.currentTab === "redeem") {
+      const boxW = Math.min(420, this.PW - 120);
+      const boxX = px + this.PW / 2 - boxW / 2;
+      const boxY = py + 112 + 130;
+      const boxH = 44;
+      if (dx >= boxX && dx <= boxX + boxW && dy >= boxY && dy <= boxY + boxH) return false;
+    }
+
+    this.touchScrolling = true;
+    this.touchStartY = y;
+    this.touchStartOffset = this.currentTab === "buy" ? this.scrollOffset : this.membershipScrollOffset;
+    return true;
+  }
+
+  touchMove(y: number, W: number, H: number) {
+    if (!this.touchScrolling) return;
+    const s = this.panelScale || 1;
+    const deltaY = (y - this.touchStartY) / s;
+    const target = Math.max(0, this.touchStartOffset - deltaY);
+    if (this.currentTab === "buy") {
+      const rows = Math.ceil(this.getFilteredItems().length / 3);
+      const maxOff = Math.max(0, rows * 202 - 2 * 202);
+      this.scrollOffset = Math.max(0, Math.min(maxOff, target));
+    } else if (this.currentTab === "membership") {
+      const rows = Math.ceil(this.MEMBERSHIP_TIERS.length / 2);
+      const maxOff = Math.max(0, rows * 364 - (this.PH - 132));
+      this.membershipScrollOffset = Math.max(0, Math.min(maxOff, target));
+    }
+  }
+
+  endTouch() {
+    this.touchScrolling = false;
+  }
+
   update(dt: number) {
     if (this.messageTimer > 0) {
       this.messageTimer -= dt;
       if (this.messageTimer <= 0) this.message = "";
+    }
+    // 稀有度切换滑动动画推进(t 0→1 后移除)
+    for (const [item, a] of this.cardSwitchAnim) {
+      a.t += dt * 5;
+      if (a.t >= 1) this.cardSwitchAnim.delete(item);
     }
   }
 
@@ -4516,6 +5442,11 @@ class ShopSystem {
   toggle() {
     if (this.visible) this.close();
     else this.open();
+  }
+
+  /** 面板划入动画进度推进(目标 = visible)。 */
+  updateOpenAnim(dt: number) {
+    this.openAnim += ((this.visible ? 1 : 0) - this.openAnim) * Math.min(1, dt * 10);
   }
 
   // ===================== 绘制 =====================
@@ -4680,11 +5611,14 @@ private darkenColor(color: string, percent: number): string {
     this.mouseY = H / 2 + (this.mouseY - H / 2) / scale;
 
     ctx.save();
+    // 划入动画:淡入 + 从屏幕底部滑入(ease.outCubic,与背包面板一致)
+    ctx.globalAlpha = Math.min(1, this.openAnim * 1.6);
     if (scale < 1) {
       ctx.translate(W / 2, H / 2);
       ctx.scale(scale, scale);
       ctx.translate(-W / 2, -H / 2);
     }
+    ctx.translate(0, (1 - ease.outCubic(this.openAnim)) * (H + 20));
 
     // 主背景(参考 ShopSystem.draw 的青色主题)
     ctx.fillStyle = "#22C1E9";
@@ -4702,12 +5636,14 @@ private darkenColor(color: string, percent: number): string {
     drawStarIcon(ctx, px + this.PW - 118, py + 30, 13);
     this.drawStrokedText(ctx, this.formatPrice(this.game.stars), px + this.PW - 140, py + 30, 24, "right", "#ffd700");
 
-    // 关闭按钮
-    ctx.fillStyle = "#c0392b";
-    ctx.beginPath();
-    roundRect(ctx, this.closeBtn.x, this.closeBtn.y, this.closeBtn.w, this.closeBtn.h, 6);
-    ctx.fill();
-    this.drawStrokedText(ctx, "✕", this.closeBtn.x + this.closeBtn.w / 2, this.closeBtn.y + this.closeBtn.h / 2, 18, "center", "#ffffff");
+    // 关闭按钮(与成就面板同款:红色渐变圆角按钮)
+    this.drawStyledButton(
+      ctx,
+      "✕",
+      [this.closeBtn.x, this.closeBtn.y, this.closeBtn.w, this.closeBtn.h],
+      [220, 80, 80],
+      18,
+    );
 
     // 页签
     const tabs: [string, ShopSystem["currentTab"]][] = [
@@ -4813,40 +5749,22 @@ private darkenColor(color: string, percent: number): string {
       roundRect(ctx, gx, gy, SLOT_W, SLOT_H, 8);
       ctx.stroke();
 
-      // 物品卡(drawCard 绘制:稀有度颜色边框 + 图标)
-      if (def) {
-        drawCard(
-          ctx,
-          { x: gx + (SLOT_W - 96) / 2, y: gy + 8, w: 96, h: 96 },
-          { item: entry.item, rarity, count: 1 },
-          { hovered },
-        );
+      // 卡片内容(图标+名称+稀有度行)在卡片矩形内 clip;切换稀有度时旧/新两帧水平滑动
+      const switchAnim = this.cardSwitchAnim.get(entry.item);
+      ctx.save();
+      ctx.beginPath();
+      roundRect(ctx, gx + 1, gy + 1, SLOT_W - 2, 146, 7);
+      ctx.clip();
+      if (switchAnim) {
+        const e = ease.outCubic(switchAnim.t);
+        // 旧稀有度帧:从原位滑出(dir>0 向左,dir<0 向右)
+        this.drawCardContent(ctx, gx - Math.round(e * switchAnim.dir * SLOT_W), gy, SLOT_W, entry, switchAnim.from, hovered);
+        // 新稀有度帧:从对面滑入
+        this.drawCardContent(ctx, gx + Math.round((1 - e) * switchAnim.dir * SLOT_W), gy, SLOT_W, entry, rarity, hovered);
+      } else {
+        this.drawCardContent(ctx, gx, gy, SLOT_W, entry, rarity, hovered);
       }
-
-      // 名称
-      this.drawStrokedText(ctx, def?.name ?? "?", gx + SLOT_W / 2, gy + 116, 12, "center", "#ffffff", 2);
-
-      // 稀有度切换行(◀ 稀有度名 ▶)
-      const rowY = gy + 130;
-      ctx.fillStyle = "rgba(0,0,0,0.25)";
-      ctx.beginPath();
-      roundRect(ctx, gx + 14, rowY, 24, 22, 5);
-      ctx.fill();
-      ctx.beginPath();
-      roundRect(ctx, gx + SLOT_W - 38, rowY, 24, 22, 5);
-      ctx.fill();
-      this.drawStrokedText(ctx, "◀", gx + 26, rowY + 11, 13, "center", "#ffffff");
-      this.drawStrokedText(ctx, "▶", gx + SLOT_W - 26, rowY + 11, 13, "center", "#ffffff");
-      const rname = RARITIES[rarity]?.name ?? "?";
-      ctx.font = `12px ${FONT_FAMILY}`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.strokeStyle = "black";
-      ctx.lineWidth = 2.5;
-      ctx.lineJoin = "round";
-      ctx.strokeText(rname, gx + SLOT_W / 2, rowY + 11);
-      ctx.fillStyle = RARITIES[rarity]?.color ?? "#ffffff";
-      ctx.fillText(rname, gx + SLOT_W / 2, rowY + 11);
+      ctx.restore();
 
       // 折扣角标
       if (isDisc && def) {
@@ -4873,8 +5791,8 @@ private darkenColor(color: string, percent: number): string {
         rarity,
         rect: cardScreenRect,
         buyRect: { x: buyRect.x, y: buyRect.y - this.scrollOffset, w: buyRect.w, h: buyRect.h },
-        prevRect: { x: gx + 14, y: rowY - this.scrollOffset, w: 24, h: 22 },
-        nextRect: { x: gx + SLOT_W - 38, y: rowY - this.scrollOffset, w: 24, h: 22 },
+        prevRect: { x: gx + 14, y: gy + 130 - this.scrollOffset, w: 24, h: 22 },
+        nextRect: { x: gx + SLOT_W - 38, y: gy + 130 - this.scrollOffset, w: 24, h: 22 },
       });
     }
     ctx.restore();
@@ -4896,6 +5814,49 @@ private darkenColor(color: string, percent: number): string {
       ctx.fill();
     }
 
+  }
+
+  /** 商品卡内容(图标+名称+稀有度切换行);供稀有度切换滑动动画双帧绘制。
+   *  注意:调用方需已 clip 在卡片矩形内,避免滑动帧越界。 */
+  private drawCardContent(
+    ctx: CanvasRenderingContext2D,
+    gx: number,
+    gy: number,
+    cardW: number,
+    entry: ShopListEntry,
+    rarity: number,
+    hovered: boolean,
+  ) {
+    const def = ITEMS[entry.item];
+    if (def) {
+      drawCard(
+        ctx,
+        { x: gx + (cardW - 96) / 2, y: gy + 8, w: 96, h: 96 },
+        { item: entry.item, rarity, count: 1 },
+        { hovered },
+      );
+    }
+    this.drawStrokedText(ctx, def?.name ?? "?", gx + cardW / 2, gy + 116, 12, "center", "#ffffff", 2);
+    const rowY = gy + 130;
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.beginPath();
+    roundRect(ctx, gx + 14, rowY, 24, 22, 5);
+    ctx.fill();
+    ctx.beginPath();
+    roundRect(ctx, gx + cardW - 38, rowY, 24, 22, 5);
+    ctx.fill();
+    this.drawStrokedText(ctx, "◀", gx + 26, rowY + 11, 13, "center", "#ffffff");
+    this.drawStrokedText(ctx, "▶", gx + cardW - 26, rowY + 11, 13, "center", "#ffffff");
+    const rname = RARITIES[rarity]?.name ?? "?";
+    ctx.font = `12px ${FONT_FAMILY}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.strokeStyle = "black";
+    ctx.lineWidth = 2.5;
+    ctx.lineJoin = "round";
+    ctx.strokeText(rname, gx + cardW / 2, rowY + 11);
+    ctx.fillStyle = RARITIES[rarity]?.color ?? "#ffffff";
+    ctx.fillText(rname, gx + cardW / 2, rowY + 11);
   }
 
   private renderMemberCard(ctx: CanvasRenderingContext2D, tier: MembershipTier, cx: number, cy: number, cardW: number, cardH: number) {
@@ -5095,10 +6056,18 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private authStatus = "Playing as guest. Progress saved locally.";
   private account: { username: string; token: string } | null = null;
   private bonus = new BonusSystem();
+  /** 天赋树系统（主菜单 top_talent 按钮打开，等级=天赋点来源）。 */
+  private talent: TalentSystem;
+  /** 天赋系统最近一次计算的加成（写回宿主，供 HUD/渲染读取）。 */
+  private talentBonuses: TalentBonuses | null = null;
   /** Main-menu bestiary; kill counts are tracked locally by mob + rarity. */
   private mobGallery = new MobGallery();
+  /** MobGallery 划入动画进度(其在独立文件,由 GameClient 层包装驱动)。 */
+  private mobGalleryAnim = 0;
   private changelog = new ChangelogPanel();
   private achievements: AchievementSystem;
+  /** 每日猎杀挑战系统(主菜单 Hunting Quest 图标打开面板)。 */
+  private challenges: ChallengeSystem;
   private chat = new ChatSystem();
   private vk = new VirtualKeyboard();
   /** Canvas-painted account panel (local-storage based). */
@@ -5143,6 +6112,12 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private debugEntityCount = 0;
   /** Total connected players across every map. */
   private debugPlayerCount = 0;
+  /**
+   * Owning player's current move speed in px/s, as reported by the
+   * server's per-tick DEBUG packet. 0 when not connected / server build
+   * is older than the per-player-tail field.
+   */
+  private debugPlayerSpeed = 0;
 
   // Packet-loss / stall handling
   /**
@@ -5210,6 +6185,14 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private xp = 0;
   private level = 1;
   private alive = true;
+  /**
+   * Player's body-contact damage on direct mob collision. Mirrors
+   * sim.ts `Player.bodyDamage` (default 10). Stored on the client so the
+   * talent panel can show "Body Dmg: N" and the tooltip can quote the
+   * talent-modified number. The server remains authoritative — this is
+   * a local mirror that gets updated on JOIN / STATS.
+   */
+  private bodyDamage = 10;
   private nextOracleAt = 0;
   private nextTradeAt = 0;
   private slots: (Cell | null)[] = emptyCells(SLOT_COUNT);
@@ -5292,6 +6275,14 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private craftLogAttempts = 0;
   private craftLogLast = "No Result";
 
+  // Mobile touch scrolling for bag/craft panels
+  private bagTouchScrolling = false;
+  private bagTouchStartY = 0;
+  private bagTouchStartOffset = 0;
+  private craftTouchScrolling = false;
+  private craftTouchStartY = 0;
+  private craftTouchStartOffset = 0;
+
   private drag: { from: number; cell: Cell } | null = null;
   private dragX = 0;
   private dragY = 0;
@@ -5351,9 +6342,81 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     if (typeof window !== "undefined") {
       (window as any).gameInstance = this;
     }
+    this.talent = new TalentSystem(this.talentHost());
     this.shopSystem = new ShopSystem(this);
     this.achievements = new AchievementSystem(this);
+    this.challenges = new ChallengeSystem(this);
     this.loadLocal();
+  }
+
+  /**
+   * TalentSystem 宿主适配器：客户端为服务器权威，天赋加成只计算并写回
+   * `talentBonuses` 供渲染读取（面板 UI 与点数系统完全本地运行）。
+   */
+  private talentHost(): TalentHost {
+    return {
+      getLevel: () => this.level,
+      getHp: () => this.hp,
+      getMaxHp: () => this.maxHp,
+      isInGame: () => this.scene === "game",
+      getBodyDamage: () => this.bodyDamage,
+      getPetals: (): TalentPetalLike[] => [],
+      onTalentApplied: (b: TalentBonuses) => {
+        this.talentBonuses = b;
+        // Push the current per-branch levels to the server so it can apply
+        // the multipliers authoritatively. Cheap to send (9 × u8 + 1 u8 tag).
+        this.sendTalent();
+      },
+    };
+  }
+
+  /**
+   * Send the current talent-tree allocation to the server via C2S.TALENT.
+   * Order MUST match `TALENT_KEYS` in protocol.ts (7 branches after the
+   * 2026-08 removal of `reloadTime` + `fluidSpeed`):
+   *   reload, petalDamage, summonDamage, summonHealth, health, speed, bodyDamage
+   * The server recomputes the multiplier bundle, applies it to sim stats,
+   * and echoes S2C.TALENT_BONUSES so the client can confirm.
+   */
+  private sendTalent() {
+    if (!this.net || !this.connected) return;
+    const w = new Writer(16);
+    w.u8(C2S.TALENT);
+    const levels = this.talent.getLevels();
+    w.u8(levels.reload ?? 0);
+    w.u8(levels.petalDamage ?? 0);
+    w.u8(levels.summonDamage ?? 0);
+    w.u8(levels.summonHealth ?? 0);
+    w.u8(levels.health ?? 0);
+    w.u8(levels.speed ?? 0);
+    w.u8(levels.bodyDamage ?? 0);
+    this.net.send(w.bytes());
+  }
+
+  /**
+   * Local mirror of sim.ts `updatePlayer`'s speed formula. Used only as a
+   * fallback for the debug-overlay "current speed" readout when the server
+   * has not pushed a DEBUG packet yet (or the connection is older than the
+   * speed-tail field). The server's value is authoritative whenever it is
+   * available; this method is best-effort.
+   *
+   * Returns 0 when the player has no talent bonuses cached yet — the
+   * default (speedMult=1) is the safe baseline and matches sim.ts.
+   */
+  private computeLocalPlayerSpeed(): number {
+    const speedMult = this.talentBonuses?.speedMult ?? 1;
+    let speedBonus = 0;
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const cell = this.slots[i];
+      if (!cell) continue;
+      const def = ITEMS[cell.item];
+      if (!def) continue;
+      // Mirror sim.ts: only petals that are currently alive contribute.
+      // On the client we don't track `petal.alive` here in the same shape,
+      // so we credit every active cell — close enough for a debug readout.
+      if (def.speed) speedBonus += def.speed * (1 + cell.rarity * 0.12);
+    }
+    return (190 + this.level * 0.8) * (1 + speedBonus / 100) * speedMult;
   }
 
   /**
@@ -5496,6 +6559,10 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     window.addEventListener("resize", this.resize);
     window.addEventListener("fullscreenchange", this.onFullscreenChange);
     this.loop(performance.now());
+    // 刚进入主页面即建立服务器连接:连接建立后主页面同样会进行 AFK 检测
+    // (菜单玩家不进入世界模拟,见 sim.ts 的 menuMode;AFK 处理见
+    // menuClick/renderMenu 的主菜单分支)。
+    this.connect();
   }
 
   destroy() {
@@ -5802,6 +6869,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     // The server uses this only to spawn the additional copies; it also tracks
     // the supplied duration so the bonus cannot outlive its one-hour window.
     w.u8(this.bonus.currentMultiplier).u16(this.bonus.remainingSeconds);
+    // 模式字节:主页面(菜单)时 = 1,服务端不将其纳入世界模拟/快捷栏更新,
+    // 但仍可处理合成/交易/快捷栏切换等物品操作;进入游戏 = 0 正常出生。
+    w.u8(this.scene === "menu" ? 1 : 0);
     this.wallPolygonsCache.clear();
     this.net?.send(w.bytes());
   }
@@ -5964,6 +7034,8 @@ private handlePacket(data: Uint8Array) {
       this.xp = r.u32();
       this.level = r.u16();
       this.achievements.onPlayerLevel(this.level);
+      // 天赋点 = 玩家等级：服务器等级更新后同步天赋树并应用加成。
+      this.talent.syncWithLevel();
       this.hp = r.u16();
       this.maxHp = r.u16();
       this.mapId = r.u8();
@@ -6023,6 +7095,30 @@ private handlePacket(data: Uint8Array) {
       this.debugCollisionChecks = r.u32();
       this.debugEntityCount = r.u16();
       this.debugPlayerCount = r.u16();
+      // Trailing per-player f32 added in the latest server build: the
+      // owning player's current move speed in px/s. Older servers (no
+      // tail) will simply leave this at 0 / last-known.
+      this.debugPlayerSpeed = r.remaining >= 4 ? r.f32() : this.debugPlayerSpeed;
+      break;
+    }
+    case S2C.TALENT_BONUSES: {
+      // Authoritative server-side multipliers. We just cache them on the
+      // local `talentBonuses` slot so any future UI panel (e.g. an HUD
+      // buff list) can read them; the canonical recomputation still
+      // happens locally in the client TalentSystem for immediate feedback.
+      // Payload order matches sim.ts TALENT_KEYS (7 branches; reloadTime +
+      // fluidSpeed were removed).
+      if (r.remaining >= 7 * 4) {
+        this.talentBonuses = {
+          reloadReduction: r.f32(),
+          petalDmgMult: r.f32(),
+          summonDmgMult: r.f32(),
+          summonHpMult: r.f32(),
+          healthMult: r.f32(),
+          speedMult: r.f32(),
+          bodyDamageMult: r.f32(),
+        };
+      }
       break;
     }
     default:
@@ -6062,6 +7158,8 @@ private handlePacket(data: Uint8Array) {
         this.killFeed = this.killFeed.slice(0, 5);
         this.mobGallery.recordKill(value, rarity);
         this.achievements.onEnemyKilled(value, MOBS[value]?.name ?? "", RARITIES[rarity]?.name ?? null);
+        // 每日猎杀挑战进度(生物名 + 稀有度名)
+        this.challenges.updateProgress(MOBS[value]?.name ?? "", RARITIES[rarity]?.name ?? "");
         break;
       case EVT.CRAFT_OK:
         this.craftMsg = value > 1 ? `Crafted ${value}x ${RARITIES[rarity].name} ${ITEMS[item].name}!` : `Crafted ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
@@ -6161,6 +7259,18 @@ private handlePacket(data: Uint8Array) {
     this.render(dt);
   };
 
+  /** 统一推进所有主菜单模态面板的划入动画进度(目标 = 各自的打开状态)。 */
+  private updatePanelAnims(dt: number) {
+    this.settings.updateOpenAnim(dt);
+    this.achievements.updateOpenAnim(dt);
+    this.challenges.updateOpenAnim(dt);
+    this.shopSystem.updateOpenAnim(dt);
+    this.changelog.updateOpenAnim(dt);
+    this.accountSystem.updateOpenAnim(dt);
+    // MobGallery 在独立文件,由 GameClient 层包装驱动动画
+    this.mobGalleryAnim += ((this.mobGallery.visible ? 1 : 0) - this.mobGalleryAnim) * Math.min(1, dt * 10);
+  }
+
   /** Recomputes `debugFps` once a second from real (unclamped) frame deltas. */
   private updateDebugFps(rawDt: number) {
     if (rawDt <= 0 || rawDt > 2) return; // ignore the first frame / tab-hidden gaps
@@ -6174,6 +7284,8 @@ private handlePacket(data: Uint8Array) {
   }
 
   private update(dt: number) {
+    // 所有主菜单模态面板的划入/划出动画(参考背包 bagAnim 的平滑逼近)
+    this.updatePanelAnims(dt);
     // scene fade
     if (this.pendingScene) {
       this.fade = Math.min(1, this.fade + dt * 3.2);
@@ -6298,10 +7410,14 @@ private handlePacket(data: Uint8Array) {
       this.updateDebugThroughput(dt);
       // Achievement popups + play-time tracking (game scene only)
       this.achievements.update(dt);
+      // Challenge quests: daily reset + claim particles (both scenes)
+      this.challenges.update(dt);
     } else {
       // 主菜单:只推进弹窗计时,不累计游玩时长
       this.achievements._tickPopups(dt);
       this.shopSystem.update(dt);
+      // Challenge quests: daily reset + claim particles (both scenes)
+      this.challenges.update(dt);
     }
   }
 
@@ -6399,7 +7515,9 @@ private handlePacket(data: Uint8Array) {
     const widthMult = isMobile && isLandscape ? 1.5 : 1;   // +50% width
     const heightMult = isMobile && isLandscape ? 2.1 : 1;    // ×2 height
     const w = Math.min(380, this.w * 0.92) * mobileScale * widthMult;
-    const reservedHotbar = this.scene === "game" ? this.hotbarHeight() : 0;
+    // 快捷栏在主菜单同样可见可拖拽,背包面板始终为其预留底部高度,
+    // 避免背包与快捷栏重叠遮挡(与游戏内一致)。
+    const reservedHotbar = this.hotbarHeight();
     const topGap = 18 * mobileScale;
     const bottomGap = 26 * mobileScale;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
@@ -6737,7 +7855,6 @@ private bagLayout() {
     for (const { cell } of this.bagEntries()) {
       const def = ITEMS[cell.item];
       if (!def) continue;
-      if (this.craftMode !== "trade" && def.kind === "trinket") continue;
       if (query && !def.name.toLowerCase().includes(query)) continue;
       if (biome !== "All" && !this.itemBiomes(cell.item).has(biome)) continue;
       seen.add(cell.item);
@@ -7177,6 +8294,12 @@ private bagLayout() {
       e.preventDefault();
       return;
     }
+    // Challenge panel: Escape closes it in any scene.
+    if (this.challenges.panelOpen && e.code === "Escape") {
+      this.challenges.panelOpen = false;
+      e.preventDefault();
+      return;
+    }
     // Shop panel (menu): Escape closes; redeem/search input captures keys.
     if (this.scene === "menu" && this.shopSystem.visible) {
       if (e.code === "Escape") {
@@ -7311,6 +8434,12 @@ private bagLayout() {
     this.my = p.y;
     // Changelog 面板内容触摸滚动（手机/桌面通用）。
     if (this.scene === "menu" && this.changelog.touchScrolling) this.changelog.touchMove(p.y);
+    if (this.achievements.touchScrolling) this.achievements.touchMove(p.y);
+    if (this.challenges.touchScrolling) this.challenges.touchMove(p.y);
+    // Shop 面板内容触摸滚动(手机/桌面通用,仅 buy/membership 页签可滚动)。
+    if (this.scene === "menu" && this.shopSystem.visible && this.shopSystem.touchScrolling) {
+      this.shopSystem.touchMove(p.y, this.w, this.h);
+    }
     // Account panel hover tracking (only when open).
     if (this.accountSystem.panelOpen) this.accountSystem.handleMouseMove(p.x, p.y);
     // Mobile joystick handling: if active, clamp current point to radius.
@@ -7334,11 +8463,39 @@ private bagLayout() {
     if (this.drag) {
       this.dragX = p.x;
       this.dragY = p.y;
+      // 从背包拖卡片到快捷栏时自动隐藏背包,方便看清落点。
+      if (
+        this.scene === "game" &&
+        isBagCell(this.drag.from) &&
+        this.bagOpen &&
+        this.quickSlot.cellIndexAtPoint(p.x, p.y) >= 0
+      ) {
+        this.bagOpen = false;
+      }
     }
     if (this.bagDraggingThumb) this.dragBagThumb(p.y);
     if (this.craftDraggingThumb) this.dragCraftThumb(p.y);
+    if (this.bagTouchScrolling) {
+      const layout = this.bagLayout();
+      const scale = layout.scale || 1;
+      const deltaY = (p.y - this.bagTouchStartY) / scale;
+      const maxScroll = this.bagMaxScroll();
+      this.bagScrollY = Math.max(0, Math.min(maxScroll, this.bagTouchStartOffset - deltaY));
+    }
+    if (this.craftTouchScrolling) {
+      const layout = this.craftLayout();
+      const scale = layout.scale || 1;
+      const deltaY = (p.y - this.craftTouchStartY) / scale;
+      const maxScroll = this.craftMaxScroll();
+      this.craftScrollY = Math.max(0, Math.min(maxScroll, this.craftTouchStartOffset - deltaY));
+    }
     if (this.scene === "menu" && this.mobGallery.visible) this.mobGallery.handleMouseMove(p.x, p.y);
     if (this.settings.panelOpen) this.settings.handleMouseMove(p.x, p.y);
+    // 天赋面板：鼠标 hover 节点提示 + 触摸拖动旋转。
+    if (this.talent.isOpen) {
+      this.talent.handleMouseMove([p.x, p.y]);
+      this.talent.handleTouchMove(p.y);
+    }
     this.quickSlot.handleMouseMove(p.x, p.y);
   };
 
@@ -7346,6 +8503,10 @@ private bagLayout() {
     const p = this.pointerPos(e);
     this.mx = p.x;
     this.my = p.y;
+
+    // 天赋面板：按下时记录触摸起点（旋转拖拽用），随后由 gameClick/menuClick
+    // 的路由把面板内点击交给 talent.handleClick 处理。
+    if (this.talent.isOpen) this.talent.handleTouchStart(p.y);
 
     // Virtual keyboard (mobile) — intercept clicks when active
     if (this.showVirtualKeyboard() && this.vk.active) {
@@ -7373,17 +8534,20 @@ private bagLayout() {
       }
     }
 
+    // The AFK prompt outranks every other pointer target (mobile joystick,
+    // panels, action buttons), which would otherwise swallow the touch.
+    // Applies in both scenes — the main page also runs AFK checks while
+    // connected, so the prompt must stay clickable there too.
+    if (this.afkPending || this.afkKicked) {
+      if (e.button === 2) return;
+      if (this.scene === "game") this.gameClick(p.x, p.y, e.shiftKey);
+      else this.menuClick(p.x, p.y);
+      return;
+    }
     // Account panel: intercept the press (scrollbar drag or click).
     if (this.accountSystem.panelOpen) {
       if (this.accountSystem.handleMouseDown(p.x, p.y)) return;
       if (this.accountSystem.handleClick(p.x, p.y)) return;
-    }
-    // The AFK prompt outranks every other pointer target, including the mobile
-    // joystick and action buttons which would otherwise swallow the touch.
-    if (this.scene === "game" && (this.afkPending || this.afkKicked)) {
-      if (e.button === 2) return;
-      this.gameClick(p.x, p.y, e.shiftKey);
-      return;
     }
     // Mobile: clicking the chatbox triggers the keyboard (check BEFORE joystick)
     if (this.showVirtualKeyboard() && this.scene === "game" && this.bagAnim < 0.2 && this.craftAnim < 0.2) {
@@ -7491,6 +8655,7 @@ private bagLayout() {
         !this.settings.panelOpen &&
         !this.accountSystem.panelOpen &&
         !this.achievements.panelOpen &&
+        !this.challenges.panelOpen &&
         !this.shopSystem.visible &&
         this.changelog.beginTouch(p.x, p.y, this.w, this.h)
       ) return;
@@ -7556,8 +8721,14 @@ private bagLayout() {
     this.bagDraggingThumb = false;
     this.craftDraggingThumb = false;
     this.changelog.endTouch();
+    this.achievements.endTouch();
+    this.challenges.endTouch();
+    this.shopSystem.endTouch();
     this.mobGallery.handleMouseUp();
+    this.talent.handleTouchEnd();
     if (this.settings.panelOpen) this.settings.handleMouseUp();
+    this.bagTouchScrolling = false;
+    this.craftTouchScrolling = false;
     if (this.drag) this.dropDrag(this.mx, this.my);
   };
 
@@ -7584,6 +8755,20 @@ private bagLayout() {
       e.preventDefault();
       e.stopPropagation();
       this.achievements.handleScroll(e.deltaY);
+      return;
+    }
+    // Challenge panel: scroll the quest list (same cursor-over-panel rule).
+    if (this.challenges.panelOpen && this.challenges.panelContains(this.mx, this.my)) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.challenges.handleScroll(e.deltaY);
+      return;
+    }
+    // 天赋面板：滚轮旋转天赋树（光标在面板内时）。
+    if (this.talent.isOpen && this.talent.contains(this.mx, this.my)) {
+      e.preventDefault();
+      e.stopPropagation();
+      this.talent.handleScroll(e.deltaY);
       return;
     }
     // Shop panel (menu): scroll the active tab (only while the cursor is
@@ -7657,7 +8842,8 @@ private bagLayout() {
   /** 主菜单瞬态提示（"Coming soon" 等），到期自动消失。 */
   private menuToast: { text: string; until: number } | null = null;
 
-  private showMenuToast(text: string) {
+  /** 主菜单瞬态提示（"Coming soon" 等），到期自动消失。挑战任务领奖也复用此提示。 */
+  public showMenuToast(text: string) {
     this.menuToast = { text, until: this.time + 1.4 };
   }
 
@@ -8110,10 +9296,25 @@ private bagLayout() {
   }
 
   private menuClick(mx: number, my: number) {
+    // 主页面同样响应 AFK 检测:模态提示优先于一切面板/按钮。
+    if (this.afkPending) {
+      if (hit(this.afkButtonRect(), mx, my)) this.sendAfkAck();
+      return;
+    }
+    if (this.afkKicked) {
+      // 主页面被 AFK 踢出 → 重新连接服务器。
+      this.afkKicked = false;
+      this.afkPending = false;
+      this.afkAnim = 0;
+      this.afkSecondsLeft = 0;
+      this.afkSmoothSeconds = 0;
+      this.connect();
+      return;
+    }
     // Bonus 面板常驻主菜单：面板区域内的点击一律由面板处理并吞掉，
     // 不会穿透到下方的按钮（防止点开其它面板）。
     // 其它模态面板（画廊/日志/账号/设置/背包/合成）打开时不触发 bonus。
-    if (!this.mobGallery.visible && !this.changelog.visible && !this.accountSystem.panelOpen && !this.settings.panelOpen && !this.achievements.panelOpen && !this.shopSystem.visible && this.bagAnim < 0.4 && this.craftAnim < 0.4) {
+    if (!this.mobGallery.visible && !this.changelog.visible && !this.accountSystem.panelOpen && !this.settings.panelOpen && !this.achievements.panelOpen && !this.challenges.panelOpen && !this.shopSystem.visible && this.bagAnim < 0.4 && this.craftAnim < 0.4) {
       if (this.hitArr(this.extraBonusButton, mx, my)) {
         if (this.hitArr(this._bonusClaimRect, mx, my)) {
           if (this.bonus.canClaim() && this.bonus.claim()) this.sendBonusStatus();
@@ -8125,6 +9326,12 @@ private bagLayout() {
     }
 
     // 模态面板打开时严格拦截，不穿透到主菜单
+    // 天赋面板：点击面板内由面板处理；点击面板外关闭（同成就/挑战面板模式）。
+    if (this.talent.isOpen) {
+      if (this.talent.handleClick([mx, my])) return;
+      this.talent.close();
+      return;
+    }
     if (this.accountSystem.panelOpen) {
       this.accountSystem.handleClick(mx, my);
       return;
@@ -8134,11 +9341,20 @@ private bagLayout() {
       return;
     }
     if (this.achievements.panelOpen) {
+      if (this.achievements.beginTouch(mx, my)) return;
       if (this.achievements.handleClick(mx, my)) return;
       this.achievements.panelOpen = false;
       return;
     }
+    if (this.challenges.panelOpen) {
+      if (this.challenges.beginTouch(mx, my)) return;
+      if (this.challenges.handleClick(mx, my)) return;
+      this.challenges.panelOpen = false;
+      return;
+    }
     if (this.shopSystem.visible) {
+      // 手机端：面板内按下先进入内容滚动(避开按钮/输入框),否则走点击。
+      if (this.shopSystem.beginTouch(mx, my, this.w, this.h)) return;
       if (this.shopSystem.handleClick(mx, my, this.w, this.h)) {
         // 手机端：点击搜索框/兑换输入框时唤起虚拟键盘
         if (this.showVirtualKeyboard() && (this.shopSystem.filterSearchActive || this.shopSystem.redeemInputActive)) {
@@ -8157,6 +9373,19 @@ private bagLayout() {
     if (this.changelog.visible) {
       this.changelog.handleClick(mx, my, this.w, this.h);
       return;
+    }
+    // 主页面快捷栏:命中快捷栏卡片 → 直接开始拖拽(与游戏内一致)。
+    // 支持拖动/替换快捷栏物品;背包打开时快捷栏位于其下方(已预留高度),
+    // 按下快捷栏卡片不会关闭背包。
+    const menuHotbarIdx = this.cellIndexAtPoint(mx, my);
+    if (menuHotbarIdx >= 0 && !isBagCell(menuHotbarIdx)) {
+      const hotbarCell = this.cellAt(menuHotbarIdx);
+      if (hotbarCell) {
+        this.drag = { from: menuHotbarIdx, cell: hotbarCell };
+        this.dragX = mx;
+        this.dragY = my;
+        return;
+      }
     }
     if (this.bagAnim > 0.4) {
       if (this.handleBagClick(mx, my)) return;
@@ -8182,12 +9411,21 @@ private bagLayout() {
         this.craftOpen = false;
         this.settings.close();
         this.changelog.close();
+        this.challenges.panelOpen = false;
         this.mobGallery.open();
       }
       return;
     }
-    if (actions.top_account && hit(actions.top_account, mx, my)) { this.accountSystem.openPanel(); return; }
-    if (actions.top_settings && hit(actions.top_settings, mx, my)) { this.settings.togglePanel(); return; }
+    if (actions.top_account && hit(actions.top_account, mx, my)) {
+      this.challenges.panelOpen = false;
+      this.accountSystem.openPanel();
+      return;
+    }
+    if (actions.top_settings && hit(actions.top_settings, mx, my)) {
+      this.challenges.panelOpen = false;
+      this.settings.togglePanel();
+      return;
+    }
     // Changelog 面板：打开/关闭
     if (actions.top_changelog && hit(actions.top_changelog, mx, my)) {
       this.focus = null;
@@ -8195,6 +9433,7 @@ private bagLayout() {
       this.craftOpen = false;
       this.settings.close();
       if (this.mobGallery.visible) this.mobGallery.close();
+      this.challenges.panelOpen = false;
       this.changelog.toggle();
       return;
     }
@@ -8206,6 +9445,7 @@ private bagLayout() {
       this.settings.close();
       if (this.mobGallery.visible) this.mobGallery.close();
       this.changelog.close();
+      this.challenges.panelOpen = false;
       this.achievements.togglePanel();
       return;
     }
@@ -8218,12 +9458,38 @@ private bagLayout() {
       if (this.mobGallery.visible) this.mobGallery.close();
       this.changelog.close();
       this.achievements.panelOpen = false;
+      this.challenges.panelOpen = false;
       this.shopSystem.toggle();
       return;
     }
-    // 尚未实现的按钮：先绘制，点击返回 "Coming soon"（暂无实际功能代码）。
-    for (const id of ['top_hunting_quest', 'top_talent']) {
-      if (actions[id] && hit(actions[id], mx, my)) { this.showMenuToast('Coming soon'); return; }
+    // 挑战面板：主菜单 Hunting Quest 图标打开/关闭(参考 HuntingQuestSystem)。
+    if (actions.top_hunting_quest && hit(actions.top_hunting_quest, mx, my)) {
+      this.focus = null;
+      this.bagOpen = false;
+      this.craftOpen = false;
+      this.settings.close();
+      if (this.mobGallery.visible) this.mobGallery.close();
+      this.changelog.close();
+      this.achievements.panelOpen = false;
+      this.shopSystem.close();
+      this.challenges.togglePanel();
+      return;
+    }
+    // 天赋面板：主菜单 Talent 图标打开/关闭（唯一入口，游戏内 HUD 不设按钮）。
+    if (actions.top_talent && hit(actions.top_talent, mx, my)) {
+      this.focus = null;
+      this.bagOpen = false;
+      this.craftOpen = false;
+      this.settings.close();
+      if (this.mobGallery.visible) this.mobGallery.close();
+      this.changelog.close();
+      this.achievements.panelOpen = false;
+      this.shopSystem.close();
+      this.challenges.panelOpen = false;
+      // 进入游戏场景后首次打开时执行延迟的等级同步
+      this.talent.syncWithLevel();
+      this.talent.toggle();
+      return;
     }
 
     // Name field (above biome buttons) — use same dimensions as draw code
@@ -8288,7 +9554,10 @@ private bagLayout() {
       this.settings.close();
       this.mobGallery.close();
       this.shopSystem.close();
+      this.challenges.panelOpen = false;
       this.updateMobileLayout();
+      // 进入游戏场景：执行天赋的延迟等级同步（load 时若在菜单则挂起）。
+      this.talent.onGameStart();
       this.connect();
     };
   }
@@ -8310,7 +9579,11 @@ private bagLayout() {
       this.craftSearchActive = false;
       this.craftBiomeOpen = false;
       this.shopSystem.close();
+      this.challenges.panelOpen = false;
       this.updateMobileLayout();
+      // 回到主页面后重新建立服务器连接(主页面同样进行 AFK 检测,
+      // 以菜单模式 JOIN,不进入世界模拟)。
+      this.connect();
     };
   }
 
@@ -8321,6 +9594,12 @@ private bagLayout() {
     // dismiss it, otherwise a cat on the keyboard would pass the check.
     if (this.afkPending) {
       if (hit(this.afkButtonRect(), mx, my)) this.sendAfkAck();
+      return;
+    }
+    // 天赋面板：打开时面板内点击由面板处理，面板外点击关闭（与主菜单一致）。
+    if (this.talent.isOpen) {
+      if (this.talent.handleClick([mx, my])) return;
+      this.talent.close();
       return;
     }
     // After an AFK kick the only thing left to do is go back to the menu.
@@ -8353,12 +9632,25 @@ private bagLayout() {
     // Achievement panel: modal while open — clicks inside are swallowed,
     // clicks outside close it.
     if (this.achievements.panelOpen) {
+      if (this.achievements.beginTouch(mx, my)) return;
       if (this.achievements.handleClick(mx, my)) return;
       this.achievements.panelOpen = false;
       return;
     }
     if (this.bagAnim > 0.4) {
       if (this.handleBagClick(mx, my)) return;
+      // 拖快捷栏卡片到背包时保持背包打开:命中快捷栏卡片直接开始拖拽,
+      // 松手落在背包区域会自动合并/存入(见 dropDrag),而不是关闭背包。
+      const idx = this.cellIndexAtPoint(mx, my);
+      if (idx >= 0 && !isBagCell(idx)) {
+        const cell = this.cellAt(idx);
+        if (cell) {
+          this.drag = { from: idx, cell };
+          this.dragX = mx;
+          this.dragY = my;
+          return;
+        }
+      }
       this.bagOpen = false;
       return;
     }
@@ -8551,7 +9843,14 @@ private bagLayout() {
       return true;
     }
 
-    if (hit(layout.actionRect, mx, my)) this.submitCraft();
+    if (hit(layout.actionRect, mx, my)) {
+      this.submitCraft();
+      return true;
+    }
+    // Start touch scrolling on empty area (mobile)
+    this.craftTouchScrolling = true;
+    this.craftTouchStartY = my;
+    this.craftTouchStartOffset = this.craftScrollY;
     return true;
   }
 
@@ -8564,11 +9863,7 @@ private bagLayout() {
    */
   private selectCraftCell(cell: Cell, shiftKey = false) {
     if (this.craftPhase !== "none") return;
-    if (this.craftMode !== "trade" && ITEMS[cell.item]?.kind === "trinket") {
-      this.craftMsg = "Coins can only be traded.";
-      this.craftMsgLife = 2;
-      return;
-    }
+
 
     if (this.craftMode === "normal") {
       if (shiftKey) {
@@ -8784,6 +10079,10 @@ private bagLayout() {
         return true;
       }
     }
+    // Start touch scrolling on empty area (mobile)
+    this.bagTouchScrolling = true;
+    this.bagTouchStartY = my;
+    this.bagTouchStartOffset = this.bagScrollY;
     // Consumed: click on bag panel background — don't fall through to game world.
     return true;
   }
@@ -8848,8 +10147,22 @@ private bagLayout() {
       this.selectCraftCell(drag.cell);
       return;
     }
+    // 松手落在背包面板区域内 → 与背包中相同卡片自动合并(x1→x2)或存入
+    // 空格,而不是替换另一张卡片。背包保持打开(见 gameClick)。
+    const inBagRegion = this.bagAnim > 0.4 && hit(this.bagPanelRect(), mx, my);
+    if (inBagRegion) {
+      if (this.scene === "game") this.depositDragToBag(drag, mx, my);
+      else this.depositDragToBagLocal(drag, mx, my);
+      return;
+    }
     const target = this.cellIndexAtPoint(mx, my);
     if (target < 0 || target === drag.from) return;
+    if (this.scene !== "game") {
+      // 主菜单:本地格子操作(不发送 SWAP,避免与服务端副本不同步;
+      // 改动在进入游戏时随 JOIN 整体同步到服务器)。
+      this.applyLocalCellDrop(drag, target);
+      return;
+    }
     // Cell indices now span two hotbar rows plus an unlimited bag, so they no
     // longer fit in a byte — send both endpoints as u16.
     const w = new Writer(8);
@@ -8859,7 +10172,11 @@ private bagLayout() {
     // The server transfers one item when the source is a bag cell. Do not do
     // a full-stack optimistic swap here: wait for its inventory snapshot so
     // the stack count and an equipped replacement cannot briefly desync.
-    if (isBagCell(drag.from)) return;
+    if (isBagCell(drag.from)) {
+      // 从背包拖到快捷栏:成功后隐藏背包。
+      if (isHotbarCell(target)) this.bagOpen = false;
+      return;
+    }
 
     // Hotbar-to-hotbar (either row) and hotbar-to-bag stay a normal card swap,
     // mirrored locally so the drag feels instant.
@@ -8867,6 +10184,177 @@ private bagLayout() {
     const b = this.cellAt(target);
     this.setCellLocal(drag.from, b);
     this.setCellLocal(target, a);
+  }
+
+  /**
+   * 把拖拽中的卡片存入背包:与背包中相同卡片自动合并(x1→x2),否则放入
+   * 第一个空格(绝不替换其它卡片)。快捷栏来源整格存入;背包来源保持原有
+   * 的逐格移动/合并行为。仅游戏场景调用(服务端同步)。
+   */
+  private depositDragToBag(drag: { from: number; cell: Cell }, mx: number, my: number) {
+    if (isBagCell(drag.from)) {
+      // 背包内部整理:松手落在另一个背包格 → 交给服务器合并/移动
+      // (moveOneFromBag:相同卡片合并、空格置入、其它情况原样保留)。
+      const target = this.cellIndexAtPoint(mx, my);
+      if (target < 0 || target === drag.from || !isBagCell(target)) return;
+      const w = new Writer(8);
+      w.u8(C2S.SWAP).u16(drag.from).u16(target);
+      this.net?.send(w.bytes());
+      return;
+    }
+    // 快捷栏 → 背包:先找相同卡片合并,再找空格存入。
+    let target = -1;
+    for (let i = 0; i < this.bag.length; i++) {
+      const c = this.bag[i];
+      if (c && c.item === drag.cell.item && c.rarity === drag.cell.rarity) {
+        target = bagCellIndex(i);
+        break;
+      }
+    }
+    if (target < 0) {
+      for (let i = 0; i < this.bag.length; i++) {
+        if (!this.bag[i]) {
+          target = bagCellIndex(i);
+          break;
+        }
+      }
+    }
+    if (target < 0 && this.bag.length < BAG_MAX) {
+      target = bagCellIndex(this.bag.length);
+      this.bag.push(null);
+    }
+    if (target < 0) return; // 背包已满,卡片留在原地
+    const w = new Writer(8);
+    w.u8(C2S.SWAP).u16(drag.from).u16(target);
+    this.net?.send(w.bytes());
+    // 本地镜像,保持拖拽手感(与服务端 swapCells 行为一致:相同卡片合并、
+    // 空格直接置入,快捷栏格清空)。
+    const a = this.cellAt(drag.from);
+    if (a) {
+      const bt = this.cellAt(target);
+      if (bt) bt.count += a.count;
+      else this.setCellLocal(target, a);
+      this.setCellLocal(drag.from, null);
+    }
+  }
+
+  /**
+   * 主菜单的本地背包存入(不发送 SWAP):与背包中相同卡片自动合并(x1→x2),
+   * 否则存入第一个空格;快捷栏来源整格存入,背包来源保持逐格移动/合并。
+   * 改动只作用于本地存档,进入游戏时随 JOIN 整体同步到服务器。
+   */
+  private depositDragToBagLocal(drag: { from: number; cell: Cell }, mx: number, my: number) {
+    if (isBagCell(drag.from)) {
+      // 背包内部整理:合并到相同卡片、空格置入,目标格是不同卡片则保留原位
+      // (与服务器 moveOneFromBag 一致)。
+      const target = this.cellIndexAtPoint(mx, my);
+      if (target < 0 || target === drag.from || !isBagCell(target)) return;
+      const a = this.cellAt(drag.from);
+      if (!a) return;
+      const bt = this.cellAt(target);
+      if (bt) {
+        if (bt.item === a.item && bt.rarity === a.rarity) bt.count += a.count;
+        else return;
+      } else {
+        this.setCellLocal(target, a);
+      }
+      this.setCellLocal(drag.from, null);
+      this.saveNow();
+      return;
+    }
+    // 快捷栏 → 背包:先找相同卡片合并,再找空格存入。
+    let target = -1;
+    for (let i = 0; i < this.bag.length; i++) {
+      const c = this.bag[i];
+      if (c && c.item === drag.cell.item && c.rarity === drag.cell.rarity) {
+        target = bagCellIndex(i);
+        break;
+      }
+    }
+    if (target < 0) {
+      for (let i = 0; i < this.bag.length; i++) {
+        if (!this.bag[i]) {
+          target = bagCellIndex(i);
+          break;
+        }
+      }
+    }
+    if (target < 0 && this.bag.length < BAG_MAX) {
+      target = bagCellIndex(this.bag.length);
+      this.bag.push(null);
+    }
+    if (target < 0) return; // 背包已满,卡片留在原位
+    const a = this.cellAt(drag.from);
+    if (!a) return;
+    const bt = this.cellAt(target);
+    if (bt) bt.count += a.count;
+    else this.setCellLocal(target, a);
+    this.setCellLocal(drag.from, null);
+    this.saveNow();
+  }
+
+  /**
+   * 主菜单的本地格子操作(不发送 SWAP):快捷栏↔快捷栏纯交换(快捷栏永不
+   * 叠加),背包→快捷栏替换(被替换的旧卡放回背包,源格减一)。改动只作用于
+   * 本地存档,进入游戏时随 JOIN 整体同步到服务器。
+   */
+  private applyLocalCellDrop(drag: { from: number; cell: Cell }, target: number) {
+    if (isBagCell(drag.from)) {
+      // 背包 → 快捷栏:目标格放一张该卡,旧卡(若有)放回背包,源格数量减一。
+      const src = this.cellAt(drag.from);
+      if (!src || src.count <= 0) return;
+      const cur = this.cellAt(target);
+      if (cur && !this.addToBagLocal(cur)) return; // 背包满,替换失败保留原位
+      this.setCellLocal(target, { item: src.item, rarity: src.rarity, count: 1 });
+      src.count -= 1;
+      if (src.count <= 0) this.setCellLocal(drag.from, null);
+      this.saveNow();
+      return;
+    }
+    // 快捷栏 ↔ 快捷栏:纯交换(不管是否相同稀有度/种类都不叠加)。
+    const a = this.cellAt(drag.from);
+    const b = this.cellAt(target);
+    this.setCellLocal(drag.from, b);
+    this.setCellLocal(target, a);
+    this.saveNow();
+  }
+
+  /** 把一张卡放回背包(合并进相同堆叠或存入空格);背包满放不下时返回 false。
+   *  先校验容量再写入,保证失败时不做任何部分写入。 */
+  private addToBagLocal(cell: Cell): boolean {
+    let left = cell.count;
+    // 预校验:可合并空间 + 空格容量 + 可扩容容量,不足则整体失败。
+    let room = 0;
+    let emptySlots = 0;
+    for (const c of this.bag) {
+      if (!c) emptySlots++;
+      else if (c.item === cell.item && c.rarity === cell.rarity) room += Math.max(0, 999 - c.count);
+    }
+    room += emptySlots * 999;
+    room += (BAG_MAX - this.bag.length) * 999;
+    if (left > room) return false;
+    // 合并进相同堆叠
+    for (const c of this.bag) {
+      if (left <= 0) break;
+      if (c && c.item === cell.item && c.rarity === cell.rarity && c.count < 999) {
+        const put = Math.min(999 - c.count, left);
+        c.count += put;
+        left -= put;
+      }
+    }
+    // 存入空格 / 扩容(预校验已保证容量足够,此处的守卫仅作防御)
+    while (left > 0) {
+      let idx = this.bag.indexOf(null);
+      if (idx < 0) {
+        if (this.bag.length >= BAG_MAX) return false;
+        idx = this.bag.length;
+        this.bag.push(null);
+      }
+      const put = Math.min(999, left);
+      this.bag[idx] = { item: cell.item, rarity: cell.rarity, count: put };
+      left -= put;
+    }
+    return true;
   }
 
   private setCellLocal(index: number, cell: Cell | null) {
@@ -8919,8 +10407,14 @@ private bagLayout() {
     const objs = this.connected ? this.debugEntityCount : this.ents.size;
     const players = this.connected ? this.debugPlayerCount : "--";
     const checks = this.connected ? this.debugCollisionChecks : "--";
+    // Player move speed in px/s, rounded to int for readability. Falls back
+    // to a local computation when we don't have a server reading (e.g.
+    // older server build, or pre-connection).
+    const speed = this.debugPlayerSpeed > 0
+      ? `${Math.round(this.debugPlayerSpeed)}px/s`
+      : (this.me ? `${Math.round(this.computeLocalPlayerSpeed())}px/s` : "--");
     const line1 = `${fps}fps ${ping} ↓${inKB}/s ↑${outKB}/s`;
-    const line2 = `obj:${objs} player:${players} collision:${checks}`;
+    const line2 = `obj:${objs} player:${players} collision:${checks} speed:${speed}`;
     const fontSize = 10;
     const lineH = 12;
     const padX = 6;
@@ -9161,11 +10655,12 @@ private bagLayout() {
     else if (this.hitArr(this._bonusExtraRect, this.mx, this.my)) this.hoveredButton = 'bonus_extra';
     this._drawBonusPanel(ctx, isMobileLayout ? 12 : 12);
     this.settings.draw(ctx, W / 2, H / 2);
-        // Craft / Inventory panels can be opened right from the main menu, reusing
+
+    // Craft / Inventory panels can be opened right from the main menu, reusing
     // the same in-game panel drawers.
-    this.renderCraft();
     this.renderBag();
-if (this.drag) {
+    this.renderCraft();
+    if (this.drag) {
   const size = 60;
   // 摆动动画：使用正弦波产生左右摆动
   const swingAmount = 10; // 摆动幅度（像素）
@@ -9193,13 +10688,13 @@ if (this.drag) {
 
   ctx.restore();
 }
-
     // 商店面板(绘制在最上层)。
     this.shopSystem.setMouse(this.mx, this.my);
     this.shopSystem.draw(ctx, W, H);
     // Bonus 面板（常驻主菜单，无按钮；参考 MainMenu._drawBonusPanel）。
     // 桌面/手机版都在右上角（顶部栏已移到左上角，右上角空闲）。
     // 面板区域点击不穿透（见 menuClick）。
+    this.quickSlot.draw(ctx);
 
 
     // Mobile: suggest fullscreen + show current control scheme
@@ -9235,12 +10730,24 @@ if (this.drag) {
 
     // Draw last: these floating panels intentionally overlay every main-menu
     // control while open.
-    this.mobGallery.draw(ctx, this.time, W, H);
+    // MobGallery 在独立文件(无源码),用外层变换实现划入动画:淡入 + 从底部滑入。
+    if (this.mobGallery.visible) {
+      const mgT = ease.outCubic(this.mobGalleryAnim);
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, this.mobGalleryAnim * 1.6);
+      ctx.translate(0, (1 - mgT) * (H + 20));
+      this.mobGallery.draw(ctx, this.time, W, H);
+      ctx.restore();
+    }
     this.changelog.draw(ctx, W, H);
     // Account panel overlays everything when open.
     this.accountSystem.draw(ctx);
     // Achievement panel (主菜单奖杯图标入口,与游戏内共用)
     this.achievements.drawPanel(ctx);
+    // Challenge panel (主菜单 Hunting Quest 图标入口)
+    this.challenges.drawPanel(ctx);
+    // 天赋面板（最上层，主菜单 Talent 图标入口）。
+    this.talent.draw(ctx);
 
     // ─── "Coming soon" toast（未实现按钮的点击反馈）───
     if (this.menuToast && this.time < this.menuToast.until) {
@@ -9262,6 +10769,11 @@ if (this.drag) {
     } else if (this.menuToast) {
       this.menuToast = null;
     }
+
+    // 主页面同样显示 AFK 检测提示(连接已建立时由服务端触发)。
+    // 模态覆盖层画在一切面板之上。
+    if (this.afkAnim > 0.01) this.renderAfkCheck();
+    if (this.afkKicked) this.renderAfkKicked();
   }
 
   /**
@@ -9534,6 +11046,8 @@ if (this.drag) {
     this.chat.draw(this.ctx, this.h - this.hotbarHeight() + chatLift);
     this.renderBag();
     this.renderCraft();
+    // 天赋面板（游戏内由主菜单 Talent 入口打开后显示在最上层）。
+    this.talent.draw(this.ctx);
 
 if (this.drag) {
   const size = 60;
@@ -10975,7 +12489,12 @@ if (me) {
   }
 
   private tooltip(cell: Cell, x: number, y: number) {
-    TooltipSystem.drawItemTooltip(this.ctx, cell, x, y, this.w, this.h);
+    // Pipe the latest server-authoritative talent bonuses into the tooltip
+    // so reload time + petal damage reflect the active talent tree. Falls
+    // back to undefined (treated as no-modifier) before the first
+    // S2C.TALENT_BONUSES arrives, which keeps the panel looking right from
+    // t=0.
+    TooltipSystem.drawItemTooltip(this.ctx, cell, x, y, this.w, this.h, this.talentBonuses);
   }
 
   /**
@@ -11541,7 +13060,7 @@ if (me) {
     );
     const bw = 200;
     const r = { x: this.w / 2 - bw / 2, y: this.h / 2 + 30, w: bw, h: 52 };
-    button(ctx, r, "Main menu", "#41505f", hit(r, this.mx, this.my), 20);
+    button(ctx, r, this.scene === "menu" ? "Reconnect" : "Main menu", "#41505f", hit(r, this.mx, this.my), 20);
     ctx.restore();
   }
 
