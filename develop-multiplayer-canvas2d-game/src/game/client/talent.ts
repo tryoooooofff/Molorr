@@ -48,7 +48,6 @@ export interface TalentBonuses {
   healthMult: number;
   speedMult: number;
   reloadTimeMult: number;
-  fluidSpeedMult: number;
   bodyDamageMult: number;
 }
 
@@ -150,14 +149,12 @@ export class TalentSystem {
 
   // ── 原始天赋树数据定义 ──
   private trees: Record<string, TalentBranch> = {
-    reload:       { label: "Reload",      emoji: "RED",  maxLevel: 7, level: 0, effect: 0.05, desc: "–5% reload time per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
-    petalDamage:  { label: "Petal Dmg",   emoji: "DMG",  maxLevel: 7, level: 0, effect: 0.05, desc: "+5% petal damage per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
+    reload:       { label: "Reload",      emoji: "RED",  maxLevel: 7, level: 0, effect: 0.015, desc: "–1.5% reload time per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
+    petalDamage:  { label: "Petal Dmg",   emoji: "DMG",  maxLevel: 7, level: 0, effect: 0.02, desc: "+2% petal damage per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
     summonDamage: { label: "Summon Dmg",  emoji: "SDM",  maxLevel: 7, level: 0, effect: 0.05, desc: "+5% summon damage per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
     summonHealth: { label: "Summon HP",   emoji: "SHP",  maxLevel: 7, level: 0, effect: 0.05, desc: "+5% summon health per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
     health:       { label: "Health",      emoji: "HP",   maxLevel: 7, level: 0, effect: 0.05, desc: "+5% max health per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
     speed:        { label: "Speed",       emoji: "SPE",  maxLevel: 7, level: 0, effect: 0.05, desc: "+5% move speed per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
-    reloadTime:   { label: "Reload Spd",  emoji: "RLD",  maxLevel: 7, level: 0, effect: 0.05, desc: "-5% reload time per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
-    fluidSpeed:   { label: "Fluid Spd",   emoji: "FLD",  maxLevel: 5, level: 0, effect: 0.06, desc: "+6% fluid speed per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
     bodyDamage:   { label: "Body Dmg",    emoji: "BDY",  maxLevel: 7, level: 0, effect: 0.04, desc: "+4% body damage per level", color: "", slotAngle: 0, baseAngle: 0, depth: 0, nodes: [] },
   };
 
@@ -209,7 +206,7 @@ export class TalentSystem {
     const colors: Record<string, string> = {
       reload: "#b085e6", petalDamage: "#61cb85", summonDamage: "#46cdcf",
       summonHealth: "#8ca1ad", health: "#3d72de", speed: "#e36387",
-      reloadTime: "#ffb347", fluidSpeed: "#f7f1e3", bodyDamage: "#ff6b6b",
+      bodyDamage: "#ff6b6b",
     };
     return colors[key] || "#ffffff";
   }
@@ -379,14 +376,12 @@ export class TalentSystem {
     if (!this.host) return;
 
     const bonuses: TalentBonuses = {
-      reloadReduction: (this.trees.reload?.level ?? 0) * (this.trees.reload?.effect ?? 0.05),
+      reloadReduction: (this.trees.reload?.level ?? 0) * (this.trees.reload?.effect ?? 0.015),
       petalDmgMult: 1 + (this.trees.petalDamage?.level ?? 0) * (this.trees.petalDamage?.effect ?? 0.05),
       summonDmgMult: 1 + (this.trees.summonDamage?.level ?? 0) * (this.trees.summonDamage?.effect ?? 0.05),
       summonHpMult: 1 + (this.trees.summonHealth?.level ?? 0) * (this.trees.summonHealth?.effect ?? 0.05),
       healthMult: 1 + (this.trees.health?.level ?? 0) * (this.trees.health?.effect ?? 0.05),
       speedMult: 1 + (this.trees.speed?.level ?? 0) * (this.trees.speed?.effect ?? 0.05),
-      reloadTimeMult: Math.max(0.01, 1 - (this.trees.reloadTime?.level ?? 0) * (this.trees.reloadTime?.effect ?? 0.05)),
-      fluidSpeedMult: 1 + (this.trees.fluidSpeed?.level ?? 0) * (this.trees.fluidSpeed?.effect ?? 0.06),
       bodyDamageMult: 1 + (this.trees.bodyDamage?.level ?? 0) * (this.trees.bodyDamage?.effect ?? 0.04),
     };
 
@@ -676,7 +671,6 @@ export class TalentSystem {
         ctx.ellipse(0, 0, symR * 0.7, symR * 1.0, 0, 0, Math.PI * 2);
         ctx.stroke();
         break;
-      case "reloadTime":
       case "reload":
         ctx.beginPath();
         ctx.arc(0, 0, symR * 0.8, -Math.PI / 4, Math.PI * 1.5, false);
@@ -685,16 +679,6 @@ export class TalentSystem {
         ctx.lineTo(-arrowSize, -symR * 0.8 - arrowSize);
         ctx.moveTo(0, -symR * 0.8);
         ctx.lineTo(-arrowSize, -symR * 0.8 + arrowSize);
-        ctx.stroke();
-        break;
-      case "fluidSpeed":
-        ctx.beginPath();
-        for (let wi = -1; wi <= 1; wi++) {
-          const wy = wi * symR * 0.55;
-          ctx.moveTo(-symR * 0.7, wy);
-          ctx.quadraticCurveTo(-symR * 0.2, wy - symR * 0.25, 0, wy);
-          ctx.quadraticCurveTo(symR * 0.2, wy + symR * 0.25, symR * 0.7, wy);
-        }
         ctx.stroke();
         break;
       case "bodyDamage":
