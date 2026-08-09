@@ -26,10 +26,42 @@ export const C2S = {
    * it is deliberately NOT sent by ordinary input so a stuck key can't pass it.
    */
   AFK_ACK: 13,
+  /**
+   * Sync the player's current talent-tree levels to the authoritative server.
+   * Payload: 7 × u8, in this fixed order:
+   *   reload, petalDamage, summonDamage, summonHealth, health, speed, bodyDamage
+   * Each value is clamped to the per-branch max (0..maxLevel). The server
+   * recomputes TalentBonuses on receipt and pushes S2C.TALENT_BONUSES back so
+   * the client can confirm. Levels are kept client-side (localStorage) so the
+   * player owns the allocation; the server just applies the multipliers.
+   */
+  TALENT: 14,
 } as const;
 
 /** SWAP_ROW payload meaning "swap the entire row", not a single slot. */
 export const SWAP_ROW_ALL = 0xff;
+
+/** Fixed order of talent branches for C2S.TALENT and S2C.TALENT_BONUSES. */
+export const TALENT_KEYS = [
+  "reload",
+  "petalDamage",
+  "summonDamage",
+  "summonHealth",
+  "health",
+  "speed",
+  "bodyDamage",
+] as const;
+
+/** Per-branch max levels — kept in sync with the client TalentSystem definition. */
+export const TALENT_MAX_LEVELS: Readonly<Record<(typeof TALENT_KEYS)[number], number>> = {
+  reload: 7,
+  petalDamage: 7,
+  summonDamage: 7,
+  summonHealth: 7,
+  health: 7,
+  speed: 7,
+  bodyDamage: 7,
+};
 
 export const S2C = {
   WELCOME: 1,
@@ -51,12 +83,25 @@ export const S2C = {
   /**
    * Debug-mode telemetry for the client's optional debug overlay. Payload:
    * `u32 collisionChecks` (wall/circle collision tests performed during the
-   * tick this packet was built from) and `u16 entityCount` (players + mobs +
-   * petals + drops currently simulated, server-wide, not just in view).
-   * Sent at a reduced cadence (see sim.ts) since it's a diagnostic, not
-   * gameplay-critical, packet.
+   * tick this packet was built from), `u16 entityCount` (players + mobs +
+   * petals + drops currently simulated, server-wide, not just in view),
+   * `u16 playerCount` (currently connected players), and `f32 playerSpeed`
+   * (owning player's current move speed in px/s, fresh per snapshot).
+   * Older server builds may omit the trailing f32 — clients MUST treat the
+   * tail as optional. Sent at a reduced cadence (see sim.ts) since it's a
+   * diagnostic, not gameplay-critical, packet.
    */
   DEBUG: 10,
+  /**
+   * Authoritative talent bonuses applied to the receiving player. Sent in
+   * response to C2S.TALENT (and once on JOIN). Payload: 7 × f32 multipliers in
+   * the same order as TALENT_KEYS:
+   *   reloadReduction (0..0.5 typical), petalDmgMult, summonDmgMult,
+   *   summonHpMult, healthMult, speedMult, bodyDamageMult.
+   * The client can use these to render an authoritative buff panel without
+   * recomputing locally.
+   */
+  TALENT_BONUSES: 11,
 } as const;
 
 export const ENT = {

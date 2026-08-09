@@ -63,7 +63,7 @@ import {
   thirdEyeOrbitBonus,
   pickWeightedMob,
 } from "./defs";
-import { C2S, ENT, EVT, Reader, S2C, SWAP_ROW_ALL, TEAM, Writer } from "./protocol";
+import { C2S, ENT, EVT, Reader, S2C, SWAP_ROW_ALL, TALENT_KEYS, TALENT_MAX_LEVELS, TEAM, Writer } from "./protocol";
 
 // =====================================================================
 // Squad system
@@ -139,6 +139,117 @@ export interface PlayerSave {
   nextTradeAt?: number;
 }
 
+// =====================================================================
+// Talent system (server-authoritative multipliers)
+// =====================================================================
+//
+// The client owns the player's talent point allocation (saved to localStorage
+// and gated by player level). Whenever the allocation changes, the client
+// sends a C2S.TALENT packet listing the current per-branch levels. The
+// server stores the snapshot on the Player, recomputes the multiplier
+// bundle, and applies it to all sim formulas that read the relevant stat
+// (max HP, move speed, petal damage, summon damage / HP, reload time).
+//
+// Bonus names + effects MUST stay in lockstep with the client
+// `TalentSystem` in talent.ts — they're duplicated here on purpose so the
+// server can be deployed without depending on the client module.
+
+/** Per-branch talent levels, keyed by the canonical branch name. */
+export type TalentTreeLevels = Readonly<Record<(typeof TALENT_KEYS)[number], number>>;
+
+/** Multiplier bundle the server applies to the owning player every tick. */
+export interface TalentBonuses {
+  /** Flat reload-time reduction (0..0.5 typical). Subtracts from each reload. */
+  reloadReduction: number;
+  /** Multiplier on player-dealt petal damage. */
+  petalDmgMult: number;
+  /** Multiplier on friendly summon damage. */
+  summonDmgMult: number;
+  /** Multiplier on friendly summon max HP. */
+  summonHpMult: number;
+  /** Multiplier on player max HP (combined with the level curve). */
+  healthMult: number;
+  /** Multiplier on player move speed. */
+  speedMult: number;
+  /** Multiplier on body-contact damage. */
+  bodyDamageMult: number;
+}
+
+const DEFAULT_TALENT_BONUSES: TalentBonuses = {
+  reloadReduction: 0,
+  petalDmgMult: 1,
+  summonDmgMult: 1,
+  summonHpMult: 1,
+  healthMult: 1,
+  speedMult: 1,
+  bodyDamageMult: 1,
+};
+
+/**
+ * Per-branch step effect (matches the client TalentSystem definition).
+ * Keep this table in sync with `talent.ts` to avoid drift.
+ */
+const TALENT_BRANCH_EFFECT: Readonly<Record<(typeof TALENT_KEYS)[number], number>> = {
+  reload: 0.05,
+  petalDamage: 0.05,
+  summonDamage: 0.05,
+  summonHealth: 0.05,
+  health: 0.05,
+  speed: 0.05,
+  bodyDamage: 0.04,
+};
+
+/**
+ * Pure function: convert a per-branch level snapshot into the multiplier
+ * bundle applied to the player. Safe to call on every tick — no allocations
+ * beyond the returned object.
+ */
+export function computeTalentBonuses(levels: TalentTreeLevels): TalentBonuses {
+  const lvl = (k: (typeof TALENT_KEYS)[number]): number => {
+    const raw = levels[k] ?? 0;
+    const max = TALENT_MAX_LEVELS[k];
+    return raw < 0 ? 0 : raw > max ? max : raw;
+  };
+  // "reload" is a flat reduction (capped so the formula stays sane).
+  const reloadReduction = Math.min(0.5, lvl("reload") * TALENT_BRANCH_EFFECT.reload);
+  return {
+    reloadReduction,
+    petalDmgMult: 1 + lvl("petalDamage") * TALENT_BRANCH_EFFECT.petalDamage,
+    summonDmgMult: 1 + lvl("summonDamage") * TALENT_BRANCH_EFFECT.summonDamage,
+    summonHpMult: 1 + lvl("summonHealth") * TALENT_BRANCH_EFFECT.summonHealth,
+    healthMult: 1 + lvl("health") * TALENT_BRANCH_EFFECT.health,
+    speedMult: 1 + lvl("speed") * TALENT_BRANCH_EFFECT.speed,
+    bodyDamageMult: 1 + lvl("bodyDamage") * TALENT_BRANCH_EFFECT.bodyDamage,
+  };
+}
+
+/** Read the 7 u8 levels from a C2S.TALENT payload in TALENT_KEYS order. */
+export function readTalentLevels(r: Reader): TalentTreeLevels {
+  const out: Record<(typeof TALENT_KEYS)[number], number> = {
+    reload: 0, petalDamage: 0, summonDamage: 0, summonHealth: 0,
+    health: 0, speed: 0, bodyDamage: 0,
+  };
+  for (let i = 0; i < TALENT_KEYS.length; i++) {
+    const k = TALENT_KEYS[i];
+    const max = TALENT_MAX_LEVELS[k];
+    const v = r.u8();
+    out[k] = v < 0 ? 0 : v > max ? max : v;
+  }
+  return out;
+}
+
+/** Serialize a TalentBonuses bundle in the same order as TALENT_KEYS. */
+export function writeTalentBonuses(w: Writer, b: TalentBonuses): Writer {
+  w.f32(b.reloadReduction);
+  w.f32(b.petalDmgMult);
+  w.f32(b.summonDmgMult);
+  w.f32(b.summonHpMult);
+  w.f32(b.healthMult);
+  w.f32(b.speedMult);
+  w.f32(b.bodyDamageMult);
+  return w;
+}
+
 export class Player {
   id: number;
   name = "flower";
@@ -152,6 +263,12 @@ export class Player {
   xp = 0;
   level = 1;
   alive = true;
+  /**
+   * 主页面(菜单)模式:玩家不进入世界模拟——不生成花瓣、不参与世界/花瓣
+   * 更新、不接收世界快照;但背包/合成/交易/快捷栏切换等物品操作照常可用。
+   * 由 JOIN 载荷末尾的模式字节设置。
+   */
+  menuMode = false;
   /** 死亡时的位置，用于死亡后仍然更新该位置周围的生物 */
   deathX = 0;
   deathY = 0;
@@ -182,6 +299,33 @@ export class Player {
   shield = 0;
   dirty = true;
   statsDirty = true;
+
+  // =====================================================================
+  // Talent tree snapshot (client-owned allocation, server-applied).
+  // `talentLevels` is the per-branch level map; `talentBonuses` is the
+  // derived multiplier bundle recomputed whenever the levels change.
+  // Both are sent to the client on demand so it can confirm what the
+  // authoritative sim is using.
+  // =====================================================================
+  talentLevels: TalentTreeLevels = {
+    reload: 0, petalDamage: 0, summonDamage: 0, summonHealth: 0,
+    health: 0, speed: 0, bodyDamage: 0,
+  };
+  talentBonuses: TalentBonuses = { ...DEFAULT_TALENT_BONUSES };
+  /**
+   * Body-contact damage the player deals to a mob on direct physical
+   * collision (no petal, no projectile). Multiplied by the `bodyDamage`
+   * talent branch via `talentBonuses.bodyDamageMult` at the point of impact.
+   * Default 10 — small enough that petals still feel like the main weapon,
+   * large enough that bumping into a hornet hurts it.
+   */
+  bodyDamage = 10;
+  /**
+   * Last computed move speed in px/s, refreshed every `updatePlayer` tick.
+   * Surfaced in the DEBUG packet so the client's debug overlay can show
+   * "current speed" without re-deriving it from the slot table.
+   */
+  currentSpeed = 0;
 
   // =====================================================================
   // Bubble: defend-key rising-edge detection
@@ -294,11 +438,11 @@ export class Drop {
     public item: number,
     public rarity: number,
     public ownerId = 0,
-    public ttl = 45,
+    public ttl = 50,
     /** Cards merged into one card. Nearby identical drops stack instead of littering. */
     public count = 1
   ) {
-    this.groundTimer = 0.8;
+    this.groundTimer = 0.5;
     this.suctionTimer = 0;
   }
 }
@@ -1688,47 +1832,49 @@ export class GameServer {
     return Math.max(0, Math.round(MAPS[mapId].mobCap * this.mobCapScale));
   }
 
-  /**
-   * 全图预生成（仅服务器启动时调用一次）：
-   * 每 2 个区块为一组（A+B、C+D、E+F、G），每组只预生成 1 只，
-   * 让初始世界保持稀疏，后续由 refillZoneMobs() 在玩家视野内补生。
-   */
-/**
- * 预生成地图怪物 - 每个 40x40 block 都生成怪物
- */
+
 private preSpawnMap(mapId: number) {
     const map = MAPS[mapId];
     if (!map) return;
 
-    // 40x40 的区块网格
-    const BLOCK_SIZE = 40;
-    const cols = Math.ceil(map.width / BLOCK_SIZE);
-    const rows = Math.ceil(map.height / BLOCK_SIZE);
+    const targetMobs = Math.floor(this.mobCapForMap(mapId));
+    let spawned = 0;
+    let attempts = 0;
 
-    // 遍历所有区块
-    for (let col = 0; col < cols; col++) {
-        for (let row = 0; row < rows; row++) {
-            // 每个区块生成 1-3 只怪物
-            const count = 2 + Math.floor(Math.random() * 2);
-            for (let i = 0; i < count; i++) {
-                // 计算区块中心位置
-                const centerX = (col + 0.5) * BLOCK_SIZE;
-                const centerY = (row + 0.5) * BLOCK_SIZE;
+    while (spawned < targetMobs && attempts < targetMobs * 50) {
+        attempts++;
 
-                // 在区块内随机偏移
-                const offsetX = (Math.random() - 0.5) * BLOCK_SIZE * 0.6;
-                const offsetY = (Math.random() - 0.5) * BLOCK_SIZE * 0.6;
+        // 随机生成位置
+        const x = 50 + Math.random() * (map.width - 200);
+        const y = 50 + Math.random() * (map.height - 200);
+        const zone = getBlockAt(mapId, x, y);
 
-                const x = Math.max(50, Math.min(map.width - 50, centerX + offsetX));
-                const y = Math.max(50, Math.min(map.height - 50, centerY + offsetY));
+        // 跳过墙壁
+        if (zone === "1" || zone < "A" || zone > "G") continue;
 
-                // 根据位置决定区块等级 (A-G)
-                const zone = this.getZoneFromPosition(col, row, cols, rows);
+        // 检查区块是否已满
+        if (this.zoneFull(mapId, zone)) continue;
 
-                this.spawnMob(mapId, zone, x, y);
-            }
-        }
+        // ✅ 直接生成怪物，不做碰撞检测
+        const type = pickWeightedMob(mapId, map.mobs);
+        const rarity = rollZoneRarity(zone);
+
+        // 增加区块计数
+        const zoneCounts = this.zoneMobCounts[mapId];
+        zoneCounts.set(zone, (zoneCounts.get(zone) || 0) + 1);
+
+        this.worlds[mapId].mobs.push(new Mob(
+            this.nextId++,
+            type,
+            mapId,
+            x,
+            y,
+            rarity
+        ));
+        spawned++;
     }
+
+    console.log(`[preSpawnMap] 生成 ${spawned}/${targetMobs} 只怪物 (尝试 ${attempts} 次)`);
 }
 
 private getZoneFromPosition(col: number, row: number, cols: number, rows: number): string {
@@ -1892,6 +2038,8 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
         p.nextOracleAt = oracleSecLeft > 0 ? now + oracleSecLeft * 1000 : 0;
         p.nextTradeAt = tradeSecLeft > 0 ? now + tradeSecLeft * 1000 : 0;
         this.setBonusStatus(p, r.remaining >= 3 ? r.u8() : 1, r.remaining >= 2 ? r.u16() : 0);
+        // 载荷末尾的模式字节:1 = 主页面(菜单)模式,不进入世界模拟。
+        p.menuMode = r.remaining >= 1 ? r.u8() === 1 : false;
         if (!p.slots.some(Boolean) && !p.secondary.some(Boolean) && !p.bag.some(Boolean)) {
           p.slots[0] = { item: 0, rarity: 0, count: 1 };
           p.slots[1] = { item: 0, rarity: 0, count: 1 };
@@ -1902,9 +2050,20 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
         }
         c.player = p;
         this.applyLevel(p);
-        this.rebuildPetals(p);
-        this.spawnPlayer(p);
+        if (!p.menuMode) {
+          this.rebuildPetals(p);
+          this.spawnPlayer(p);
+        }
         this.sendWelcome(c, p);
+        // Push the current (all-zero on first JOIN) talent bonus snapshot so
+        // the client can show an authoritative buff panel without waiting for
+        // the player to open the talent tree and trigger C2S.TALENT.
+        {
+          const tw = new Writer(64);
+          tw.u8(S2C.TALENT_BONUSES);
+          writeTalentBonuses(tw, p.talentBonuses);
+          c.send(tw.bytes());
+        }
         break;
       }
 
@@ -1924,6 +2083,26 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
       }
 
       case C2S.AFK_ACK: {
+        break;
+      }
+
+      case C2S.TALENT: {
+        const p = c.player;
+        if (!p) return;
+        // 9 × u8 levels in TALENT_KEYS order. Server recomputes bonuses
+        // and pushes the authoritative result back to the client so the
+        // UI can confirm (or the server can override a tampered value).
+        p.talentLevels = readTalentLevels(r);
+        p.talentBonuses = computeTalentBonuses(p.talentLevels);
+        // Re-apply derived stats that depend on talent multipliers. We
+        // touch both `applyLevel` (max HP) and rebuild the petal state so
+        // the new reload times take effect on the next spawn.
+        this.applyLevel(p);
+        if (!p.menuMode) this.rebuildPetals(p);
+        const tw = new Writer(64);
+        tw.u8(S2C.TALENT_BONUSES);
+        writeTalentBonuses(tw, p.talentBonuses);
+        c.send(tw.bytes());
         break;
       }
 
@@ -2241,7 +2420,11 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
     if (a === b || a >= TOTAL_CELLS || b >= TOTAL_CELLS) return;
     const ca = this.cellAt(p, a);
     const cb = this.cellAt(p, b);
-    if (ca && cb && ca.item === cb.item && ca.rarity === cb.rarity) {
+    // 快捷栏(主行+副行)卡片禁止叠加:两个快捷栏格之间即使相同稀有度/
+    // 相同种类也只交换不合并。背包格之间的合并、快捷栏→背包的合并
+    // (拖入背包自动堆叠)不受影响。
+    const bothHotbar = isHotbarCell(a) && isHotbarCell(b);
+    if (!bothHotbar && ca && cb && ca.item === cb.item && ca.rarity === cb.rarity) {
       cb.count += ca.count;
       this.setCell(p, a, null);
     } else {
@@ -2288,7 +2471,7 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
     const def = ITEMS[cell.item];
     if (!def || !orbitsAsPetal(def.kind)) return;
     st.alive = false;
-    st.timer = def.reload > 0 ? def.reload : 0.001;
+    st.timer = def.reload > 0 ? this.applyTalentReload(p, def.reload) : 0.001;
   }
 
   private moveOneFromBag(p: Player, from: number, to: number) {
@@ -2358,7 +2541,7 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
   }
 
   private craft(c: ClientState, p: Player, item: number, rarity: number, totalCards: number) {
-    if (item >= ITEMS.length || ITEMS[item].kind === "trinket") return;
+    if (item >= ITEMS.length) return;
     const successRate = craftChanceFor(rarity);
     if (rarity >= MAX_CRAFT_RARITY || successRate === undefined) return;
     const needed = Math.max(1, totalCards);
@@ -2380,7 +2563,7 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
   }
 
   private oracle(c: ClientState, p: Player, item: number, rarity: number) {
-    if (item >= ITEMS.length || ITEMS[item].kind === "trinket") return;
+    if (item >= ITEMS.length) return;
     const required = oracleRequiredCount(rarity);
     if (required === undefined || Date.now() < p.nextOracleAt) return;
     const have = this.countOf(p, item, rarity);
@@ -2395,7 +2578,7 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
   }
 
   private trade(c: ClientState, p: Player, item: number, rarity: number, requestedCount: number) {
-    if (item >= ITEMS.length || ITEMS[item].kind === "trinket" || Date.now() < p.nextTradeAt) return;
+    if (item >= ITEMS.length || Date.now() < p.nextTradeAt) return;
     const have = this.countOf(p, item, rarity);
     const want = requestedCount > 0 ? Math.min(requestedCount, have) : have;
     if (want <= 0) return;
@@ -2597,7 +2780,7 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
     const map = MAPS[mapId];
     const tileW = map.width / BLOCK_GRID_COLS;
     const tileH = map.height / BLOCK_GRID_ROWS;
-    const viewRadius = 1300 / this.viewScale;
+    const viewRadius = 1400 / this.viewScale;
     const viewRadiusSq = viewRadius * viewRadius;
     const inViewZones = new Set<string>();
     for (let row = 0; row < BLOCK_GRID_ROWS; row++) {
@@ -2733,9 +2916,25 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
     return bonus;
   }
 
+  /**
+   * Apply talent-tree reload modifier to a petal's base reload time. The
+   * `reload` branch is a flat fractional reduction (e.g. level 7 → 0.35
+   * off, capped at 0.5). The result is clamped so a fully-stacked
+   * allocation can never make reload negative or zero (which would brick
+   * the petal). Used by every place that writes `st.timer = def.reload`.
+   */
+  private applyTalentReload(p: Player, baseReload: number): number {
+    if (baseReload <= 0) return baseReload;
+    const t = p.talentBonuses;
+    const scaled = baseReload * (1 - t.reloadReduction);
+    return scaled < 0.05 ? 0.05 : scaled;
+  }
+
   private applyLevel(p: Player) {
     const lvl = levelFromXp(p.xp);
-    const maxHp = Math.round(110 + lvl * 16 + this.healthBonusOf(p));
+    const maxHp = Math.round(
+      (110 + lvl * 16 + this.healthBonusOf(p)) * p.talentBonuses.healthMult,
+    );
     if (maxHp !== p.maxHp) {
       const ratio = p.hp / p.maxHp;
       p.maxHp = maxHp;
@@ -2756,6 +2955,9 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
   }
 
   private rebuildPetals(p: Player) {
+    // 主页面(菜单)模式:不激活快捷栏更新(不生成/重建花瓣),
+    // 物品操作(快捷栏切换等)照常可用,进入游戏时随 JOIN 重新构建。
+    if (p.menuMode) return;
     const oldPetals = p.petals;
     const petals: PetalState[] = [];
     for (let i = 0; i < SLOT_COUNT; i++) {
@@ -2814,7 +3016,9 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
     this.collisionCounter = { n: 0 };
     this.updateAfk(dt);
     const players: Player[] = [];
-    for (const c of this.clients.values()) if (c.player) players.push(c.player);
+    // 主页面(菜单)模式的玩家不参与世界模拟:不移动、不生成花瓣、不拾取
+    // 掉落、不被生物攻击;其物品操作(合成/交易/快捷栏切换)仍可正常进行。
+    for (const c of this.clients.values()) if (c.player && !c.player.menuMode) players.push(c.player);
     for (const p of players) this.updatePlayer(p, dt, players);
     for (let m = 0; m < MAPS.length; m++) this.updateWorld(m, dt, players);
     // 每 5 秒检查一次：只给进入玩家视野的区块补生，视野外不生成、不更新
@@ -2849,7 +3053,8 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
       if (!alive) continue;
       if (def.speed) speedBonus += def.speed * (1 + cell.rarity * 0.12);
     }
-    const speed = (190 + p.level * 0.8) * (1 + speedBonus / 100);
+    const speed = (190 + p.level * 0.8) * (1 + speedBonus / 100) * p.talentBonuses.speedMult;
+    p.currentSpeed = speed;
     const mag = Math.hypot(p.inDx, p.inDy);
     const nx = mag > 1 ? p.inDx / mag : p.inDx;
     const ny = mag > 1 ? p.inDy / mag : p.inDy;
@@ -2950,7 +3155,7 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
       // Break the bubble: kill petal and start reload
       st.alive = false;
       st.hp = 0;
-      st.timer = def.reload > 0 ? def.reload : 0.001;
+      st.timer = def.reload > 0 ? this.applyTalentReload(p, def.reload) : 0.001;
     }
   }
 
@@ -3020,7 +3225,7 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
       }
       if (isSummon && (p.pets[i]?.length ?? 0) < getSummonCount(cell.item)) {
         this.hatchPet(p, i, cell);
-        st.alive = false; st.hp = 0; st.timer = def.reload;
+        st.alive = false; st.hp = 0; st.timer = this.applyTalentReload(p, def.reload);
         continue;
       }
       const absorbs = isAbsorbItem(cell.item) && (!!def.heal || !!def.shield);
@@ -3049,7 +3254,7 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
             p.statsDirty = true;
             const owner = this.clientOf(p.id);
             if (owner) this.pushEvent(owner, EVT.HEAL, p.x, p.y, Math.round(amount), cell.item, cell.rarity);
-            st.alive = false; st.hp = 0; st.timer = def.reload;
+            st.alive = false; st.hp = 0; st.timer = this.applyTalentReload(p, def.reload);
           }
           continue;
         }
@@ -3071,7 +3276,7 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
         const maxShield = p.maxHp;
         if (p.shield < maxShield) { p.shield = Math.min(maxShield, p.shield + def.shieldPerSec * rarityMult(cell.rarity) * dt); p.statsDirty = true; }
       }
-      const dmg = def.damage * rarityMult(cell.rarity);
+      const dmg = def.damage * rarityMult(cell.rarity) * p.talentBonuses.petalDmgMult;
       // Moon radius x4: both collision and visual are scaled up 4x.
       const isMoonRadius = (def.name ?? "").toLowerCase().includes("moon");
       const pr = def.radius * (1 + cell.rarity * 0.06) * (isMoonRadius ? 4 : 1);
@@ -3147,7 +3352,7 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
         // 发射后花瓣进入 reload（消失，等待重新生长）
         st.alive = false;
         st.hp = 0;
-        st.timer = def.reload;
+        st.timer = this.applyTalentReload(p, def.reload);
         // 远程花瓣不进行近战碰撞/伤害，跳过下面的 targetMob 攻击分支
         continue;
       }
@@ -3162,7 +3367,7 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
         targetMob.vx += ((targetMob.x - st.x) / (targetDist || 1)) * kb;
         targetMob.vy += ((targetMob.y - st.y) / (targetDist || 1)) * kb;
         if (st.hp <= 0) {
-          st.alive = false; st.timer = def.reload; st.specialTimer = 0; st.absorbTimer = 0;
+          st.alive = false; st.timer = this.applyTalentReload(p, def.reload); st.specialTimer = 0; st.absorbTimer = 0;
           if (isSummon) this.despawnPets(p, i);
         }
       }
@@ -3269,7 +3474,13 @@ private getMobsInRadius(x: number, y: number, radius: number, candidates: Mob[])
       // placed=true 表示找到了不在墙内的位置；否则 sx/sy 已被弹出墙壁。
       const m = new Mob(this.nextId++, def.petMob, p.mapId, sx, sy, rarity, true);
       m.ownerId = p.id; m.ownerSlot = slot; m.sourceItem = cell.item; m.sourceRarity = cell.rarity;
-      m.maxHp = Math.round(m.maxHp * 1.4); m.hp = m.maxHp;
+      // Apply summonHpMult talent: extra 1.4× base, then talent multiplier.
+      const summonHpScale = 1.4 * p.talentBonuses.summonHpMult;
+      m.maxHp = Math.max(1, Math.round(m.maxHp * summonHpScale));
+      m.hp = m.maxHp;
+      // Apply summonDmgMult talent: summons get a 1.5× base speed bump, and
+      // their damage is bumped proportionally to the player's damage mult.
+      m.damage = m.damage * p.talentBonuses.summonDmgMult;
       if (m.speed > 0) m.speed = Math.max(70, m.speed * 1.5);
       m.spawnProtection = protection;
       this.worlds[p.mapId].mobs.push(m);
@@ -3747,6 +3958,20 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
               if (c) this.pushEvent(c, EVT.HIT, p.x, p.y, Math.round(mob.damage));
               if (p.hp <= 0) this.killPlayer(p);
             }
+
+            // ---- Player body-contact damage to the mob ----
+            // The player also hurts the mob on direct physical contact (in
+            // addition to whatever petals/friendly summons are doing).
+            // Multiplied by the `bodyDamage` talent branch. Cooldown uses the
+            // same 0.1s hurtCd window so a single touch registers once.
+            if (mob.hitCd <= 0 && mob.hp > 0 && p.bodyDamage > 0) {
+              const bodyDmg = Math.max(1, Math.round(p.bodyDamage * p.talentBonuses.bodyDamageMult));
+              mob.hp -= bodyDmg;
+              mob.lastHitBy = p.id;
+              mob.addDamage(p.id, bodyDmg);
+              mob.hitCd = 0.1;
+              if (mob.hp <= 0) this.onMobKilled(mob, p.mapId);
+            }
           }
         }
       }
@@ -4033,7 +4258,7 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
       // Magnet 快速吸取：0.5 秒直达玩家中心
       if (magnetRange > 0 && dist < magnetRange) {
         if (d.suctionTimer <= 0) {
-          d.suctionTimer = 0.5;
+          d.suctionTimer = 0.2;
         }
         const move = dist * dt / Math.max(d.suctionTimer, dt);
         if (dist > 0.001) {
@@ -4042,7 +4267,7 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
         }
 
         // 吸取到达或足够近时自动拾取
-        if (dist < 12 || d.suctionTimer <= dt) {
+        if (dist < 20 || d.suctionTimer <= dt) {
           if (this.addItem(p, d.item, d.rarity, d.count)) {
             world.drops.splice(i, 1);
             const c = this.clientOf(p.id);
@@ -4056,7 +4281,7 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
       }
 
       // 无 magnet 时的正常拾取
-      if (dist < 46) {
+      if (dist < 50) {
         if (this.addItem(p, d.item, d.rarity, d.count)) {
           world.drops.splice(i, 1);
           const c = this.clientOf(p.id);
@@ -4300,6 +4525,9 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
   private sendState(c: ClientState) {
     const p = c.player;
     if (!p) return;
+    // 主页面(菜单)模式的玩家不需要世界快照,只接收背包/合成结果等
+    // INVENTORY / STATS / 事件数据(见下方 dirty 分支)。
+    if (!p.menuMode) {
     const world = this.worlds[p.mapId];
     const w = new Writer(64);
     w.u8(S2C.SNAPSHOT).u32(this.tickCount);
@@ -4388,6 +4616,7 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
     const packet = new Uint8Array(head.length + tail.length);
     packet.set(head, 0); packet.set(tail, head.length);
     c.send(packet);
+    }
     if (p.dirty) {
       p.dirty = false;
       const iw = new Writer(256);
@@ -4412,8 +4641,17 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
       c.send(sw.bytes());
     }
     if (this.tickCount % 20 === 0) {
-      const dw = new Writer(10);
-      dw.u8(S2C.DEBUG).u32(this.collisionCounter.n).u16(Math.min(65535, this.entityCount())).u16(Math.min(65535, this.playerCount()));
+      // DEBUG payload: collision checks (u32), total entities (u16),
+      // total players (u16), owning player's current move speed (f32, px/s).
+      // Speed is the only per-player field — everything else is global —
+      // so we put it at the tail to keep the legacy prefix stable for
+      // older clients that ignore trailing bytes.
+      const dw = new Writer(14);
+      dw.u8(S2C.DEBUG)
+        .u32(this.collisionCounter.n)
+        .u16(Math.min(65535, this.entityCount()))
+        .u16(Math.min(65535, this.playerCount()))
+        .f32(p.currentSpeed);
       c.send(dw.bytes());
     }
     for (const e of c.events) c.send(e);

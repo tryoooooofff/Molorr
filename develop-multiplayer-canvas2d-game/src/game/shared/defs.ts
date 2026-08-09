@@ -121,7 +121,7 @@ export const MOB_SIZE_MULTIPLIERS: readonly number[] = [
   2.6, // Legendary
   3.5, // Mythic
   5,   // Ultra
-  6,   // Super
+  6.5,   // Super
   8,   // Omega
   10,  // Eternal
   10,  // Unique (uses the Eternal cap)
@@ -335,7 +335,7 @@ export const ITEMS: ItemDef[] = [
   { id: 29, name: "Crab Egg", kind: "summon", color: "#f5a06b", outline: "#b2541f", shape: "egg", radius: 10, damage: 6, health: 26, reload: 8.0, petMob: 8, dropFactor: 0.55, desc: "Hatches a crab." },
   // ── Ladybug drops ───────────────────────────────────────────────────────
   { id: 30, name: "Rose", kind: "petal", color: "#d6354a", outline: "#8a1f2c", shape: "circle", radius: 12, damage: 1, health: 5, reload: 3.5, heal: 7.5, dropFactor: 0.7, desc: "Absorbs into an injured flower, heals once, then reloads." },
-  { id: 31, name: "Light", kind: "petal", color: "#fff3a8", outline: "#c79a1e", shape: "circle", radius: 8, damage: 6, health: 10, reload: 1.0, dropFactor: 0.85, desc: "A warm mote of light." },
+  { id: 31, name: "Light", kind: "petal", color: "#ffffff", outline: "#bbbbbb", shape: "circle", radius: 8, damage: 6, health: 10, reload: 1.0, dropFactor: 0.85, desc: "A warm mote of light." },
   // ── Sandstorm drops (desert) ─────────────────────────────────────────────
   // Stick (id 9) and Sand (id 4) are reused from the existing item list.
   { id: 32, name: "Glass", kind: "petal", color: "#c8e6f5", outline: "#6f9bb0", shape: "square", radius: 8, damage: 12, health: 8, reload: 2.5, dropFactor: 0.55, desc: "A sharp shard of glass." },
@@ -344,7 +344,7 @@ export const ITEMS: ItemDef[] = [
   { id: 34, name: "Beetle Egg", kind: "summon", color: "#e3c490", outline: "#9c7532", shape: "egg", radius: 11, damage: 6, health: 28, reload: 5.0, petMob: 6, dropFactor: 0.55, desc: "Hatches a beetle." },
   // ── Shared (Beetle / Scorpion) and Scorpion drops ──────────────────────
   { id: 35, name: "Pincer", kind: "petal", color: "#8a4a18", outline: "#3e1e08", shape: "triangle", radius: 8, damage: 20, health: 11, reload: 3.0, poisonDamage: 8,poisonDuration: 3000,poisonInitialMult: 1.3,poisonStableMult: 0.5,poisonCanStack: false,dropFactor: 0.6, desc: "A wicked little pincer. Inflicts poison on your enemies." },
-  { id: 36, name: "Iris", kind: "petal", color: "#5b3aa0", outline: "#2c1a5e", shape: "circle", radius: 10, damage: 10, health: 12, reload: 2.5,poisonDamage: 10,poisonDuration: 2000,poisonInitialMult: 1.1,poisonStableMult: 0.8,poisonCanStack: false,dropFactor: 0.6, desc: "A deep-purple iris. Its petals carry a potent venom." },
+  { id: 36, name: "Iris", kind: "petal", color: "#CE93DC", outline: "#C675DA", shape: "circle", radius: 10, damage: 10, health: 12, reload: 2.5,poisonDamage: 10,poisonDuration: 2000,poisonInitialMult: 1.1,poisonStableMult: 0.8,poisonCanStack: false,dropFactor: 0.6, desc: "A deep-purple iris. Its petals carry a potent venom." },
   { id: 37, name: "Scorpion Egg", kind: "summon", color: "#d9924a", outline: "#8c4718", shape: "egg", radius: 10, damage: 7, health: 26, reload: 4.5, petMob: 5, dropFactor: 0.55, desc: "Hatches a scorpion." },
   // ── Shell drops (ocean) ──────────────────────────────────────────────────
   { id: 38, name: "Shell", kind: "petal", color: "#f2d96e", outline: "#c8a030", shape: "circle", radius: 16, damage: 6, health: 20, reload: 3.5, shield: 12, dropFactor: 0.7, desc: "Absorbs into its flower, plates it with shield, then reloads." },
@@ -404,7 +404,7 @@ export interface MobDef {
   name: string;
   color: string;
   outline: string;
-  shape: "bug" | "rock" | "cactus" | "jelly" | "crab" | "star" | "ant" | "wasp" | "hornet" | "spider" | "leech";
+  shape: "bug" | "rock" | "cactus" | "jelly" | "crab" | "star" | "ant" | "wasp" | "hornet" | "spider";
   radius: number;
   health: number;
   damage: number;
@@ -452,7 +452,7 @@ export const MOBS: MobDef[] = [
   { id: 15, name: "Hive", color: "#d4a017", outline: "#9a7010", shape: "cactus", radius: 28, health: 600, damage: 60, speed: 0, xp: 28,
     drops: [{ item: 2, chance: 0.55 }, { item: 18, chance: 0.55 }, { item: 19, chance: 0.55 }, { item: 20, chance: 0.05 }],
     spawner: spawner([0.85, 0.60, 0.35, 0.10], 1, 1) },
-  { id: 16, name: "Hornet", color: "#353535", outline: "#000000", shape: "leech", radius: 16, health: 80, damage: 22, speed: 50, xp: 18,
+  { id: 16, name: "Hornet", color: "#353535", outline: "#000000", shape: "hornet", radius: 16, health: 80, damage: 22, speed: 50, xp: 18,
   drops: [{ item: 43, chance: 0.7 }, { item: 46, chance: 0.7 }, { item: 49, chance: 0.7 }, { item: 52, chance: 0.5 }] },
     { id: 17, name: "Spider", color: "#353535", outline: "#000000", shape: "spider", radius: 18, health: 80, damage: 22, speed: 50, xp: 18,
   drops: [{ item:51, chance: 0.7 }, { item: 45, chance: 0.7 }, { item: 50, chance: 0.7 },{ item: 48, chance: 0.01 }] },
@@ -1377,7 +1377,7 @@ export const SUMMON_CFG: Record<number, SummonCfg> = {
   40: { maxCount: 2 },
   42: { maxCount: 1, spawnProtection: 1.5 },
   // ── Nest eggs ──────────────────────────────────────────────────────────
-  47: { maxCount: 6, spawnCount: 6 },
+  47: { maxCount: 8, spawnCount: 8 },
   49: { maxCount: 2, spawnCount: 2 },
   51: { maxCount: 3, spawnCount: 3 },
 };
