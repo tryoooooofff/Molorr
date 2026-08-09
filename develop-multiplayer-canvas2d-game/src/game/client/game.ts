@@ -10412,7 +10412,7 @@ private bagLayout() {
     // older server build, or pre-connection).
     const speed = this.debugPlayerSpeed > 0
       ? `${Math.round(this.debugPlayerSpeed)}px/s`
-      : (this.me ? `${Math.round(this.computeLocalPlayerSpeed())}px/s` : "--");
+      : `${Math.round(this.computeLocalPlayerSpeed())}px/s`;
     const line1 = `${fps}fps ${ping} ↓${inKB}/s ↑${outKB}/s`;
     const line2 = `obj:${objs} player:${players} collision:${checks} speed:${speed}`;
     const fontSize = 10;
