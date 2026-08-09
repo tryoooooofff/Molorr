@@ -117,6 +117,10 @@ interface Ent {
   segmentColliders?: { physicsBody: { position: { x: number; y: number }; radius: number } }[];
   /** Position history for segmented mobs (Leech). Stores recent world-space positions. */
   positionHistory?: { x: number; y: number }[];
+  /** Squad member's level, received via S2C.SQUAD_MEMBER_STATE. */
+  squadLevel?: number;
+  /** Squad member's highest petal rarity, received via S2C.SQUAD_MEMBER_STATE. */
+  squadRarity?: number;
 }
 
 interface Floater {
@@ -6308,6 +6312,8 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private keys = new Set<string>();
   private saveTimer = 0;
   private saveDirty = false;
+  /** Periodic squad level/rarity sync timer (seconds). */
+  private syncLevelTimer = 0;
 
   // --- Mobile detection & touch controls ---
   private isMobile = false;
@@ -6855,6 +6861,28 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.net.send(w.bytes());
   }
 
+  /**
+   * Send the player's current level and highest petal rarity to the server,
+   * which relays it to squad members. Called periodically (every 10 s).
+   * Scans all hotbar slots (main + secondary) and bag for the highest rarity.
+   */
+  private sendSyncLevel() {
+    if (!this.net || !this.connected || !this.squadCode) return;
+    let highestRarity = 0;
+    for (const cell of this.slots) {
+      if (cell && cell.rarity > highestRarity) highestRarity = cell.rarity;
+    }
+    for (const cell of this.secondary) {
+      if (cell && cell.rarity > highestRarity) highestRarity = cell.rarity;
+    }
+    for (const cell of this.bag) {
+      if (cell && cell.rarity > highestRarity) highestRarity = cell.rarity;
+    }
+    const w = new Writer(5);
+    w.u8(C2S.SYNC_LEVEL).u16(this.level).u8(highestRarity);
+    this.net.send(w.bytes());
+  }
+
   /** Rolls the byte counters into a per-second rate once a second has elapsed. */
   private updateDebugThroughput(dt: number) {
     this.debugThroughputTimer += dt;
@@ -7094,6 +7122,17 @@ private handlePacket(data: Uint8Array) {
         this.chat.addMessage(`Joined squad: ${this.squadCode}`, "System", true);
       } else {
         this.chat.addMessage("Left squad.", "System", true);
+      }
+      break;
+    }
+    case S2C.SQUAD_MEMBER_STATE: {
+      const playerId = r.u16();
+      const squadLevel = r.u16();
+      const squadRarity = r.u8();
+      const ent = this.ents.get(playerId);
+      if (ent) {
+        ent.squadLevel = squadLevel;
+        ent.squadRarity = squadRarity;
       }
       break;
     }
@@ -7431,6 +7470,12 @@ private handlePacket(data: Uint8Array) {
           this.saveDirty = false;
           this.persist();
         }
+      }
+      // Periodic squad level/rarity sync (every 10 s, 30 s if performance is a concern)
+      this.syncLevelTimer -= dt;
+      if (this.syncLevelTimer <= 0) {
+        this.syncLevelTimer = 10;
+        this.sendSyncLevel();
       }
       // Debug overlay: only ping the server while the panel is actually
       // shown, so leaving it off costs nothing on the wire.
@@ -12325,9 +12370,27 @@ if (me) {
         ctx.strokeText(mate.name || "?", sAvatarX + _sq(squadAvatarSize) + _sq(8), sAvatarY + _sq(18));
         ctx.fillText(mate.name || "?", sAvatarX + _sq(squadAvatarSize) + _sq(8), sAvatarY + _sq(18));
 
+        // 队友等级和稀有度（在名字下方）
+        const mateLevel = mate.squadLevel ?? 0;
+        const mateRarity = mate.squadRarity ?? 0;
+        const rarityInfo = RARITIES[mateRarity];
+        ctx.font = `bold ${_sq(11)}px ${FONT_FAMILY || "Arial"}`;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        const lvlY2 = sAvatarY + _sq(18);
+        ctx.fillStyle = "#ffffff";
+        ctx.strokeText(`Level ${mateLevel}`, sAvatarX + _sq(squadAvatarSize) + _sq(8), lvlY2);
+        ctx.fillText(`Level ${mateLevel}`, sAvatarX + _sq(squadAvatarSize) + _sq(8), lvlY2);
+        if (rarityInfo) {
+          const rarityX = sAvatarX + _sq(squadAvatarSize) + _sq(8) + ctx.measureText(`Level ${mateLevel}  `).width;
+          ctx.fillStyle = rarityInfo.color;
+          ctx.strokeText(rarityInfo.name, rarityX, lvlY2);
+          ctx.fillText(rarityInfo.name, rarityX, lvlY2);
+        }
+
         // 队友血条背景
         const sBarX = sAvatarX + _sq(squadAvatarSize) + _sq(8);
-        const sBarY = sAvatarY + _sq(22);
+        const sBarY = sAvatarY + _sq(34);
         roundRect(ctx, sBarX, sBarY, squadBarW, squadBarH, _sq(7));
         ctx.fillStyle = "#333333";
         ctx.fill();
@@ -12349,7 +12412,7 @@ if (me) {
         ctx.strokeText(`${Math.round(mateHpPct * 100)}%`, sBarX + squadBarW / 2, sBarY + squadBarH / 2);
         ctx.fillText(`${Math.round(mateHpPct * 100)}%`, sBarX + squadBarW / 2, sBarY + squadBarH / 2);
 
-        squadY += _sq(squadAvatarSize) + gapY;
+        squadY += _sq(squadAvatarSize) + _sq(16) + gapY;
       }
     }
     // ---- 最近的 Ultra+ 生物血条（屏幕顶部中央） ----

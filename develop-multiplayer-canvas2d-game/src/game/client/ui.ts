@@ -2920,7 +2920,6 @@ export interface PlayerSkinState {
   contractAnim?: number;
   angle?: number;
 }
-
 export function drawDefaultSkin(
   ctx: CanvasRenderingContext2D,
   x: number,
@@ -2980,58 +2979,75 @@ export function drawDefaultSkin(
   ctx.save();
   ctx.translate(x, y);
 
-  // 2. Eyes — plain black eye socket with a white pupil that shifts toward
-  // the cursor, clipped inside the eye's ellipse.
+  // --- Relative Size Constants ---
+  // Use the 's' scaling factor defined above to maintain consistency
+  const eyeX = radius/3.5;           // Horizontal eye offset
+  const eyeY = radius/5;           // Vertical eye offset
+  const eyeRadiusX = radius/13;   // Eye width radius
+  const eyeRadiusY = radius/4;     // Eye height radius
+  const pupilRadius = radius/8;  // Pupil radius
+  const pupilOffset = radius/10;    // How much the pupil moves towards mouse
+
+  const mouthWidth = radius/5;   // Half-width of mouth
+  const mouthY = radius/2.5;         // Base Y position of mouth
+  const mouthSmile = radius/8;   // Curve depth for smile
+  const mouthFrown = radius/8;   // Curve depth for frown
+
+  // 2. Eyes
   const eyePositions = [
-    { x: -7, y: -5 },
-    { x: 7, y: -5 },
+    { x: -eyeX, y: -eyeY },
+    { x: eyeX, y: -eyeY },
   ];
 
-  const pOffX = Math.cos(angleToMouse) * 2;
-  const pOffY = Math.sin(angleToMouse) * 2;
+  const pOffX = Math.cos(angleToMouse) * pupilOffset;
+  const pOffY = Math.sin(angleToMouse) * pupilOffset;
 
   eyePositions.forEach((eye) => {
     ctx.save();
 
     // 绘制黑色眼眶
     ctx.beginPath();
-    ctx.ellipse(eye.x, eye.y, 2.2, 6, 0, 0, Math.PI * 2);
+    ctx.ellipse(eye.x, eye.y, eyeRadiusX, eyeRadiusY, 0, 0, Math.PI * 2);
     ctx.fillStyle = "#000000";
     ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = "#000";
+    ctx.stroke();
 
     // 设置裁剪区域
     ctx.beginPath();
-    ctx.ellipse(eye.x, eye.y, 2.2, 6, 0, 0, Math.PI * 2);
+    ctx.ellipse(eye.x, eye.y, eyeRadiusX, eyeRadiusY, 0, 0, Math.PI * 2);
     ctx.clip();
 
     // 瞳孔
     ctx.fillStyle = "#FFFFFF";
     ctx.beginPath();
-    ctx.arc(eye.x + pOffX, eye.y + pOffY, 2.5, 0, Math.PI * 2);
+    ctx.arc(eye.x + pOffX, eye.y + pOffY, pupilRadius, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.restore();
   });
 
-  // 恢复画布到之前的状态
-  ctx.restore();
+  ctx.restore(); // Restore to draw mouth in world coordinates (or keep relative if preferred, below uses relative)
 
   // 3. 嘴巴（平滑地自上而下过渡，不绕圈旋转）
+  // Note: Using local coordinates logic relative to (x,y)
   ctx.save();
   ctx.strokeStyle = "#000000";
-  ctx.lineWidth = 2.5;
+  // Scale line width slightly with radius for better aesthetics on large/small blobs
+  ctx.lineWidth = 2.5 * s;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
   ctx.beginPath();
 
-  const baseMouthY = y + 8;
-  const cyOffset = 3.5 * (1 - wSpread) - 3.5 * wSpread;
+  const cyOffset = mouthSmile * (1 - wSpread) - mouthFrown * wSpread;
 
-  ctx.moveTo(x - 5.5, baseMouthY);
-  ctx.quadraticCurveTo(x, baseMouthY + cyOffset, x + 5.5, baseMouthY);
+  ctx.moveTo(x - mouthWidth, y + mouthY);
+  ctx.quadraticCurveTo(x, y + mouthY + cyOffset, x + mouthWidth, y + mouthY);
   ctx.stroke();
   ctx.restore();
 }
+
 
 export function drawFlower(
   ctx: CanvasRenderingContext2D,
