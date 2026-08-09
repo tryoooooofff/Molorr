@@ -74,6 +74,8 @@ interface SquadMember {
   playerId: number;
   name: string;
   level: number;
+  /** Highest rarity among all petals the player owns (0..MAX_RARITY). */
+  rarity: number;
 }
 
 interface Squad {
@@ -990,7 +992,7 @@ function clamp(v: number, a: number, b: number) {
 // ===== 区块生物生成上限 =====
 // 每个区块（按 getBlockAt 返回的字母 A-G）允许的最大同时活跃生物数量
 const ZONE_MOB_LIMITS: Record<string, number> = {
-  A: 3, B: 3, C: 2, D: 2, E: 1, F: 1, G: 1,
+  A: 10, B: 20, C: 25, D: 30, E: 16, F: 15, G: 10,
 };
 
 /** 区块字母集合（A-G），用于按区块补生。 */
@@ -1002,10 +1004,6 @@ const ZONE_REFILL_INTERVAL = 5;
 /** 判定生物"卡入墙内"的最小碰撞修正位移（px）。超过则触发 8 方向弹开。 */
 const PUSH_OUT_THRESHOLD = 6;
 
-/**
- * 生物墙壁碰撞的墙壁外扩量（px）：生物与墙碰撞时，把每面墙的 AABB
- * 向外扩张 10px（等效于墙变厚）。玩家与弹射物不膨胀（inflate = 0）。
- */
 const MOB_WALL_INFLATE = 10;
 
 /** 花瓣重新寻找攻击目标的间隔（帧数），降频以减少每帧距离计算。 */
@@ -1832,16 +1830,19 @@ export class GameServer {
     return Math.max(0, Math.round(MAPS[mapId].mobCap * this.mobCapScale));
   }
 
-
 private preSpawnMap(mapId: number) {
     const map = MAPS[mapId];
     if (!map) return;
 
+
+    // 计算目标数量
     const targetMobs = Math.floor(this.mobCapForMap(mapId));
+
     let spawned = 0;
     let attempts = 0;
 
-    while (spawned < targetMobs && attempts < targetMobs * 50) {
+    // ✅ 2. 增加 while 循环的尝试次数上限 (从 *50 增加到 *200)，防止因密度太高导致提前退出
+    while (spawned < targetMobs && attempts < targetMobs * 200) {
         attempts++;
 
         // 随机生成位置
@@ -1852,14 +1853,13 @@ private preSpawnMap(mapId: number) {
         // 跳过墙壁
         if (zone === "1" || zone < "A" || zone > "G") continue;
 
-        // 检查区块是否已满
         if (this.zoneFull(mapId, zone)) continue;
 
-        // ✅ 直接生成怪物，不做碰撞检测
+        // 直接生成怪物
         const type = pickWeightedMob(mapId, map.mobs);
         const rarity = rollZoneRarity(zone);
 
-        // 增加区块计数
+        // 增加区块计数 (保留计数逻辑以便后续可能的其他逻辑使用)
         const zoneCounts = this.zoneMobCounts[mapId];
         zoneCounts.set(zone, (zoneCounts.get(zone) || 0) + 1);
 
@@ -1876,6 +1876,8 @@ private preSpawnMap(mapId: number) {
 
     console.log(`[preSpawnMap] 生成 ${spawned}/${targetMobs} 只怪物 (尝试 ${attempts} 次)`);
 }
+
+
 
 private getZoneFromPosition(col: number, row: number, cols: number, rows: number): string {
     // 计算归一化距离中心的距离 (0-1)
@@ -2195,6 +2197,25 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
         this.handleChat(c, p, msg);
         break;
       }
+
+      case C2S.SYNC_LEVEL: {
+        const p = c.player;
+        if (!p || !p.squadCode) return;
+        const level = r.u16();
+        const rarity = r.u8();
+        // Update squad member data
+        const squad = this.squads.get(p.squadCode);
+        if (squad) {
+          const member = squad.members.get(p.id);
+          if (member) {
+            member.level = level;
+            member.rarity = rarity;
+          }
+        }
+        // Broadcast to all squad members (including the sender for consistency)
+        this.broadcastSquadMemberState(p.squadCode, p.id, level, rarity);
+        break;
+      }
     }
   }
 
@@ -2242,6 +2263,40 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
     c.send(w.bytes());
   }
 
+  /**
+   * Broadcast a single squad member's level + rarity to every member of that
+   * squad. Also used internally to push the initial state to a newly joined
+   * member (see sendSquadMemberStatesTo).
+   */
+  private broadcastSquadMemberState(squadCode: string, playerId: number, level: number, rarity: number) {
+    const squad = this.squads.get(squadCode);
+    if (!squad) return;
+    const w = new Writer(8);
+    w.u8(S2C.SQUAD_MEMBER_STATE);
+    w.u16(playerId).u16(level).u8(rarity);
+    const packet = w.bytes();
+    for (const member of squad.members.values()) {
+      const c = this.clients.get(member.clientId);
+      if (c) c.send(packet);
+    }
+  }
+
+  /**
+   * Send the current level + rarity of every squad member to a specific
+   * client. Called when a player joins a squad so they immediately see the
+   * existing members' stats.
+   */
+  private sendSquadMemberStatesTo(c: ClientState, squadCode: string) {
+    const squad = this.squads.get(squadCode);
+    if (!squad) return;
+    for (const member of squad.members.values()) {
+      const w = new Writer(8);
+      w.u8(S2C.SQUAD_MEMBER_STATE);
+      w.u16(member.playerId).u16(member.level).u8(member.rarity);
+      c.send(w.bytes());
+    }
+  }
+
   private removePlayerFromSquad(p: Player): string | null {
     if (!p.squadCode) return null;
     const squad = this.squads.get(p.squadCode);
@@ -2283,7 +2338,7 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
         if (p.squadCode) { this.sendChatToClient(c, "Already in a squad. Use /leave_squad first.", "System", true, false); return; }
         const key = this.generateSquadCode();
         const sq: Squad = { code: key, isPublic: command === "/create_public_squad", members: new Map(), createdAt: Date.now() };
-        sq.members.set(p.id, { clientId: this.getClientIdForPlayer(p), playerId: p.id, name: p.name, level: p.level });
+        sq.members.set(p.id, { clientId: this.getClientIdForPlayer(p), playerId: p.id, name: p.name, level: p.level, rarity: 0 });
         this.squads.set(key, sq);
         p.squadCode = key;
         this.sendChatToClient(c, `${command === "/create_public_squad" ? "Public" : "Private"} squad created! Code: ${key}`, "System", true, false);
@@ -2298,10 +2353,12 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
         if (!sq) { this.sendChatToClient(c, "Squad not found.", "System", true, false); return; }
         const err = this.canJoinSquad(p, sq);
         if (err) { this.sendChatToClient(c, err, "System", true, false); return; }
-        sq.members.set(p.id, { clientId: this.getClientIdForPlayer(p), playerId: p.id, name: p.name, level: p.level });
+        sq.members.set(p.id, { clientId: this.getClientIdForPlayer(p), playerId: p.id, name: p.name, level: p.level, rarity: 0 });
         p.squadCode = code;
         this.sendChatToClient(c, `Joined squad! Code: ${code} (${sq.members.size} members)`, "System", true, false);
         this.sendSquadUpdate(c, code);
+        // Send existing members' states to the new joiner
+        this.sendSquadMemberStatesTo(c, code);
         this.broadcastChatToSquad(code, `System: ${p.name} joined the squad.`, "System");
         break;
       }
@@ -2324,10 +2381,11 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
         }
         if (!candidates.length) { this.sendChatToClient(c, "No available public squads found.", "System", true, false); return; }
         const chosen = candidates[Math.floor(Math.random() * candidates.length)];
-        chosen.members.set(p.id, { clientId: this.getClientIdForPlayer(p), playerId: p.id, name: p.name, level: p.level });
+        chosen.members.set(p.id, { clientId: this.getClientIdForPlayer(p), playerId: p.id, name: p.name, level: p.level, rarity: 0 });
         p.squadCode = chosen.code;
         this.sendChatToClient(c, `Auto-joined public squad! Code: ${chosen.code} (${chosen.members.size} members)`, "System", true, false);
         this.sendSquadUpdate(c, chosen.code);
+        this.sendSquadMemberStatesTo(c, chosen.code);
         this.broadcastChatToSquad(chosen.code, `System: ${p.name} joined.`, "System");
         break;
       }
@@ -3362,7 +3420,7 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
         targetMob.targetId = p.id;
         targetMob.addDamage(p.id, dmg);
         st.hp -= totalIncoming;
-        st.hitCd = 0.1;
+        st.hitCd = 0.03;
         const kb = 90 / (targetMob.radius / 20);
         targetMob.vx += ((targetMob.x - st.x) / (targetDist || 1)) * kb;
         targetMob.vy += ((targetMob.y - st.y) / (targetDist || 1)) * kb;
@@ -4396,7 +4454,7 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
             const pd = Math.hypot(petal.x - p.x, petal.y - p.y);
             if (pd < petalRadius + p.radius) {
               petal.hp -= p.damage;
-              petal.hitCd = 0.1;
+              petal.hitCd = 0.01;
               p.hitCd = PROJECTILE_HIT_CD;
               if (petal.hp <= 0) {
                 petal.alive = false;

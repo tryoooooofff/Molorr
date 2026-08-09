@@ -36,6 +36,12 @@ export const C2S = {
    * player owns the allocation; the server just applies the multipliers.
    */
   TALENT: 14,
+  /**
+   * Player periodically syncs their level and highest petal rarity to the
+   * server, which relays it to squad members. Payload: u16 level, u8 rarity.
+   * Sent every ~10-30 s by the client.
+   */
+  SYNC_LEVEL: 15,
 } as const;
 
 /** SWAP_ROW payload meaning "swap the entire row", not a single slot. */
@@ -102,6 +108,12 @@ export const S2C = {
    * recomputing locally.
    */
   TALENT_BONUSES: 11,
+  /**
+   * Squad member state snapshot relayed by the server. Payload:
+   * u16 playerId, u16 level, u8 rarity. Sent on squad join (bulk) and
+   * periodically as members update their level/rarity.
+   */
+  SQUAD_MEMBER_STATE: 12,
 } as const;
 
 export const ENT = {
