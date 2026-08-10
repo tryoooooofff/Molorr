@@ -145,6 +145,10 @@ export class TalentSystem {
   private panelX = 10;
   private panelY = window.innerHeight / 5;
 
+  // ── 手机适配：响应式缩放因子 ──
+  /** 当前绘制缩放比例（1.0 = 原始大小，手机端自动 <1）。 */
+  private _scale = 1;
+
   // ── 面板区域大小 ──
   private readonly W = 500;
   private readonly H = 600;
@@ -236,6 +240,32 @@ export class TalentSystem {
       bodyDamage: "#ff6b6b",
     };
     return colors[key] || "#ffffff";
+  }
+
+  // ──────────────────────────────────────────────────
+  // 手机适配：动态计算缩放与居中
+  // ──────────────────────────────────────────────────
+  /** 根据当前视口宽度和高度计算缩放比例，并在需要时自动居中面板。 */
+  private _updateLayout(): void {
+    const padding = 16;
+    const availableWidth = window.innerWidth - padding * 2;
+    const availableHeight = window.innerHeight - padding * 2;
+    const desiredWidth = this.W;
+    const desiredHeight = this.H;
+
+    const scaleX = availableWidth / desiredWidth;
+    const scaleY = availableHeight / desiredHeight;
+
+    // 手机端判断：基于屏幕宽度和高度，任一维度不足即触发缩放适配
+    if (scaleX < 1 || scaleY < 1) {
+      this._scale = Math.min(scaleX, scaleY);
+      this.panelX = Math.floor((window.innerWidth - desiredWidth * this._scale) / 2);
+      this.panelY = Math.max(10, Math.floor((window.innerHeight - desiredHeight * this._scale) / 2));
+    } else {
+      this._scale = 1;
+      this.panelX = 10;
+      this.panelY = window.innerHeight / 5;
+    }
   }
 
   // ──────────────────────────────────────────────────
@@ -816,8 +846,8 @@ export class TalentSystem {
   draw(ctx: CanvasRenderingContext2D): void {
     if (!this.panelOpen) return;
 
-    // 每帧渲染前，根据可能改变的屏幕大小动态刷新左下角坐标
-    this.panelY = window.innerHeight / 5;
+    // 手机适配：每帧根据屏幕大小重新计算缩放与位置
+    this._updateLayout();
 
     const now = Date.now();
     const cx = this.W / 2;
@@ -841,7 +871,10 @@ export class TalentSystem {
     ctx.save();
     ctx.translate(this.panelX, this.panelY);
 
-    // 基于左下角的 500x600 硬裁剪死区
+    // 手机适配：应用缩放（所有内部坐标保持 500×600 不变）
+    ctx.scale(this._scale, this._scale);
+
+    // 基于虚拟 500x600 的硬裁剪死区
     ctx.beginPath();
     ctx.rect(0, 0, this.W, this.H);
     ctx.clip();
@@ -904,7 +937,7 @@ export class TalentSystem {
       this._drawTooltip(ctx, this._nodeRects[this.hoveredNode]);
     }
 
-    ctx.restore(); // 释放裁剪区和平移矩阵
+    ctx.restore(); // 释放 scale、裁剪区和平移矩阵
   }
 
   // ──────────────────────────────────────────────────
@@ -915,8 +948,9 @@ export class TalentSystem {
     // 点击面板外 → 返回 null（宿主关闭面板），面板内点击才被面板消费。
     if (!this.contains(pos[0], pos[1])) return null;
 
-    const mx = pos[0] - this.panelX;
-    const my = pos[1] - this.panelY;
+    // 手机适配：屏幕坐标 → 虚拟坐标（除以缩放比例）
+    const mx = (pos[0] - this.panelX) / this._scale;
+    const my = (pos[1] - this.panelY) / this._scale;
 
     // 1. 优先检测功能按钮
     for (const [key, rect] of Object.entries(this._btnRects)) {
@@ -960,8 +994,10 @@ export class TalentSystem {
     if (!this.panelOpen) return;
     this.mouseX = pos[0];
     this.mouseY = pos[1];
-    const mx = pos[0] - this.panelX;
-    const my = pos[1] - this.panelY;
+
+    // 手机适配：屏幕坐标 → 虚拟坐标
+    const mx = (pos[0] - this.panelX) / this._scale;
+    const my = (pos[1] - this.panelY) / this._scale;
 
     for (const [key, rect] of Object.entries(this._btnRects)) {
       const [bx, by, bw, bh] = rect;
@@ -1034,12 +1070,15 @@ export class TalentSystem {
 
   /** 面板区域（屏幕坐标 [x,y,w,h]），供点击判定。 */
   get panelRect(): Rect4 {
-    return [this.panelX, this.panelY, this.W, this.H];
+    // 手机适配：返回缩放后的实际屏幕占用
+    return [this.panelX, this.panelY, this.W * this._scale, this.H * this._scale];
   }
 
   /** 面板是否包含某屏幕坐标（供滚轮/点击路由判断）。 */
   contains(sx: number, sy: number): boolean {
-    return sx >= this.panelX && sx <= this.panelX + this.W && sy >= this.panelY && sy <= this.panelY + this.H;
+    // 手机适配：使用缩放后的实际边界
+    return sx >= this.panelX && sx <= this.panelX + this.W * this._scale &&
+           sy >= this.panelY && sy <= this.panelY + this.H * this._scale;
   }
 
   /** 天赋等级汇总（调试/存档展示用）。仅返回当前 trees 中实际存在的分支。 */
