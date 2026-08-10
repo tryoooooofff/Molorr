@@ -6087,14 +6087,6 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   /** Canvas-painted account panel (local-storage based). */
   private accountSystem = new AccountSystem();
   private squadCode = "";
-  /**
-   * 队伍成员持久缓存（HUD 显示用）。
-   * key = playerId，value = 最近一次 S2C.SQUAD_MEMBER_STATE 推送的等级/稀有度
-   *      + 最近一次 SNAPSHOT 推送的名字。
-   * 不依赖 this.ents 是否还在视野内 —— 只要 SQUAD_UPDATE 没清空 squadCode
-   * 就一直保留，满足"只要没退队就一直在左上角显示"的需求。
-   */
-  private squadMembers = new Map<number, { name: string; level: number; rarity: number; }>();
 
   private roseParticles: Array<{
     x: number;
@@ -7036,15 +7028,6 @@ private handlePacket(data: Uint8Array) {
         e.rarity = rarity;
         e.suction = suction;
         if (name) e.name = name;
-        // 队伍成员名字同步：SNAPSHOT 是名字的唯一来源。
-        // 一旦这个玩家进了视野就把缓存里的占位名替换成真名,
-        // 这样他离开视野后 HUD 仍然显示真名而不是 "Player#123"。
-        if (kind === ENT.PLAYER && name && this.squadMembers.has(id)) {
-          const cached = this.squadMembers.get(id)!;
-          if (cached.name !== name) {
-            this.squadMembers.set(id, { ...cached, name });
-          }
-        }
         e.seen = this.time;
         e.seenSnapshot = snapshotSequence;
         if (e.spawn < 1) e.spawn = Math.min(1, e.spawn + 0.12);
@@ -7135,8 +7118,6 @@ private handlePacket(data: Uint8Array) {
     }
     case S2C.SQUAD_UPDATE: {
       this.squadCode = r.str();
-      // 退队/换队/加入新队伍都清空旧成员缓存,避免显示已经不在队伍里的人。
-      this.squadMembers.clear();
       if (this.squadCode) {
         this.chat.addMessage(`Joined squad: ${this.squadCode}`, "System", true);
       } else {
@@ -7153,12 +7134,6 @@ private handlePacket(data: Uint8Array) {
         ent.squadLevel = squadLevel;
         ent.squadRarity = squadRarity;
       }
-      // 始终写入持久缓存：ent 不在视野也能更新等级/稀有度。
-      // 名字优先用本次 SNAPSHOT 里 ent 的名字;否则沿用缓存里的旧名字;
-      // 都没有就用兜底占位 —— 一旦 SNAPSHOT 再把这个人送进来,会自动覆盖。
-      const prev = this.squadMembers.get(playerId);
-      const name = ent?.name || prev?.name || `Player#${playerId}`;
-      this.squadMembers.set(playerId, { name, level: squadLevel, rarity: squadRarity });
       break;
     }
     case S2C.PONG: {
@@ -12353,52 +12328,91 @@ if (me) {
     ctx.fillStyle = "#aaaaaa";
 
 
-        // ============= 队伍成员列表（左上角,持久显示） =============
-    if (this.squadCode) {
-      const padX = 10, padY = 10;
-      const lineH = 22;
-      const fontSize = 13;
-      ctx.textAlign = "left";
-      ctx.textBaseline = "top";
-      ctx.font = `${fontSize}px${FONT_FAMILY}`;
+    // ---- 队友信息（小队成员，最多4人） ----
+    const squadMates = Array.from(this.ents.values()).filter(
+      e => e.kind === ENT.PLAYER && e.team === TEAM.FRIENDLY && e.id !== this.selfId
+    ).slice(0, 4);
 
-      // 标题:当前队伍码
-      const titleText = `Squad ${this.squadCode}`;
-      const titleW = ctx.measureText(titleText).width + 16;
-      ctx.fillStyle = "rgba(0,0,0,0.45)";
-      roundRect(ctx, padX, padY, titleW, lineH, 4);
-      ctx.fill();
-      ctx.strokeStyle = "rgba(255,255,255,0.15)";
-      ctx.lineWidth = 1;
-      ctx.stroke();
-      ctx.fillStyle = "#ffe65d";
-      ctx.fillText(titleText, padX + 8, padY + (lineH - fontSize) / 2);
+    if (squadMates.length > 0) {
+      const squadScale = hudScale * 0.8;
+      const _sq = (v: number) => v * squadScale;
+      const squadAvatarSize = 40;
+      const squadBarW = _sq(160);
+      const squadBarH = _sq(14);
+      const gapY = _sq(10);
 
-      // 成员列表
-      let row = 1;
-      for (const [pid, sm] of this.squadMembers) {
-        // 自己不显示在队友列表里
-        if (pid === this.selfId) continue;
+      let squadY = lvlY + lvlH + _sq(14);
 
-        const r = RARITIES[sm.rarity];
-        const rName = r?.name ?? "?";
-        const rColor = r?.color ?? "#ffffff";
-        const text = `${sm.name}  Lv.${sm.level}  ${rName}`;
-        const w = ctx.measureText(text).width + 16;
+      for (const mate of squadMates) {
+        const sAvatarX = _sq(40);
+        const sAvatarY = squadY;
+        const sAvatarCX = sAvatarX + _sq(squadAvatarSize) / 2;
+        const sAvatarCY = sAvatarY + _sq(squadAvatarSize) / 2;
 
-        const x = padX, y = padY + row * (lineH + 2);
+        // 队友头像（花朵）
+        ctx.save();
+        const mateEnt: Ent = {
+          ...mate,
+          x: sAvatarCX,
+          y: sAvatarCY,
+          radius: _sq(squadAvatarSize / 2 + 2),
+          spreadMode: false,
+          contractMode: false,
+        };
+        drawDefaultSkin(ctx, sAvatarCX, sAvatarCY, _sq(squadAvatarSize / 2 - 2), mateEnt);
+        ctx.restore();
 
-        ctx.fillStyle = "rgba(0,0,0,0.45)";
-        roundRect(ctx, x, y, w, lineH, 4);
-        ctx.fill();
-        ctx.strokeStyle = rColor;
-        ctx.lineWidth = 1.5;
-        ctx.stroke();
+        // 队友名字
+        ctx.fillStyle = "#4CAF50";
+        ctx.font = `bold ${_sq(14)}px ${FONT_FAMILY || "Arial"}`;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "alphabetic";
+        ctx.strokeText(mate.name || "?", sAvatarX + _sq(squadAvatarSize) + _sq(8), sAvatarY + _sq(18));
+        ctx.fillText(mate.name || "?", sAvatarX + _sq(squadAvatarSize) + _sq(8), sAvatarY + _sq(18));
 
+        // 队友等级和稀有度（在名字下方）
+        const mateLevel = mate.squadLevel ?? 0;
+        const mateRarity = mate.squadRarity ?? 0;
+        const rarityInfo = RARITIES[mateRarity];
+        ctx.font = `bold ${_sq(11)}px ${FONT_FAMILY || "Arial"}`;
+        ctx.textAlign = "left";
+        ctx.textBaseline = "top";
+        const lvlY2 = sAvatarY + _sq(22);
         ctx.fillStyle = "#ffffff";
-        ctx.fillText(text, x + 8, y + (lineH - fontSize) / 2);
+        ctx.strokeText(`Level ${mateLevel}`, sAvatarX + _sq(squadAvatarSize) + _sq(8), lvlY2);
+        ctx.fillText(`Level ${mateLevel}`, sAvatarX + _sq(squadAvatarSize) + _sq(8), lvlY2);
+        if (rarityInfo) {
+          const rarityX = sAvatarX + _sq(squadAvatarSize) + _sq(8) + ctx.measureText(`Level ${mateLevel}  `).width;
+          ctx.fillStyle = rarityInfo.color;
+          ctx.strokeText(rarityInfo.name, rarityX, lvlY2);
+          ctx.fillText(rarityInfo.name, rarityX, lvlY2);
+        }
 
-        row++;
+        // 队友血条背景
+        const sBarX = sAvatarX + _sq(squadAvatarSize) + _sq(8);
+        const sBarY = sAvatarY + _sq(34);
+        roundRect(ctx, sBarX, sBarY, squadBarW, squadBarH, _sq(7));
+        ctx.fillStyle = "#333333";
+        ctx.fill();
+
+        // 队友血条前景
+        const mateHpPct = Math.max(0, Math.min(1, mate.hp));
+        const mateHpW = (squadBarW - _sq(4)) * mateHpPct;
+        if (mateHpW > 0) {
+          roundRect(ctx, sBarX + _sq(2), sBarY + _sq(2), mateHpW, squadBarH - _sq(4), _sq(5));
+          ctx.fillStyle = "#8BC34A";
+          ctx.fill();
+        }
+
+        // 血条百分比文字
+        ctx.fillStyle = "#ffffff";
+        ctx.font = `bold ${_sq(10)}px ${FONT_FAMILY || "Arial"}`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.strokeText(`${Math.round(mateHpPct * 100)}%`, sBarX + squadBarW / 2, sBarY + squadBarH / 2);
+        ctx.fillText(`${Math.round(mateHpPct * 100)}%`, sBarX + squadBarW / 2, sBarY + squadBarH / 2);
+
+        squadY += _sq(squadAvatarSize) + _sq(16) + gapY;
       }
     }
     // ---- 最近的 Ultra+ 生物血条（屏幕顶部中央） ----
