@@ -6347,6 +6347,21 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   stars = 10;
   /** 视野内最近的 Ultra+ 生物（rarity >= 6），用于顶部 HUD 血条显示。 */
   private nearestUltraPlus: Ent | null = null;
+  /** Drops collected during the current run, displayed on the death panel. */
+  private currentRunDrops: any[] = [];
+  /** Scroll offset for the death drop panel. */
+  private deathScrollOffset = 0;
+  /** Touch-based scroll state for death drop panel. */
+  private deathTouchScrolling = false;
+  private deathTouchStartY = 0;
+  private deathTouchStartOffset = 0;
+  private deathPanelRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private deathContentRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private deathRespawnRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private deathMenuRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private deathCenterRespawnRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private deathCenterMenuRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private deathMaxScroll = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -7199,6 +7214,13 @@ private handlePacket(data: Uint8Array) {
           vy: -22,
         });
         this.achievements.onItemObtained(RARITIES[rarity]?.name);
+        // Track drops for the death panel
+        if (!this.currentRunDrops) this.currentRunDrops = [];
+        this.currentRunDrops.push({
+          type: ITEMS[item]?.name ?? "?",
+          rarity: RARITIES[rarity]?.name ?? "Common",
+          count: value ?? 1,
+        });
         break;
       case EVT.HIT:
         this.floaters.push({ x, y, msg: `-${value}`, color: "#ff6f6f", life: 0.9, vy: -40 });
@@ -8568,6 +8590,11 @@ private bagLayout() {
       const maxScroll = this.craftMaxScroll();
       this.craftScrollY = Math.max(0, Math.min(maxScroll, this.craftTouchStartOffset - deltaY));
     }
+    // Death drop panel touch scroll
+    if (this.deathTouchScrolling) {
+      const deltaY = p.y - this.deathTouchStartY;
+      this.deathScrollOffset = Math.max(0, Math.min(this.deathMaxScroll, this.deathTouchStartOffset - deltaY));
+    }
     if (this.scene === "menu" && this.mobGallery.visible) this.mobGallery.handleMouseMove(p.x, p.y);
     if (this.settings.panelOpen) this.settings.handleMouseMove(p.x, p.y);
     // 天赋面板：鼠标 hover 节点提示 + 触摸拖动旋转。
@@ -8808,6 +8835,7 @@ private bagLayout() {
     if (this.settings.panelOpen) this.settings.handleMouseUp();
     this.bagTouchScrolling = false;
     this.craftTouchScrolling = false;
+    this.deathTouchScrolling = false;
     if (this.drag) this.dropDrag(this.mx, this.my);
   };
 
@@ -8897,6 +8925,17 @@ private bagLayout() {
         e.preventDefault();
         this.craftScrollY += scrollAmount(layout.gridH);
         this.clampCraftScroll();
+        return;
+      }
+    }
+
+    // Death drop panel scroll
+    if (this.scene === "game" && !this.alive) {
+      if (hit(this.deathPanelRect, this.mx, this.my)) {
+        e.preventDefault();
+        const contentH = this.deathContentRect.h || 1;
+        this.deathScrollOffset += scrollAmount(contentH);
+        this.deathScrollOffset = Math.max(0, Math.min(this.deathMaxScroll, this.deathScrollOffset));
         return;
       }
     }
@@ -9642,6 +9681,7 @@ private bagLayout() {
   }
 
   private gotoMenu() {
+    this.currentRunDrops = [];
     this.persist();
     this.pendingScene = () => {
       this.scene = "menu";
@@ -9688,14 +9728,27 @@ private bagLayout() {
       return;
     }
     if (!this.alive) {
-      const bw = 180;
-      const cx = this.w / 2;      if (hit({ x: cx - bw - 10, y: this.h / 2 + 40, w: bw, h: 52 }, mx, my)) {
+      // Use pre-computed rects from renderDeath (center buttons)
+      if (hit(this.deathCenterRespawnRect, mx, my)) {
         const w = new Writer(2);
         w.u8(C2S.RESPAWN);
         this.net?.send(w.bytes());
         this.alive = true;
+        // Clear run drops for the next run
+        this.currentRunDrops = [];
+        return;
       }
-      if (hit({ x: cx + 10, y: this.h / 2 + 40, w: bw, h: 52 }, mx, my)) this.gotoMenu();
+      if (hit(this.deathCenterMenuRect, mx, my)) {
+        this.gotoMenu();
+        return;
+      }
+      // Start touch scroll if pressing inside content area
+      if (hit(this.deathContentRect, mx, my)) {
+        this.deathTouchScrolling = true;
+        this.deathTouchStartY = my;
+        this.deathTouchStartOffset = this.deathScrollOffset;
+        return;
+      }
       return;
     }
 
@@ -13292,13 +13345,147 @@ if (me) {
     ctx.fillStyle = "rgba(8,10,14,0.66)";
     ctx.fillRect(0, 0, this.w, this.h);
     text(ctx, "You were shredded!", this.w / 2, this.h / 2 - 70, 42, "#ff8080");
-    text(ctx, `click Respawn to continue`, this.w / 2, this.h / 2 - 20, 17, "#ffffff");
+    text(ctx, "click Respawn to continue", this.w / 2, this.h / 2 - 20, 17, "#ffffff");
     const bw = 180;
     const cx = this.w / 2;
-    const r1 = { x: cx - bw - 10, y: this.h / 2 + 40, w: bw, h: 52 };
-    const r2 = { x: cx + 10, y: this.h / 2 + 40, w: bw, h: 52 };
-    button(ctx, r1, "Respawn", "#3fae60", hit(r1, this.mx, this.my), 20);
-    button(ctx, r2, "Main menu", "#41505f", hit(r2, this.mx, this.my), 20);
+    this.deathCenterRespawnRect = { x: cx - bw - 10, y: this.h / 2 + 40, w: bw, h: 52 };
+    this.deathCenterMenuRect = { x: cx + 10, y: this.h / 2 + 40, w: bw, h: 52 };
+    button(ctx, this.deathCenterRespawnRect, "Respawn", "#3fae60", hit(this.deathCenterRespawnRect, this.mx, this.my), 20);
+    button(ctx, this.deathCenterMenuRect, "Main menu", "#41505f", hit(this.deathCenterMenuRect, this.mx, this.my), 20);
+    this.drawDeathDropPanel(ctx);
     ctx.restore();
+  }
+
+  private drawDeathDropPanel(ctx: CanvasRenderingContext2D) {
+    const W = this.w;
+    const H = this.h;
+    const isMobile = this.isMobile || W < 640;
+    const margin = isMobile ? 8 : 16;
+    const panelW = Math.min(isMobile ? 280 : 380, W - margin * 2);
+    const panelH = Math.min(isMobile ? 340 : 460, H - margin * 2);
+    // Top-right corner
+    const px = W - panelW - margin;
+    const py = margin;
+    this.deathPanelRect = { x: px, y: py, w: panelW, h: panelH };
+
+    // Background
+    ctx.fillStyle = "rgba(10, 10, 18, 0.96)";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(px, py, panelW, panelH, 10);
+    else ctx.rect(px, py, panelW, panelH);
+    ctx.fill();
+
+    ctx.strokeStyle = "rgba(255, 60, 60, 0.5)";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(px, py, panelW, panelH, 10);
+    else ctx.rect(px, py, panelW, panelH);
+    ctx.stroke();
+
+    // Content area (scrollable) — fills the entire panel
+    const pad = isMobile ? 10 : 14;
+    const contentTop = py + pad;
+    const contentH = panelH - pad * 2;
+    const contentW = panelW - pad * 2;
+    this.deathContentRect = { x: px + pad, y: contentTop, w: contentW, h: contentH };
+
+    // Build cells from currentRunDrops — MERGE same item+rarity
+    const drops = this.currentRunDrops || [];
+    const merged = new Map<string, { item: number; rarity: number; count: number }>();
+    for (const drop of drops) {
+      const itemId = ITEMS.findIndex((d) => d && d.name === drop.type);
+      const rarityIdx = RARITIES.findIndex((r) => r && r.name === drop.rarity);
+      if (itemId >= 0 && rarityIdx >= 0) {
+        const def = ITEMS[itemId];
+        const rar = RARITIES[rarityIdx];
+        // Guard: drawCard/ui.ts shade() requires valid color strings
+        if (!def || !rar) continue;
+        if (typeof rar.color !== "string") continue;
+        const key = `${itemId}_${rarityIdx}`;
+        const existing = merged.get(key);
+        if (existing) {
+          existing.count += drop.count || 1;
+        } else {
+          merged.set(key, { item: itemId, rarity: rarityIdx, count: drop.count || 1 });
+        }
+      }
+    }
+
+    // 转为数组并按稀有度排序 (b.rarity - a.rarity 表示降序，最稀有的在最前面)
+    // 如果你的稀有度定义是索引越小越稀有，请改成 a.rarity - b.rarity
+    const cells = Array.from(merged.values()).sort((a, b) => {
+      if (a.rarity !== b.rarity) {
+        return b.rarity - a.rarity;
+      }
+      // 相同稀有度下，按物品ID排序，保持同种物品在一起
+      return a.item - b.item;
+    });
+
+    const cols = Math.max(5, Math.floor(contentW / (isMobile ? 48 : 62)));
+    const gap = 6;
+    const slotSize = Math.floor((contentW - gap * (cols - 1)) / cols);
+    const rowH = slotSize + gap + (isMobile ? 10 : 12);
+    const totalRows = Math.ceil(cells.length / cols);
+    const totalContentH = totalRows * rowH;
+    this.deathMaxScroll = Math.max(0, totalContentH - contentH);
+    this.deathScrollOffset = Math.max(0, Math.min(this.deathMaxScroll, this.deathScrollOffset));
+
+    // Draw cards (clipped)
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(px + pad, contentTop, contentW, contentH);
+    ctx.clip();
+
+    const startRow = Math.floor(this.deathScrollOffset / rowH);
+    const startIdx = startRow * cols;
+
+    for (let i = startIdx; i < cells.length; i++) {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const cx = px + pad + col * (slotSize + gap);
+      const cy = contentTop + row * rowH - this.deathScrollOffset;
+
+      if (cy + rowH < contentTop || cy > contentTop + contentH) continue;
+
+      const cell = cells[i];
+      drawCard(ctx, { x: cx, y: cy, w: slotSize, h: slotSize }, cell, { hovered: false });
+
+      // Rarity label below card
+      const rar = RARITIES[cell.rarity];
+      if (rar) {
+        ctx.save();
+        ctx.font = `900 ${isMobile ? 8 : 9}px ${FONT_FAMILY}`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.lineJoin = "round";
+        ctx.strokeStyle = "#000";
+        ctx.lineWidth = 3;
+        ctx.strokeText(rar.name, cx + slotSize / 2, cy + slotSize + 2);
+        ctx.fillStyle = rar.color;
+        ctx.fillText(rar.name, cx + slotSize / 2, cy + slotSize + 2);
+        ctx.restore();
+      }
+    }
+
+    ctx.restore();
+
+    // Scrollbar
+    if (this.deathMaxScroll > 0) {
+      const barX = px + panelW - 12;
+      const barY = contentTop;
+      const barH = contentH;
+      const thumbH = Math.max(16, barH * (contentH / totalContentH));
+      const thumbY = barY + (this.deathScrollOffset / this.deathMaxScroll) * (barH - thumbH);
+      ctx.fillStyle = "rgba(255,255,255,0.12)";
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(barX, barY, 5, barH, 2);
+      else ctx.rect(barX, barY, 5, barH);
+      ctx.fill();
+      ctx.fillStyle = "rgba(255,255,255,0.45)";
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(barX, thumbY, 5, thumbH, 2);
+      else ctx.rect(barX, thumbY, 5, thumbH);
+      ctx.fill();
+    }
   }
 }
