@@ -98,6 +98,7 @@ const SQUAD_CODE_LENGTH = 6;
 export interface LoadoutConfig {
   name: string;
   slots: (Cell | null)[];
+  active?: boolean;
 }
 
 export interface Cell {
