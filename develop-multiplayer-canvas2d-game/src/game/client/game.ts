@@ -45,8 +45,8 @@ import {
   ANTENNAE_ITEM,
   THIRD_EYE_ITEM,
 } from "../shared/defs";
-import { C2S, ENT, EVT, Reader, S2C, SWAP_ROW_ALL, TEAM, Writer } from "../shared/protocol";
-import type { Cell } from "../shared/sim";
+import { C2S, ENT, EVT, LOADOUT_OP, Reader, S2C, SWAP_ROW_ALL, TEAM, Writer } from "../shared/protocol";
+import type { Cell, LoadoutConfig } from "../shared/sim";
 import { createTransport, Transport } from "./transport";
 import {
   button,
@@ -164,6 +164,7 @@ interface SaveData {
 
 const SAVE_KEY = "petalia.save";
 const AUTH_KEY = "petalia.auth";
+const LOADOUT_SAVE_KEY = "petalia.loadouts";
 
 // Biome names sourced straight from the map list. Each item is tagged with every
 // biome that has at least one mob capable of dropping it.
@@ -6363,6 +6364,26 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private deathCenterMenuRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
   private deathMaxScroll = 0;
 
+  // ================================================================
+  // Loadout system
+  // ================================================================
+  private loadouts: LoadoutConfig[] = [];
+  private loadoutPanelOpen = false;
+  private loadoutInput = "";
+  private loadoutScroll = 0;
+  private loadoutBtnRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private loadoutCloseRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private loadoutSaveBtnRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private loadoutInputRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private loadoutItemRects: { y: number; row: Rect; load: Rect; del: Rect }[] = [];
+  private loadoutScrollUpRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private loadoutScrollDownRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  private readonly LOADOUT_BTN_SIZE = 48;
+  private readonly LOADOUT_PANEL_W = 500;
+  private readonly LOADOUT_PANEL_H = 800;
+  private readonly LOADOUT_BUTTON_COLOR: number[] = [70, 74, 96];
+  private readonly LOADOUT_BUTTON_HOVER_COLOR: number[] = [155, 89, 182];
+
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     const ctx = canvas.getContext("2d", { alpha: false });
@@ -6380,6 +6401,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.achievements = new AchievementSystem(this);
     this.challenges = new ChallengeSystem(this);
     this.loadLocal();
+    this.loadLoadoutsLocal();
   }
 
   /**
@@ -6950,7 +6972,66 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.net.send(w.bytes());
   }
 
-private handlePacket(data: Uint8Array) {
+  // ================================================================
+  // Loadout 网络请求
+  // ================================================================
+
+  /** 保存当前快捷栏配置 */
+  private sendSaveLoadout(name: string) {
+    // 先保存到本地（立即持久化，避免服务器返回数据覆盖）
+    const slots: (Cell | null)[] = [];
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      slots.push(this.slots[i] ? { ...this.slots[i]! } : null);
+    }
+    // 检查是否已存在同名 loadout，若存在则更新
+    const existingIdx = this.loadouts.findIndex(lo => lo.name === name);
+    if (existingIdx >= 0) {
+      this.loadouts[existingIdx] = { name, slots };
+    } else {
+      this.loadouts.push({ name, slots });
+    }
+    this.saveLoadoutsLocal();
+
+    if (!this.net || !this.connected) return;
+    const w = new Writer(128);
+    w.u8(C2S.LOADOUT).u8(LOADOUT_OP.SAVE);
+    w.str(name);
+    w.u8(SLOT_COUNT);
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      this.writeCell(w, this.slots[i]);
+    }
+    this.net.send(w.bytes());
+  }
+
+  /** 请求加载某个配置（本地优先，同时向服务器请求） */
+  private sendLoadLoadout(index: number) {
+    const lo = this.loadouts[index];
+    if (lo) {
+      // 立即从本地数据应用到快捷栏（即时反馈）
+      for (let i = 0; i < SLOT_COUNT && i < lo.slots.length; i++) {
+        this.slots[i] = lo.slots[i] ? { ...lo.slots[i]! } : null;
+      }
+    }
+    if (!this.net || !this.connected) return;
+    const w = new Writer(4);
+    w.u8(C2S.LOADOUT).u8(LOADOUT_OP.LOAD).u8(index);
+    this.net.send(w.bytes());
+  }
+
+  /** 请求删除某个配置 */
+  private sendDeleteLoadout(index: number) {
+    // 先删除本地数据（立即持久化）
+    if (index >= 0 && index < this.loadouts.length) {
+      this.loadouts.splice(index, 1);
+      this.saveLoadoutsLocal();
+    }
+    if (!this.net || !this.connected) return;
+    const w = new Writer(4);
+    w.u8(C2S.LOADOUT).u8(LOADOUT_OP.DELETE).u8(index);
+    this.net.send(w.bytes());
+  }
+
+  private handlePacket(data: Uint8Array) {
   this.debugBytesInWindow += data.byteLength;
   const r = new Reader(data);
   const type = r.u8();
@@ -7187,6 +7268,23 @@ private handlePacket(data: Uint8Array) {
       }
       break;
     }
+    case S2C.LOADOUT_DATA: {
+        // 从服务器数据填充 loadout 列表（服务器是权威来源）
+        const count = r.u8();
+        this.loadouts = [];
+        for (let i = 0; i < count; i++) {
+          const name = r.str();
+          const slotCount = r.u8();
+          const slots: (Cell | null)[] = [];
+          for (let j = 0; j < slotCount; j++) {
+            slots.push(this.readCell(r));
+          }
+          this.loadouts.push({ name, slots });
+        }
+        // 同时也保存到本地，作为离线备份
+        this.saveLoadoutsLocal();
+        break;
+      }
     default:
       break;
   }
@@ -8444,6 +8542,28 @@ private bagLayout() {
       this.typeIntoChat(e.key);
       return;
     }
+    // Loadout 面板输入
+    if (this.loadoutPanelOpen) {
+      if (e.key === "Backspace") {
+        this.loadoutInput = this.loadoutInput.slice(0, -1);
+        e.preventDefault();
+        return;
+      } else if (e.key === "Enter") {
+        const name = this.loadoutInput.trim() || `Loadout ${this.loadouts.length + 1}`;
+        this.sendSaveLoadout(name);
+        this.loadoutInput = "";
+        e.preventDefault();
+        return;
+      } else if (e.key.length === 1 && e.key.match(/[a-zA-Z0-9 ]/)) {
+        if (this.loadoutInput.length < 16) {
+          this.loadoutInput += e.key;
+        }
+        e.preventDefault();
+        return;
+      }
+      e.preventDefault();
+      return;
+    }
     this.keys.add(e.code);
     if (e.code === "Space" || e.code.startsWith("Shift")) e.preventDefault();
     if (e.code === "KeyE" || e.code === "KeyI") this.toggleBag();
@@ -9604,9 +9724,56 @@ private bagLayout() {
       this.achievements.panelOpen = false;
       this.shopSystem.close();
       this.challenges.panelOpen = false;
+      this.loadoutPanelOpen = false;
       // 进入游戏场景后首次打开时执行延迟的等级同步
       this.talent.syncWithLevel();
       this.talent.toggle();
+      return;
+    }
+
+    // Loadout 按钮（主菜单也支持）
+    if (hit(this.loadoutBtnRect, mx, my)) {
+      this.loadoutPanelOpen = !this.loadoutPanelOpen;
+      return;
+    }
+
+    // Loadout 面板（模态）
+    if (this.loadoutPanelOpen) {
+      if (hit(this.loadoutCloseRect, mx, my)) {
+        this.loadoutPanelOpen = false;
+        return;
+      }
+      if (hit(this.loadoutSaveBtnRect, mx, my)) {
+        const name = this.loadoutInput.trim() || `Loadout ${this.loadouts.length + 1}`;
+        this.sendSaveLoadout(name);
+        this.loadoutInput = "";
+        return;
+      }
+      if (hit(this.loadoutScrollUpRect, mx, my)) {
+        this.loadoutScroll--;
+        return;
+      }
+      if (hit(this.loadoutScrollDownRect, mx, my)) {
+        this.loadoutScroll++;
+        return;
+      }
+      for (let i = 0; i < this.loadoutItemRects.length; i++) {
+        const rect = this.loadoutItemRects[i];
+        if (!rect) continue;
+        if (hit(rect.load, mx, my)) {
+          this.sendLoadLoadout(i);
+          return;
+        }
+        if (hit(rect.del, mx, my)) {
+          this.sendDeleteLoadout(i);
+          return;
+        }
+        // 点击整行区域也可加载
+        if (hit(rect.row, mx, my)) {
+          this.sendLoadLoadout(i);
+          return;
+        }
+      }
       return;
     }
 
@@ -9673,6 +9840,7 @@ private bagLayout() {
       this.mobGallery.close();
       this.shopSystem.close();
       this.challenges.panelOpen = false;
+      this.loadoutPanelOpen = false;
       this.updateMobileLayout();
       // 进入游戏场景：执行天赋的延迟等级同步（load 时若在菜单则挂起）。
       this.talent.onGameStart();
@@ -9699,6 +9867,7 @@ private bagLayout() {
       this.craftBiomeOpen = false;
       this.shopSystem.close();
       this.challenges.panelOpen = false;
+      this.loadoutPanelOpen = false;
       this.updateMobileLayout();
       // 回到主页面后重新建立服务器连接(主页面同样进行 AFK 检测,
       // 以菜单模式 JOIN,不进入世界模拟)。
@@ -9790,6 +9959,52 @@ private bagLayout() {
       if (this.handleCraftClick(mx, my, shiftKey)) return;
       this.craftOpen = false;
       return;
+    }
+
+    // Loadout 按钮
+    if (hit(this.loadoutBtnRect, mx, my)) {
+      this.loadoutPanelOpen = !this.loadoutPanelOpen;
+      return;
+    }
+
+    // Loadout 面板（模态）
+    if (this.loadoutPanelOpen) {
+      if (hit(this.loadoutCloseRect, mx, my)) {
+        this.loadoutPanelOpen = false;
+        return;
+      }
+      if (hit(this.loadoutSaveBtnRect, mx, my)) {
+        const name = this.loadoutInput.trim() || `Loadout ${this.loadouts.length + 1}`;
+        this.sendSaveLoadout(name);
+        this.loadoutInput = "";
+        return;
+      }
+      if (hit(this.loadoutScrollUpRect, mx, my)) {
+        this.loadoutScroll--;
+        return;
+      }
+      if (hit(this.loadoutScrollDownRect, mx, my)) {
+        this.loadoutScroll++;
+        return;
+      }
+      for (let i = 0; i < this.loadoutItemRects.length; i++) {
+        const rect = this.loadoutItemRects[i];
+        if (!rect) continue;
+        if (hit(rect.load, mx, my)) {
+          this.sendLoadLoadout(i);
+          return;
+        }
+        if (hit(rect.del, mx, my)) {
+          this.sendDeleteLoadout(i);
+          return;
+        }
+        // 点击整行区域也可加载
+        if (hit(rect.row, mx, my)) {
+          this.sendLoadLoadout(i);
+          return;
+        }
+      }
+      return; // 面板内点击其他区域不穿透
     }
 
     for (const b of this.hudButtons()) {
@@ -10881,6 +11096,12 @@ private bagLayout() {
     // 天赋面板（最上层，主菜单 Talent 图标入口）。
     this.talent.draw(ctx);
 
+    // Loadout 按钮与面板（主菜单也支持）
+    this.drawLoadoutButton();
+    if (this.loadoutPanelOpen) {
+      this.drawLoadoutPanel();
+    }
+
     // ─── "Coming soon" toast（未实现按钮的点击反馈）───
     if (this.menuToast && this.time < this.menuToast.until) {
       ctx.save();
@@ -11233,8 +11454,350 @@ if (this.drag) {
     // Account panel overlays the game scene too, so the player can access
     // it without returning to the main menu.
     this.accountSystem.draw(ctx);
+
+    // Loadout 按钮与面板
+    this.drawLoadoutButton();
+    if (this.loadoutPanelOpen) {
+      this.drawLoadoutPanel();
+    }
   }
 
+
+  // ================================================================
+  // Loadout UI
+  // ================================================================
+
+  private drawLoadoutButton() {
+    const ctx = this.ctx;
+    const barWidth = SLOT_COUNT * 52;
+    const startX = (this.w - barWidth) / 2;
+    const x = startX + barWidth + 120;
+    const y = this.h - this.hotbarHeight() + 4;
+    const size = this.LOADOUT_BTN_SIZE;
+
+    // 先记录按钮矩形（供悬停判定与点击命中使用）
+    this.loadoutBtnRect = { x, y, w: size, h: size };
+
+    // ── 按钮底：参考 drawLoadout 的样式（悬停高亮 + 上半部加深 + 描边）──
+    const adjust = (rgb: number[], f: number) =>
+      rgb.map(c => Math.max(0, Math.min(255, Math.floor(c * f))));
+    const baseColor = hit(this.loadoutBtnRect, this.mx, this.my)
+      ? this.LOADOUT_BUTTON_HOVER_COLOR
+      : this.LOADOUT_BUTTON_COLOR;
+    const darkColor  = `rgb(${adjust(baseColor, 0.85).join(',')})`;
+    const lightColor = `rgb(${baseColor.join(',')})`;
+    const strokeColor = `rgb(${adjust(baseColor, 0.5).join(',')})`;
+
+    ctx.beginPath();
+    roundRect(ctx, x, y, size, size, 10);
+    ctx.fillStyle = lightColor;
+    ctx.fill();
+    ctx.save();
+    ctx.beginPath();
+    roundRect(ctx, x, y, size, size, 10);
+    ctx.clip();
+    ctx.fillStyle = darkColor;
+    ctx.fillRect(x, y, size, size / 2);
+    ctx.restore();
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // ── 图标：长方形 + 3 个圆（枪形 loadout 图标）──
+    const cx = x + size / 2;
+    const cy = y + size / 2;
+    ctx.fillStyle = 'white';
+    ctx.strokeStyle = 'rgba(0, 0, 0, 0.35)';
+    ctx.lineWidth = 1.5;
+
+    // 1) 长方形：枪身
+    ctx.beginPath();
+    roundRect(ctx, cx - 9, cy - 1, 20, 6, 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // 2) 圆 1：顶部弹仓
+    ctx.beginPath();
+    ctx.arc(cx - 4, cy - 6, 4.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // 3) 圆 2：前端枪口
+    ctx.beginPath();
+    ctx.arc(cx + 13, cy + 2, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+
+    // 4) 圆 3：下方握把
+    ctx.beginPath();
+    ctx.arc(cx - 7, cy + 10, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+
+  private drawLoadoutPanel() {
+    const ctx = this.ctx;
+    // 面板尺寸（小屏自动收窄，避免溢出）
+    const w = Math.min(this.LOADOUT_PANEL_W, this.w - 24);
+    const h = Math.min(this.LOADOUT_PANEL_H, this.h - 48);
+    const x = Math.max(12, (this.w - w) / 2);
+    const y = Math.max(24, (this.h - h) / 2);
+
+    // 1. 半透明背景蒙版
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+    ctx.fillRect(0, 0, this.w, this.h);
+
+    // 2. 面板主体（参考 drawLoadout：深色底 + 投影 + 紫色描边）
+    ctx.save();
+    ctx.shadowBlur = 30;
+    ctx.shadowColor = 'rgba(0,0,0,0.6)';
+    ctx.fillStyle = 'rgba(12, 12, 25, 0.98)';
+    ctx.beginPath();
+    roundRect(ctx, x, y, w, h, 15);
+    ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = 'rgba(155, 89, 182, 0.7)';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    // 3. 标题（Loadouts Gallery）
+    ctx.font = `${w < 380 ? 16 : 20}px ${FONT_FAMILY}`;
+    ctx.fillStyle = 'white';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Loadouts Gallery', x + 25, y + 32);
+
+    // 4. 右上角关闭按钮
+    const closeX = x + w - 18;
+    const closeY = y + 18;
+    ctx.fillStyle = 'rgba(231, 76, 60, 0.9)';
+    ctx.beginPath();
+    ctx.arc(closeX, closeY, 10, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = 'white';
+    ctx.font = `14px ${FONT_FAMILY}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('✕', closeX, closeY + 1);
+    this.loadoutCloseRect = { x: closeX - 12, y: closeY - 12, w: 24, h: 24 };
+
+    // 5. 保存按钮（Save Current，悬停高亮，参考 drawLoadout 的 _saveBtnRect 样式）
+    const saveX = x + w - 150;
+    const saveY = y + 16;
+    const saveW = 100;
+    const saveH = 32;
+    const isSaveHover = hit({ x: saveX, y: saveY, w: saveW, h: saveH }, this.mx, this.my);
+    const sCol = isSaveHover ? [142, 68, 173] : [100, 60, 150];
+    ctx.fillStyle = `rgb(${sCol.join(',')})`;
+    ctx.beginPath();
+    roundRect(ctx, saveX, saveY, saveW, saveH, 8);
+    ctx.fill();
+    ctx.strokeStyle = `rgb(${sCol.map(c => Math.max(0, Math.min(255, Math.floor(c * 0.6)))).join(',')})`;
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.font = `13px ${FONT_FAMILY}`;
+    ctx.fillStyle = 'white';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('Save Current', saveX + saveW / 2, saveY + saveH / 2);
+    this.loadoutSaveBtnRect = { x: saveX, y: saveY, w: saveW, h: saveH };
+
+    // 6. 保存命名输入框
+    this.drawLoadoutInput(x + 20, y + 56, w - 40, "Enter Name...", this.loadoutInput);
+
+    // 7. 分割线
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x + 15, y + 92);
+    ctx.lineTo(x + w - 15, y + 92);
+    ctx.stroke();
+
+    // 8. 已保存 Loadout 列表（大卡片 + 操作按钮 + 滚动）
+    const listTop = y + 105;
+    const maxVisible = 5;
+    const spacing = 14;
+    const total = this.loadouts.length;
+    const itemH = Math.max(72, Math.floor((h - (listTop - y) - 40 - (maxVisible - 1) * spacing) / maxVisible));
+
+    this.loadoutItemRects = [];
+    this.loadoutScrollUpRect = { x: 0, y: 0, w: 0, h: 0 };
+    this.loadoutScrollDownRect = { x: 0, y: 0, w: 0, h: 0 };
+
+    if (total === 0) {
+      ctx.font = `18px ${FONT_FAMILY}`;
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.3)';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('No Loadouts Saved', x + w / 2, y + h / 2);
+      return;
+    }
+
+    this.loadoutScroll = Math.max(0, Math.min(this.loadoutScroll, total - maxVisible));
+    const startIdx = this.loadoutScroll;
+    const withScroll = total > maxVisible;
+    const iw = w - 40 - (withScroll ? 30 : 0);
+    const cardSize = Math.max(32, Math.floor(iw * 0.1));
+    const cardGap = 5;
+
+    for (let vi = 0; vi < maxVisible && startIdx + vi < total; vi++) {
+      const realIdx = startIdx + vi;
+      const lo = this.loadouts[realIdx];
+      const iy = listTop + vi * (itemH + spacing);
+      const ix = x + 20;
+
+      // 记录整行可点击区域
+      const rowRect: Rect = { x: ix, y: iy, w: iw, h: itemH };
+
+      // 卡片背景（当前激活的 loadout 高亮，悬停时也高亮）
+      const rowHovered = hit(rowRect, this.mx, this.my);
+      ctx.fillStyle = lo.active ? 'rgba(155, 89, 182, 0.35)' : (rowHovered ? 'rgba(255, 255, 255, 0.12)' : 'rgba(255, 255, 255, 0.05)');
+      ctx.beginPath();
+      roundRect(ctx, ix, iy, iw, itemH, 12);
+      ctx.fill();
+      if (lo.active) {
+        ctx.strokeStyle = 'rgba(155, 89, 182, 0.9)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      } else if (rowHovered) {
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
+      // 名称
+      ctx.font = `17px ${FONT_FAMILY}`;
+      ctx.fillStyle = 'white';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(`${realIdx + 1}. ${lo.name || "Unnamed Loadout"}`, ix + 15, iy + 12);
+
+      // 物品卡片（用 drawCard 替代之前的 drawItemIcon）
+      const cardY = iy + itemH - cardSize - 8;
+      const maxCards = Math.min(8, lo.slots.length);
+      const totalCardsW = maxCards * (cardSize + cardGap) - cardGap;
+      const cardStartX = ix + 15;
+      // 如果卡片总宽度超出可用区域，缩小卡片尺寸
+      let finalCardSize = cardSize;
+      let finalCardGap = cardGap;
+      if (cardStartX + totalCardsW > ix + iw - 140) {
+        const available = (ix + iw - 140) - cardStartX;
+        finalCardSize = Math.max(22, Math.floor((available - (maxCards - 1) * 3) / maxCards));
+        finalCardGap = 3;
+      }
+      for (let si = 0; si < maxCards; si++) {
+        const cell = lo.slots[si];
+        const cx2 = cardStartX + si * (finalCardSize + finalCardGap);
+        if (cell) {
+          drawCard(ctx, { x: cx2, y: cardY, w: finalCardSize, h: finalCardSize }, { item: cell.item, rarity: cell.rarity, count: cell.count }, { hovered: false, dim: 1 });
+        } else {
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+          ctx.beginPath();
+          roundRect(ctx, cx2, cardY, finalCardSize, finalCardSize, 4);
+          ctx.fill();
+        }
+      }
+
+      // 操作按钮（Load / Delete；Update 协议未提供，故不绘制）——置于右上角，
+      // 迷你图标整行排在按钮下方，避免两者重叠。
+      const btnW = 55, btnH = 24, gap = 10;
+      const by = iy + 8;
+      const loadBx = ix + iw - 2 * (btnW + gap) - 15;
+      const delBx = ix + iw - (btnW + gap) - 15;
+      this.loadoutItemRects[realIdx] = {
+        y: iy,
+        row: rowRect,
+        load: { x: loadBx, y: by, w: btnW, h: btnH },
+        del: { x: delBx, y: by, w: btnW, h: btnH },
+      };
+      const drawP = (bx2: number, label: string, color: string) => {
+        const isH = hit({ x: bx2, y: by, w: btnW, h: btnH }, this.mx, this.my);
+        ctx.fillStyle = isH ? color : `${color}aa`;
+        ctx.beginPath();
+        roundRect(ctx, bx2, by, btnW, btnH, 6);
+        ctx.fill();
+        ctx.font = `11px ${FONT_FAMILY}`;
+        ctx.fillStyle = 'white';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, bx2 + btnW / 2, by + btnH / 2);
+      };
+      drawP(loadBx, 'Load', '#27ae60');
+      drawP(delBx, 'Delete', '#e74c3c');
+    }
+
+    // 9. 滚动箭头（多于 5 个时显示）
+    if (withScroll) {
+      const upX = x + w - 30;
+      const upY = listTop;
+      const downY = y + h - 40;
+      this.loadoutScrollUpRect = { x: upX, y: upY, w: 25, h: 25 };
+      this.loadoutScrollDownRect = { x: upX, y: downY, w: 25, h: 25 };
+      ctx.fillStyle = 'rgba(155, 89, 182, 0.6)';
+      ctx.beginPath(); roundRect(ctx, upX, upY, 25, 25, 5); ctx.fill();
+      ctx.beginPath(); roundRect(ctx, upX, downY, 25, 25, 5); ctx.fill();
+      ctx.font = `14px ${FONT_FAMILY}`;
+      ctx.fillStyle = 'white';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('▲', upX + 12.5, upY + 13);
+      ctx.fillText('▼', upX + 12.5, downY + 13);
+    }
+  }
+
+  private drawLoadoutInput(x: number, y: number, w: number, placeholder: string, val: string) {
+    const ctx = this.ctx;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+    ctx.strokeStyle = 'rgba(155, 89, 182, 0.5)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    roundRect(ctx, x, y, w, 30, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = val ? 'white' : 'rgba(255, 255, 255, 0.35)';
+    ctx.font = `14px ${FONT_FAMILY}`;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(val || placeholder, x + 10, y + 15);
+
+    this.loadoutInputRect = { x, y, w, h: 30 };
+  }
+
+  /** 将 loadouts 保存到 localStorage */
+  private saveLoadoutsLocal() {
+    try {
+      localStorage.setItem(LOADOUT_SAVE_KEY, JSON.stringify(this.loadouts));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** 从 localStorage 加载 loadouts */
+  private loadLoadoutsLocal() {
+    try {
+      const raw = localStorage.getItem(LOADOUT_SAVE_KEY);
+      if (raw) {
+        const data = JSON.parse(raw);
+        if (Array.isArray(data)) {
+          this.loadouts = data;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private drawButton(x: number, y: number, w: number, h: number, text: string, color: string) {
+    const ctx = this.ctx;
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = 'white';
+    ctx.font = '14px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, x + w / 2, y + h / 2);
+  }
 
   private wallExteriorPath(visibleWalls: Wall[], blockers: Wall[]): Path2D {
     const path = new Path2D();
