@@ -42,6 +42,11 @@ export const C2S = {
    * Sent every ~10-30 s by the client.
    */
   SYNC_LEVEL: 15,
+  /**
+   * Loadout 操作请求（保存/加载/删除配置）。
+   * 操作码见 LOADOUT_OP，payload 格式取决于操作码。
+   */
+  LOADOUT: 16,
 } as const;
 
 /** SWAP_ROW payload meaning "swap the entire row", not a single slot. */
@@ -114,6 +119,8 @@ export const S2C = {
    * periodically as members update their level/rarity.
    */
   SQUAD_MEMBER_STATE: 12,
+  /** 服务器推送 Loadout 数据（完整列表）。 */
+  LOADOUT_DATA: 13,
 } as const;
 
 export const ENT = {
@@ -146,6 +153,12 @@ export const EVT = {
   HEAL: 11,
 } as const;
 
+/** Loadout 操作码 */
+export const LOADOUT_OP = {
+  SAVE: 0,   // 保存当前配置
+  LOAD: 1,   // 加载配置
+  DELETE: 2, // 删除配置
+} as const;
 
 export class Writer {
   private buf: Uint8Array;
