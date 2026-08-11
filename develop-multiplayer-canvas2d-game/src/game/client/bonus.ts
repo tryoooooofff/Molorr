@@ -1,3 +1,5 @@
+import { CloudStorage } from "./storage";
+
 export const BONUS_DURATION = 60 * 60; // one hour, in seconds
 const BONUS_KEY = "petalia.bonus_data";
 
@@ -39,6 +41,10 @@ export class BonusSystem {
 
   private save() {
     try { localStorage.setItem(BONUS_KEY, JSON.stringify(this.data)); } catch { /* storage unavailable */ }
+    // Sync to cloud storage
+    if (CloudStorage.isReady) {
+      CloudStorage.instance.set(BONUS_KEY, this.data);
+    }
   }
 
   private today() { return new Date().toISOString().slice(0, 10); }

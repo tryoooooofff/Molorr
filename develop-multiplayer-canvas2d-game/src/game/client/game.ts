@@ -82,6 +82,7 @@ import { BonusSystem } from "./bonus";
 import { MobGallery } from "./mobGallery";
 import { TalentSystem } from "./talent";
 import type { TalentBonuses, TalentHost, TalentPetalLike } from "./talent";
+import { CloudStorage } from "./storage";
 
 interface Ent {
   id: number;
@@ -489,8 +490,36 @@ class SettingsSystem {
                 virtualKeyboard: this.virtualKeyboard
             }));
         } catch(e) {}
+        this.cloudSave();
         this._forceRedraw();
     }
+
+  cloudSave() {
+    if (typeof window === 'undefined' || !CloudStorage.isReady) return;
+    try {
+      CloudStorage.instance.set('game_settings', {
+        showHitbox: this.showHitbox,
+        showRarity: this.showRarity,
+        showDamage: this.showDamage,
+        showParticles: this.showParticles,
+        showEnhancedHealthBar: this.showEnhancedHealthBar,
+        showEnemyPanel: this.showEnemyPanel,
+        showDamageNumbers: this.showDamageNumbers,
+        showFPS: this.showFPS,
+        showProjectileHitbox: this.showProjectileHitbox,
+        showAdvancedDPS: this.showAdvancedDPS,
+        showMovementHelper: this.showMovementHelper,
+        showDebugInfo: this.showDebugInfo,
+        maxMagicAnts: this.maxMagicAnts,
+        maxParticles: this.maxParticles,
+        performanceMode: this.performanceMode,
+        photoHardware: this.photoHardware,
+        lowQualityWall: this.lowQualityWall,
+        cacheCanvas: this.cacheCanvas,
+        virtualKeyboard: this.virtualKeyboard,
+      });
+    } catch {}
+  }
 
     _forceRedraw() {
         this.forceRedraw();
@@ -3358,6 +3387,12 @@ class AchievementSystem {
         unlocked: [...this.unlocked],
         stats: this.stats,
       }));
+      if (CloudStorage.isReady) {
+        CloudStorage.instance.set('achievements_v1', {
+          unlocked: [...this.unlocked],
+          stats: this.stats,
+        });
+      }
     } catch (e) { /* storage full / unavailable */ }
   }
 
@@ -4293,6 +4328,13 @@ class ChallengeSystem {
         completedToday: Array.from(this.completedToday.entries()).map(([k, v]) => [k, Array.from(v)]),
         lastResetDate: this.lastResetDate,
       }));
+      if (CloudStorage.isReady) {
+        CloudStorage.instance.set(this.SAVE_KEY, {
+          quests: this.quests,
+          completedToday: Array.from(this.completedToday.entries()).map(([k, v]) => [k, Array.from(v)]),
+          lastResetDate: this.lastResetDate,
+        });
+      }
     } catch (e) {
       console.error("Failed to save quests:", e);
     }
@@ -5036,6 +5078,9 @@ class ShopSystem {
     const m = { tierId, purchasedAt: Date.now(), expiresAt: Date.now() + durationDays * 24 * 60 * 60 * 1000 };
     try {
       localStorage.setItem(this.MEMBERSHIP_STORAGE_KEY, JSON.stringify(m));
+      if (CloudStorage.isReady) {
+        CloudStorage.instance.set(this.MEMBERSHIP_STORAGE_KEY, m);
+      }
     } catch {
       /* ignore */
     }
@@ -5103,6 +5148,9 @@ class ShopSystem {
   private saveUsedRecords() {
     try {
       localStorage.setItem(this.REDEEM_STORAGE_KEY, JSON.stringify(Object.fromEntries(this.usedRecords)));
+      if (CloudStorage.isReady) {
+        CloudStorage.instance.set(this.REDEEM_STORAGE_KEY, Object.fromEntries(this.usedRecords));
+      }
     } catch {
       /* ignore */
     }
@@ -6402,6 +6450,10 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.challenges = new ChallengeSystem(this);
     this.loadLocal();
     this.loadLoadoutsLocal();
+    // Initialize cloud storage for PostgreSQL sync
+    CloudStorage.init({
+      getToken: () => this.account?.token ?? null,
+    });
   }
 
   /**
@@ -6551,6 +6603,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     if (!id) {
       id = "dev_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
       localStorage.setItem("device_id", id);
+      if (CloudStorage.isReady) {
+        CloudStorage.instance.set("device_id", id);
+      }
     }
     return "device_" + id;
   }
@@ -6803,6 +6858,11 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         body: JSON.stringify({ token: this.account.token, data }),
       }).catch(() => {});
     }
+    // Sync all localStorage data to cloud storage
+    if (CloudStorage.isReady) {
+      CloudStorage.instance.set(SAVE_KEY, data);
+      CloudStorage.instance.set("petalia.name", this.playerName);
+    }
   }
 
   private async pullCloudSave() {
@@ -6836,6 +6896,18 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       }
       this.account = { username: this.authUser, token: json.token };
       localStorage.setItem(AUTH_KEY, JSON.stringify(this.account));
+      // Re-initialize CloudStorage with the new token and load all data
+      if (CloudStorage.isReady) {
+        CloudStorage.instance.set(AUTH_KEY, this.account);
+        void CloudStorage.instance.loadAll().then((allData) => {
+          // Apply all loaded data to localStorage
+          for (const [k, v] of Object.entries(allData)) {
+            if (v !== null && v !== undefined) {
+              try { localStorage.setItem(k, JSON.stringify(v)); } catch {}
+            }
+          }
+        });
+      }
       this.playerName = this.authUser;
       if (json.data) this.applySave(json.data);
       this.authStatus = `Signed in as ${this.authUser}. Progress syncs to the database.`;
@@ -6847,6 +6919,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private logout() {
     this.account = null;
     localStorage.removeItem(AUTH_KEY);
+    if (CloudStorage.isReady) {
+      CloudStorage.instance.remove(AUTH_KEY);
+    }
     this.authStatus = "Playing as guest. Progress saved locally.";
   }
 
@@ -11768,6 +11843,9 @@ if (this.drag) {
   private saveLoadoutsLocal() {
     try {
       localStorage.setItem(LOADOUT_SAVE_KEY, JSON.stringify(this.loadouts));
+      if (CloudStorage.isReady) {
+        CloudStorage.instance.set(LOADOUT_SAVE_KEY, this.loadouts);
+      }
     } catch {
       /* ignore */
     }
