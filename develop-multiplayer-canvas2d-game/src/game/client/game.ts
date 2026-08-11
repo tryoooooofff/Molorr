@@ -12383,7 +12383,7 @@ if (me) {
 
     // ---- 队友信息（小队成员，最多4人） ----
     const squadMates = Array.from(this.ents.values()).filter(
-      e => e.kind === ENT.PLAYER && e.team === TEAM.FRIENDLY && e.id !== this.selfId
+      e => e.kind === ENT.PLAYER && e.team === TEAM.FRIENDLY && e.id !== this.selfId && e.squadLevel !== undefined
     ).slice(0, 4);
 
     if (squadMates.length > 0) {
