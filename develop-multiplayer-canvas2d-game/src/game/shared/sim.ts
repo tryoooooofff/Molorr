@@ -63,7 +63,7 @@ import {
   thirdEyeOrbitBonus,
   pickWeightedMob,
 } from "./defs";
-import { C2S, ENT, EVT, Reader, S2C, SWAP_ROW_ALL, TALENT_KEYS, TALENT_MAX_LEVELS, TEAM, Writer } from "./protocol";
+import { C2S, ENT, EVT, LOADOUT_OP, Reader, S2C, SWAP_ROW_ALL, TALENT_KEYS, TALENT_MAX_LEVELS, TEAM, Writer } from "./protocol";
 
 // =====================================================================
 // Squad system
@@ -93,6 +93,12 @@ const SQUAD_MAX_MEMBERS = 4;
 
 /** Squad code length */
 const SQUAD_CODE_LENGTH = 6;
+
+/** Loadout 预设配置 */
+export interface LoadoutConfig {
+  name: string;
+  slots: (Cell | null)[];
+}
 
 export interface Cell {
   item: number;
@@ -139,6 +145,8 @@ export interface PlayerSave {
   nextOracleAt?: number;
   /** Epoch ms timestamp of the next allowed Trade use (0 = ready now). */
   nextTradeAt?: number;
+  /** Loadout 预设配置（持久化保存） */
+  loadouts?: LoadoutConfig[];
 }
 
 // =====================================================================
@@ -294,6 +302,8 @@ export class Player {
    */
   secondary: (Cell | null)[] = new Array(SECONDARY_SLOT_COUNT).fill(null);
   bag: (Cell | null)[] = new Array(BAG_COUNT).fill(null);
+  /** Loadout 预设列表 */
+  loadouts: LoadoutConfig[] = [];
   petals: PetalState[] = [];
   pets: Mob[][] = Array.from({ length: SLOT_COUNT }, () => []);
   hurtCd = 0;
@@ -2006,6 +2016,7 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
       mapId: p.mapId,
       nextOracleAt: p.nextOracleAt,
       nextTradeAt: p.nextTradeAt,
+      loadouts: p.loadouts,
     };
   }
 
@@ -2214,6 +2225,45 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
         }
         // Broadcast to all squad members (including the sender for consistency)
         this.broadcastSquadMemberState(p.squadCode, p.id, level, rarity);
+        break;
+      }
+
+      case C2S.LOADOUT: {
+        const p = c.player;
+        if (!p) return;
+
+        const op = r.u8();
+
+        switch (op) {
+          case LOADOUT_OP.SAVE: {
+            const name = r.str();
+            const slotCount = r.u8();
+            const slots: (Cell | null)[] = [];
+
+            for (let i = 0; i < slotCount; i++) {
+              slots.push(readCell(r));
+            }
+
+            p.loadouts.push({ name, slots });
+            this.syncLoadouts(p, c);
+            break;
+          }
+
+          case LOADOUT_OP.LOAD: {
+            const index = r.u8();
+            this.executeLoadout(p, index, c);
+            break;
+          }
+
+          case LOADOUT_OP.DELETE: {
+            const index = r.u8();
+            if (index >= 0 && index < p.loadouts.length) {
+              p.loadouts.splice(index, 1);
+              this.syncLoadouts(p, c);
+            }
+            break;
+          }
+        }
         break;
       }
     }
@@ -2596,6 +2646,85 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
     let have = 0;
     for (const cell of p.bag) if (cell && cell.item === item && cell.rarity === rarity) have += cell.count;
     return have;
+  }
+
+  // ================================================================
+  // Loadout system
+  // ================================================================
+
+  /**
+   * 执行 Loadout 加载（原子操作）。
+   * 1. 容量预检查（背包满且快捷栏有物品时拒绝）
+   * 2. 快捷栏 → 背包（清空当前）
+   * 3. 背包 → 快捷栏（填充目标配置）
+   * 4. 触发同步与花瓣重建
+   */
+  private executeLoadout(p: Player, index: number, c: ClientState) {
+    if (index < 0 || index >= p.loadouts.length) return;
+    const config = p.loadouts[index];
+
+    // --- 步骤 1: 容量预检查 ---
+    let currentBagItems = 0;
+    for (const cell of p.bag) if (cell) currentBagItems++;
+
+    let itemsOnBar = 0;
+    for (const cell of p.slots) if (cell) itemsOnBar++;
+
+    // 保守策略：如果背包满，且快捷栏有东西要放回，则拒绝操作
+    if (currentBagItems >= BAG_MAX && itemsOnBar > 0) {
+      this.sendChatToClient(c, "Bag full! Cannot switch loadout.", "System", true, false);
+      return;
+    }
+
+    // --- 步骤 2: 快捷栏 → 背包（清空当前） ---
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const cell = p.slots[i];
+      if (cell) {
+        this.addItem(p, cell.item, cell.rarity, cell.count);
+        p.slots[i] = null;
+      }
+    }
+
+    // --- 步骤 3: 背包 → 快捷栏（填充目标） ---
+    for (let i = 0; i < Math.min(config.slots.length, SLOT_COUNT); i++) {
+      const target = config.slots[i];
+      if (!target) {
+        p.slots[i] = null;
+        continue;
+      }
+
+      // 尝试从背包扣除物品
+      const taken = this.takeFromBag(p, target.item, target.rarity, target.count);
+      if (taken > 0) {
+        p.slots[i] = { item: target.item, rarity: target.rarity, count: taken };
+      } else {
+        p.slots[i] = null; // 背包没有该物品，槽位留空
+      }
+    }
+
+    // --- 步骤 4: 触发同步与更新 ---
+    p.dirty = true; // 触发 INVENTORY 包同步
+    this.rebuildPetals(p); // 重建花瓣实体
+    this.syncLoadouts(p, c); // 同步 Loadout 状态
+  }
+
+  /**
+   * 同步 Loadout 列表给客户端（二进制打包）。
+   */
+  private syncLoadouts(p: Player, c: ClientState) {
+    const w = new Writer(512);
+    w.u8(S2C.LOADOUT_DATA);
+    w.u8(p.loadouts.length);
+
+    for (const lo of p.loadouts) {
+      w.str(lo.name);
+      w.u8(lo.slots.length);
+
+      for (const cell of lo.slots) {
+        writeCell(w, cell);
+      }
+    }
+    c.send(w.bytes());
   }
 
   private craft(c: ClientState, p: Player, item: number, rarity: number, totalCards: number) {
