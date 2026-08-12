@@ -2927,7 +2927,25 @@ class ChangelogPanel {
   /** 面板划入动画进度(0=关闭,1=完全展开;参考背包 bagAnim,由 GameClient.update 驱动)。 */
   openAnim = 0;
   scrollY = 0;
+  /** Important notice always pinned at the top of the changelog. Empty = hidden. */
+  importantNotice = "Please don't use the loadout these day, it has a bug that intercept something";
   logs: ChangelogLogGroup[] = [
+      {
+      date: "12th October 2026",
+      entries: [
+        "- player's data now save online once they have signed up",
+        "- Added a push to player when they stuck inside the wall",
+        "- Added important notice to declare some urgent things",
+      ]
+    },
+      {
+      date: "10th & 11th October 2026",
+      entries: [
+        "- Added Loadout system and panel",
+        "- Updated teammate info on left up corner",
+        "- Updated mobile ui again"
+      ]
+    },
       {
       date: "9th October 2026",
       entries: [
@@ -3113,6 +3131,57 @@ class ChangelogPanel {
       ctx.fillStyle = '#ffffff';
       ctx.fillText(text, x, y);
     };
+    // --- Important Notice (pinned at top, hidden when empty) ---
+    if (this.importantNotice) {
+      const noticePad = 10 * s;
+      const noticeInnerW = panelW - 20 * s - paddingRight - noticePad * 2;
+      const noticeTitleSize = 20 * s;
+      const noticeBodySize = 15 * s;
+      const noticeTitleH = 26 * s;
+      const noticeLineH = 22 * s;
+
+      // Wrap notice text
+      ctx.font = `${noticeBodySize}px ${FONT_FAMILY}`;
+      const noticeWords = this.importantNotice.split(' ');
+      let noticeLines: string[] = [];
+      let noticeLine = '';
+      for (const word of noticeWords) {
+        const test = noticeLine + word + ' ';
+        if (ctx.measureText(test).width > noticeInnerW && noticeLine) {
+          noticeLines.push(noticeLine.trim());
+          noticeLine = word + ' ';
+        } else {
+          noticeLine = test;
+        }
+      }
+      if (noticeLine) noticeLines.push(noticeLine.trim());
+
+      const noticeBodyH = noticeLines.length * noticeLineH;
+      const noticeH = noticePad * 2 + noticeTitleH + 6 * s + noticeBodyH;
+
+      // Draw notice background (warm amber to stand out)
+      ctx.fillStyle = '#388e3c';
+      ctx.beginPath();
+      ctx.roundRect(px + 10 * s + noticePad, y, panelW - 20 * s - paddingRight - noticePad * 2, noticeH, 6 * s);
+      ctx.fill();
+      ctx.strokeStyle = '#388e3c';
+      ctx.lineWidth = 2 * s;
+      ctx.beginPath();
+      ctx.roundRect(px + 10 * s + noticePad, y, panelW - 20 * s - paddingRight - noticePad * 2, noticeH, 6 * s);
+      ctx.stroke();
+
+      // Draw title
+      drawTextWithStroke('Important Notice!', px + 16 * s + noticePad, y + noticePad + 2 * s, noticeTitleSize, 'bold');
+
+      // Draw body lines
+      let noticeY = y + noticePad + noticeTitleH + 6 * s;
+      for (const line of noticeLines) {
+        drawTextWithStroke(line, px + 16 * s + noticePad, noticeY, noticeBodySize);
+        noticeY += noticeLineH;
+      }
+
+      y += noticeH + 14 * s;
+    }
 
     for (let i = 0; i < this.logs.length; i++) {
       const group = this.logs[i];
