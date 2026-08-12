@@ -2714,14 +2714,21 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
         continue;
       }
 
-      // 检查该物品是否已经在快捷栏上（来自步骤 2 的保留）
+      // 如果当前槽位已有匹配物品，保留不动
+      const cur = p.slots[i];
+      if (cur && cur.item === target.item && cur.rarity === target.rarity && cur.count >= target.count) {
+        continue;
+      }
+
+      // 从 i 之后搜索匹配物品（避免重复使用已放置的同一物品）
       let found = false;
-      for (let j = 0; j < SLOT_COUNT; j++) {
+      for (let j = i; j < SLOT_COUNT; j++) {
         const s = p.slots[j];
         if (s && s.item === target.item && s.rarity === target.rarity && s.count >= target.count) {
           if (i !== j) {
+            // 用 swap 避免覆盖目标槽位上的其他物品
             p.slots[i] = p.slots[j];
-            p.slots[j] = null;
+            p.slots[j] = cur;
           }
           found = true;
           break;
