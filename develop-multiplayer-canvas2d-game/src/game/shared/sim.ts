@@ -341,6 +341,13 @@ export class Player {
   currentSpeed = 0;
 
   // =====================================================================
+  // 卡墙安全网：记录上次"确认不在墙内"的位置，深度卡墙时回退到此点。
+  // 由 pushPlayerOutOfWall() 在每帧 updatePlayer() 末尾维护。
+  // =====================================================================
+  lastSafeX = 0;
+  lastSafeY = 0;
+
+  // =====================================================================
   // Bubble: defend-key rising-edge detection
   // =====================================================================
   /** Previous tick's defend flag, used to detect a fresh press of Shift/Contract. */
@@ -3080,6 +3087,72 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
     return false;
   }
 
+  /**
+   * 轻量级"玩家卡墙推出"安全网：每帧调用一次，几乎不消耗性能。
+   *
+   * 设计目标：在 updatePlayer() 的 moveCircle() 之外再加一道兜底，保证玩家
+   * 绝不会停留在墙内（传送/出生点/玩家互推/边界 bug 等异常情形下生效）。
+   *
+   * 性能策略（"几乎不消耗性能"的关键）：
+   *  1. 先用 circleNeedsPreciseCheck（O(1) 粗筛，只查 9 个空间格子）跳过
+   *     远离任何墙的玩家——这是 99% 的常见情形，零碰撞开销，仅记录安全位置；
+   *  2. 仅当玩家靠近墙时才调用一次 collideCircle 做圆-边推挤修正；
+   *     修正量 < PUSH_OUT_THRESHOLD 视为正常贴墙移动，应用并记录安全位置；
+   *  3. 修正量 ≥ 阈值视为"深度卡墙"（圆心远离所有墙边，边碰撞失效），
+   *     回退到上次记录的安全位置；若无安全记录则传送到出生瓦片兜底。
+   *
+   * 与 mob 版 pushOutOfWall 的区别：不做 8 方向搜索 / 区块随机刷新
+   * （那些是 O(n) 级别的重操作），仅用 O(1) 粗筛 + 单次 collideCircle，
+   * 因此可以每帧对每个玩家调用而几乎不增加 tick 开销。
+   */
+  private pushPlayerOutOfWall(p: Player): void {
+    if (!p.alive) return;
+    const collider = this.playerWallColliders[p.mapId];
+    if (!collider) return;
+    const r = PLAYER_RADIUS + this.soilRadiusBonusOf(p);
+
+    // O(1) 粗筛：远离任何墙则记录安全位置并返回（常见路径，零碰撞开销）
+    if (!collider.circleNeedsPreciseCheck(p.x, p.y, r)) {
+      p.lastSafeX = p.x;
+      p.lastSafeY = p.y;
+      return;
+    }
+
+    // 靠近墙：一次 collideCircle 既检测又修正（单次调用，开销极低）
+    const [nx, ny] = collider.collideCircle(p.x, p.y, r, this.collisionCounter);
+    const disp = Math.abs(nx - p.x) + Math.abs(ny - p.y);
+
+    // 修正量小：正常贴墙/浅嵌入，应用修正并记录安全位置
+    if (disp < PUSH_OUT_THRESHOLD) {
+      p.x = nx;
+      p.y = ny;
+      p.lastSafeX = p.x;
+      p.lastSafeY = p.y;
+      return;
+    }
+
+    // 修正量大：深度卡墙（圆心远离所有墙边，边碰撞无法推出），回退到上次安全位置
+    if (p.lastSafeX !== 0 || p.lastSafeY !== 0) {
+      p.x = p.lastSafeX;
+      p.y = p.lastSafeY;
+    } else {
+      // 无安全位置记录：传送到出生瓦片兜底
+      const spawnTiles = findSpawnTiles(p.mapId);
+      if (spawnTiles.length > 0) {
+        const tile = spawnTiles[(Math.random() * spawnTiles.length) | 0];
+        const map = MAPS[p.mapId];
+        p.x = (tile.col + 0.5) * (map.width / BLOCK_GRID_COLS);
+        p.y = (tile.row + 0.5) * (map.height / BLOCK_GRID_ROWS);
+        const [cx, cy] = collider.collideCircle(p.x, p.y, r);
+        p.x = cx;
+        p.y = cy;
+      }
+    }
+    // 卡墙后清零速度，避免立即再次冲入
+    p.vx = 0;
+    p.vy = 0;
+  }
+
   private healthBonusOf(p: Player): number {
     let bonus = 0;
     for (let i = 0; i < SLOT_COUNT; i++) {
@@ -3267,6 +3340,8 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
     }
     p.x = clamp(p.x, playerRadius, map.width - playerRadius);
     p.y = clamp(p.y, playerRadius, map.height - playerRadius);
+    // 轻量级卡墙安全网：保证玩家绝不停留在墙内（O(1) 粗筛，几乎零开销）
+    this.pushPlayerOutOfWall(p);
     p.hurtCd = Math.max(0, p.hurtCd - dt);
     const attack = (p.flags & 1) !== 0;
     const defend = (p.flags & 2) !== 0;
