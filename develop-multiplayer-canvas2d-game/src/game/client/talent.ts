@@ -22,6 +22,8 @@
  * ─────────────────────────────────────────────────────────────
  */
 
+import { CloudStorage } from "./storage";
+
 // =====================================================================
 // 宿主接口：GameClient 实现，天赋系统通过它读写玩家属性
 // =====================================================================
@@ -311,6 +313,10 @@ export class TalentSystem {
       localStorage.setItem("talent_system_v2", JSON.stringify(data));
     } catch (e) {
       console.error("❌ 保存天赋失败:", e);
+    }
+    // Sync to cloud storage
+    if (CloudStorage.isReady) {
+      CloudStorage.instance.set("talent_system_v2", data);
     }
   }
 

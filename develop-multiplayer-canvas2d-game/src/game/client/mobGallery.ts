@@ -7,6 +7,7 @@ import {
   MOBS,
   RARITIES,
 } from "../shared/defs";
+import { CloudStorage } from "./storage";
 import { drawItemIcon, drawMob, FONT_FAMILY, Rect, roundRect } from "./ui";
 
 /** The normal rarity ladder has ten display columns (Common through Eternal). */
@@ -91,6 +92,10 @@ export class MobGallery {
     try {
       const count = Number.parseInt(localStorage.getItem(key) ?? "0", 10) || 0;
       localStorage.setItem(key, String(count + 1));
+      // Sync to cloud storage
+      if (CloudStorage.isReady) {
+        CloudStorage.instance.set(key, count + 1);
+      }
     } catch {
       // Collection tracking should never make gameplay depend on storage access.
     }
