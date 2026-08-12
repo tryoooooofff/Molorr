@@ -2252,7 +2252,13 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
               slots.push(readCell(r));
             }
 
-            p.loadouts.push({ name, slots });
+            // 如果已存在同名 loadout，则更新而不是追加
+            const existingIdx = p.loadouts.findIndex(lo => lo.name === name);
+            if (existingIdx >= 0) {
+              p.loadouts[existingIdx] = { name, slots };
+            } else {
+              p.loadouts.push({ name, slots });
+            }
             this.syncLoadouts(p, c);
             break;
           }
@@ -2684,13 +2690,20 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
       return;
     }
 
-    // --- 步骤 2: 快捷栏 → 背包（清空当前） ---
+    // --- 步骤 2: 将快捷栏中不在 loadout 配置里的物品移回背包 ---
+    // 先收集 loadout 需要的 (item, rarity) 集合
+    const loadoutKeys = new Set<string>();
+    for (const target of config.slots) {
+      if (target) loadoutKeys.add(`${target.item}|${target.rarity}`);
+    }
+
     for (let i = 0; i < SLOT_COUNT; i++) {
       const cell = p.slots[i];
-      if (cell) {
-        this.addItem(p, cell.item, cell.rarity, cell.count);
-        p.slots[i] = null;
-      }
+      if (!cell) continue;
+      // 如果该物品在 loadout 配置中，不要移走（稍后会被放到正确位置）
+      if (loadoutKeys.has(`${cell.item}|${cell.rarity}`)) continue;
+      this.addItem(p, cell.item, cell.rarity, cell.count);
+      p.slots[i] = null;
     }
 
     // --- 步骤 3: 背包 → 快捷栏（填充目标） ---
@@ -2700,6 +2713,21 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
         p.slots[i] = null;
         continue;
       }
+
+      // 检查该物品是否已经在快捷栏上（来自步骤 2 的保留）
+      let found = false;
+      for (let j = 0; j < SLOT_COUNT; j++) {
+        const s = p.slots[j];
+        if (s && s.item === target.item && s.rarity === target.rarity && s.count >= target.count) {
+          if (i !== j) {
+            p.slots[i] = p.slots[j];
+            p.slots[j] = null;
+          }
+          found = true;
+          break;
+        }
+      }
+      if (found) continue;
 
       // 尝试从背包扣除物品
       const taken = this.takeFromBag(p, target.item, target.rarity, target.count);

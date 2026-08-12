@@ -2928,7 +2928,7 @@ class ChangelogPanel {
   openAnim = 0;
   scrollY = 0;
   /** Important notice always pinned at the top of the changelog. Empty = hidden. */
-  importantNotice = "Please don't use the loadout these day, it has a bug that intercept something";
+  importantNotice = "";
   logs: ChangelogLogGroup[] = [
       {
       date: "12th October 2026",
@@ -6867,7 +6867,14 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         }
       }
       const nm = localStorage.getItem("petalia.name");
-      if (nm) this.playerName = nm;
+      if (nm) {
+        try {
+          // CloudStorage.set 可能将字符串存储为 JSON（带引号），需要兼容处理
+          this.playerName = JSON.parse(nm);
+        } catch {
+          this.playerName = nm;
+        }
+      }
     } catch {
       /* ignore */
     }
@@ -7162,6 +7169,21 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.net.send(w.bytes());
   }
 
+  /** 将所有本地 loadout 同步到服务器（加入游戏时调用） */
+  private syncAllLoadoutsToServer() {
+    if (!this.net || !this.connected) return;
+    for (const lo of this.loadouts) {
+      const w = new Writer(128);
+      w.u8(C2S.LOADOUT).u8(LOADOUT_OP.SAVE);
+      w.str(lo.name);
+      w.u8(lo.slots.length);
+      for (const cell of lo.slots) {
+        this.writeCell(w, cell);
+      }
+      this.net.send(w.bytes());
+    }
+  }
+
   /** 请求删除某个配置 */
   private sendDeleteLoadout(index: number) {
     // 先删除本地数据（立即持久化）
@@ -7194,6 +7216,8 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       this.roseParticles.length = 0;
       this.mapFlash = 1;
       this.chat.addMessage("Welcome! Press [Enter] to chat. type /help for help", "System", true);
+      // 将本地 loadout 同步到服务器（服务器在 JOIN 时创建了空列表）
+      this.syncAllLoadoutsToServer();
       break;
     }
     case S2C.SNAPSHOT: {
