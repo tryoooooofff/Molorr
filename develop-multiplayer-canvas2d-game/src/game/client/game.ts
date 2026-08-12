@@ -2928,7 +2928,7 @@ class ChangelogPanel {
   openAnim = 0;
   scrollY = 0;
   /** Important notice always pinned at the top of the changelog. Empty = hidden. */
-  importantNotice = "";
+  importantNotice = "The bug on loadout seems to be fixed, but still need testing, which means it is still not safe to put your valuable stuff into loadout";
   logs: ChangelogLogGroup[] = [
       {
       date: "12th October 2026",
