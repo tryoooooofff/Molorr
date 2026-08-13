@@ -6219,8 +6219,8 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
 
   private serverRegion: "eu" | "as" = "eu";
   private static readonly SERVER_URLS: Record<string, string> = {
-    eu: "wss://molorr-server-t34o.onrender.com",
-    as: "wss://molorr-server-sg.onrender.com",
+    eu: process.env.NEXT_PUBLIC_GAME_WS || "wss://molorr-server-t34o.onrender.com",
+    as: process.env.NEXT_PUBLIC_GAME_WS_AS || "wss://molorr-server-sg.onrender.com",
   };
   private serverBtnRects: Record<string, { x: number; y: number; w: number; h: number }> = {};
 

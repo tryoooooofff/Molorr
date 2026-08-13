@@ -10,6 +10,7 @@ COPY package*.json ./
 RUN npm ci
 COPY . .
 ENV NEXT_PUBLIC_GAME_WS=wss://molorr-server-t34o.onrender.com
+ENV NEXT_PUBLIC_GAME_WS_AS=wss://molorr-server-sg.onrender.com
 RUN npm run build
 
 # Build C++ server
