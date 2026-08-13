@@ -83,8 +83,8 @@ export class RemoteTransport implements Transport {
   }
 }
 
-export function createTransport(): Transport {
-  const url = process.env.NEXT_PUBLIC_GAME_WS;
+export function createTransport(serverUrl?: string): Transport {
+  const url = serverUrl || process.env.NEXT_PUBLIC_GAME_WS;
   if (url && url.length > 3) return new RemoteTransport(url);
   return new LocalTransport();
 }

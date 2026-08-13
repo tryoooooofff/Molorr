@@ -6217,6 +6217,13 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     maxLife: number;
   }> = [];
 
+  private serverRegion: "eu" | "as" = "eu";
+  private static readonly SERVER_URLS: Record<string, string> = {
+    eu: "wss://molorr-server-t34o.onrender.com",
+    as: "wss://molorr-server-sg.onrender.com",
+  };
+  private serverBtnRects: Record<string, { x: number; y: number; w: number; h: number }> = {};
+
   // net
   private net: Transport | null = null;
   private connected = false;
@@ -6875,6 +6882,8 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
           this.playerName = nm;
         }
       }
+      const sr = localStorage.getItem("petalia.server");
+      if (sr === "eu" || sr === "as") this.serverRegion = sr;
     } catch {
       /* ignore */
     }
@@ -7006,7 +7015,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.net?.close();
     this.ents.clear();
     this.roseParticles.length = 0;
-    const net = createTransport();
+    const net = createTransport(GameClient.SERVER_URLS[this.serverRegion]);
     this.net = net;
     // Wrap `send` once here so every outbound packet is counted for the
     // debug-overlay throughput readout, regardless of which call site sent
@@ -9945,6 +9954,20 @@ private bagLayout() {
       return;
     }
 
+    // Server selector buttons
+    for (const key of ['eu', 'as'] as const) {
+      const r = this.serverBtnRects[key];
+      if (r && hit(r, mx, my)) {
+        if (this.serverRegion !== key) {
+          this.serverRegion = key;
+          localStorage.setItem("petalia.server", key);
+          // 切换服务器时重新连接
+          this.connect();
+        }
+        return;
+      }
+    }
+
     // Name field (above biome buttons) — use same dimensions as draw code
     const layout = this.menuLayout();
     const isMobileLayout = this.isMobile || this.w < 640;
@@ -11031,6 +11054,36 @@ private bagLayout() {
     ctx.strokeText('Molorr.io', W / 2, titleY + bob * 0.4);
     ctx.fillStyle = '#fff';
     ctx.fillText('Molorr.io', W / 2, titleY + bob * 0.4);
+
+    // ─── Server Selector [EU] [AS] ───
+    const btnW = isMobileLayout ? 44 : 54;
+    const btnH = isMobileLayout ? 26 : 30;
+    const btnGap = isMobileLayout ? 10 : 12;
+    const btnY = titleY + bob * 0.4 + (isMobileLayout ? 8 : 12);
+    const totalBtnW = btnW * 2 + btnGap;
+    const btnStartX = W / 2 - totalBtnW / 2;
+    this.serverBtnRects = {};
+    for (const key of ['eu', 'as'] as const) {
+      const idx = key === 'eu' ? 0 : 1;
+      const bx = btnStartX + idx * (btnW + btnGap);
+      const by = btnY;
+      this.serverBtnRects[key] = { x: bx, y: by, w: btnW, h: btnH };
+      const isActive = this.serverRegion === key;
+      const isHovered = hit(this.serverBtnRects[key], this.mx, this.my);
+      roundRect(ctx, bx, by, btnW, btnH, 6);
+      ctx.fillStyle = isActive
+        ? (isHovered ? '#4a7fb5' : '#3a6fa5')
+        : (isHovered ? 'rgba(255,255,255,0.2)' : 'rgba(0,0,0,0.35)');
+      ctx.fill();
+      ctx.lineWidth = isActive ? 2 : 1;
+      ctx.strokeStyle = isActive ? '#7abfff' : 'rgba(255,255,255,0.25)';
+      ctx.stroke();
+      ctx.font = `bold ${isMobileLayout ? 12 : 14}px ${FONT_FAMILY}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = isActive ? '#fff' : 'rgba(255,255,255,0.6)';
+      ctx.fillText(key.toUpperCase(), bx + btnW / 2, by + btnH / 2);
+    }
 
     // ─── Name Field (above biome buttons) ───
     const layout = this.menuLayout();
