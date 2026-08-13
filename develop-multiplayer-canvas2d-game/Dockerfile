@@ -5,10 +5,11 @@ WORKDIR /app
 # Install build tools for C++ server
 RUN apt-get update -qq && apt-get install -y -qq git g++ make libssl-dev zlib1g-dev
 
-# Build Next.js frontend
+# Build Next.js frontend (NEXT_PUBLIC_* must be set at build time)
 COPY package*.json ./
 RUN npm ci
 COPY . .
+ENV NEXT_PUBLIC_GAME_WS=wss://molorr-server.onrender.com
 RUN npm run build
 
 # Build C++ server
