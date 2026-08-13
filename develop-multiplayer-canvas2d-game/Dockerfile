@@ -3,7 +3,7 @@ FROM node:22-bookworm-slim AS build
 WORKDIR /app
 
 # Install build tools for C++ server
-RUN apt-get update -qq && apt-get install -y -qq g++ make libssl-dev zlib1g-dev
+RUN apt-get update -qq && apt-get install -y -qq git g++ make libssl-dev zlib1g-dev
 
 # Build Next.js frontend
 COPY package*.json ./
