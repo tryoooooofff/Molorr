@@ -28,6 +28,8 @@
 #include <map>
 #include <ctime>
 #include <numeric>
+#include <fstream>
+#include <filesystem>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -982,6 +984,83 @@ struct Player {
   }
 };
 
+// =====================================================================
+// Player data persistence (save/load to disk)
+// =====================================================================
+static const std::string SAVE_DIR = "saves";
+
+struct SavedPlayerData {
+  uint32_t xp = 0;
+  uint8_t mapId = 0;
+  Cell slots[SLOT_COUNT];
+  Cell secondary[SECONDARY_SLOT_COUNT];
+  std::vector<Cell> bag;
+  int64_t nextOracleAt = 0;
+  int64_t nextTradeAt = 0;
+};
+
+static std::string savePathFor(const std::string& name) {
+  // Simple hash to avoid special characters in filenames
+  std::hash<std::string> hasher;
+  auto h = hasher(name);
+  return SAVE_DIR + "/p_" + std::to_string(h) + ".bin";
+}
+
+static void savePlayerData(const Player& p) {
+  if (p.name.empty()) return;
+  try {
+    if (!std::filesystem::exists(SAVE_DIR))
+      std::filesystem::create_directories(SAVE_DIR);
+    std::ofstream f(savePathFor(p.name), std::ios::binary);
+    if (!f) return;
+    uint32_t xp = p.xp;
+    uint8_t mapId = p.mapId;
+    f.write((const char*)&xp, sizeof(xp));
+    f.write((const char*)&mapId, sizeof(mapId));
+    f.write((const char*)p.slots, sizeof(Cell) * SLOT_COUNT);
+    f.write((const char*)p.secondary, sizeof(Cell) * SECONDARY_SLOT_COUNT);
+    uint16_t bagSize = (uint16_t)p.bag.size();
+    f.write((const char*)&bagSize, sizeof(bagSize));
+    if (bagSize > 0) f.write((const char*)p.bag.data(), sizeof(Cell) * bagSize);
+    int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+    int64_t oracleRemaining = p.nextOracleAt > now ? p.nextOracleAt - now : 0;
+    int64_t tradeRemaining = p.nextTradeAt > now ? p.nextTradeAt - now : 0;
+    f.write((const char*)&oracleRemaining, sizeof(oracleRemaining));
+    f.write((const char*)&tradeRemaining, sizeof(tradeRemaining));
+  } catch (...) { /* ignore save errors */ }
+}
+
+static SavedPlayerData loadPlayerData(const std::string& name) {
+  SavedPlayerData d;
+  if (name.empty()) return d;
+  try {
+    std::ifstream f(savePathFor(name), std::ios::binary);
+    if (!f) return d;
+    uint32_t xp;
+    uint8_t mapId;
+    f.read((char*)&xp, sizeof(xp));
+    f.read((char*)&mapId, sizeof(mapId));
+    d.xp = xp; d.mapId = mapId;
+    f.read((char*)d.slots, sizeof(Cell) * SLOT_COUNT);
+    f.read((char*)d.secondary, sizeof(Cell) * SECONDARY_SLOT_COUNT);
+    uint16_t bagSize;
+    f.read((char*)&bagSize, sizeof(bagSize));
+    if (bagSize > 0) {
+      d.bag.resize(bagSize);
+      f.read((char*)d.bag.data(), sizeof(Cell) * bagSize);
+    }
+    int64_t oracleRemaining, tradeRemaining;
+    f.read((char*)&oracleRemaining, sizeof(oracleRemaining));
+    f.read((char*)&tradeRemaining, sizeof(tradeRemaining));
+    int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
+    d.nextOracleAt = oracleRemaining > 0 ? now + oracleRemaining : 0;
+    d.nextTradeAt = tradeRemaining > 0 ? now + tradeRemaining : 0;
+  } catch (...) { /* ignore load errors */ }
+  return d;
+}
+
 struct ClientState {
   uint16_t playerId = 0;
   Player* player = nullptr;
@@ -1515,6 +1594,7 @@ public:
   int nextProjId = 20000;
   int nextDropId = 30000;
   float zoneRefillTimer = 0;
+  float persistTimer = 0;
   int mobCollisionSkipFrames = 0;
 
   // Per-map worlds
@@ -1555,15 +1635,28 @@ public:
     auto it = players.find(id);
     if (it != players.end()) {
       Player& p = it->second;
-      // Remove pets
+      // Save player data to disk before removal
+      savePlayerData(p);
+      // Remove pets — but keep friendly mobs alive (they persist after disconnect)
       for (int i = 0; i < SLOT_COUNT; i++) {
         for (int petId : p.pets[i]) {
-          // Find which map this pet is on
+          Mob* pet = findMobById(p.mapId, petId);
+          // Skip friendly mobs — they persist even after player disconnects
+          if (pet && pet->friendly) continue;
           for (int m = 0; m < MAP_COUNT; m++) {
             removeMobFromWorld(m, petId);
           }
         }
-        p.pets[i].clear();
+        // Only clear the pet list reference; the actual mobs stay in the world
+        if (!p.pets[i].empty()) {
+          // Check if any pets are friendly — if so, keep their reference
+          bool hasFriendly = false;
+          for (int petId : p.pets[i]) {
+            Mob* pet = findMobById(p.mapId, petId);
+            if (pet && pet->friendly) { hasFriendly = true; break; }
+          }
+          if (!hasFriendly) p.pets[i].clear();
+        }
       }
       // Remove from squad
       if (!p.squadCode.empty()) {
@@ -1948,7 +2041,9 @@ public:
       const ItemDef* def = cell.item != EMPTY_ITEM ? &ITEMS[cell.item] : nullptr;
       bool orbits = def && orbitsAsPetal(def->kind);
 
-      // Check if summon needs despawning
+      // Check if summon needs despawning — but friendly mobs persist
+      // even when the summon card is swapped out or removed.
+      /* 友方生物不会因卡片换下而消失，注释掉销毁逻辑
       if (def && def->kind == IK_SUMMON) {
         bool sameSummon = true;
         for (int petId : p.pets[i]) {
@@ -1959,6 +2054,7 @@ public:
         }
         if (!p.pets[i].empty() && !sameSummon) despawnPets(p, i);
       }
+      */
 
       bool cellChanged = old->item != cell.item || old->rarity != cell.rarity;
 
@@ -2470,6 +2566,15 @@ public:
 
     // Update projectiles
     for (int m = 0; m < MAP_COUNT; m++) updateProjectiles(m, dt, activePlayers);
+
+    // Periodic save: every 30 seconds, save all online players
+    persistTimer += dt;
+    if (persistTimer >= 30.0f) {
+      persistTimer = 0;
+      for (auto& [id, p] : players) {
+        savePlayerData(p);
+      }
+    }
   }
 
   // ---- Player update ----
@@ -3972,12 +4077,26 @@ int main() {
               for (auto& c : p->bag) if (c.item != EMPTY_ITEM) { hasItems = true; break; }
             }
             if (!hasItems) {
-              p->slots[0] = Cell{0, 0, 1};
-              p->slots[1] = Cell{0, 0, 1};
-              p->slots[2] = Cell{1, 0, 1};
-              p->slots[3] = Cell{0, 0, 1};
-              p->secondary[0] = Cell{2, 0, 1};
-              p->secondary[1] = Cell{8, 0, 1};
+              // Try to load saved data from disk
+              SavedPlayerData saved = loadPlayerData(p->name);
+              bool hasSaved = false;
+              for (int i = 0; i < SLOT_COUNT; i++) if (saved.slots[i].item != EMPTY_ITEM) { hasSaved = true; break; }
+              if (hasSaved) {
+                p->xp = saved.xp;
+                p->mapId = saved.mapId;
+                for (int i = 0; i < SLOT_COUNT; i++) p->slots[i] = saved.slots[i];
+                for (int i = 0; i < SECONDARY_SLOT_COUNT; i++) p->secondary[i] = saved.secondary[i];
+                p->bag = saved.bag;
+                p->nextOracleAt = saved.nextOracleAt;
+                p->nextTradeAt = saved.nextTradeAt;
+              } else {
+                p->slots[0] = Cell{0, 0, 1};
+                p->slots[1] = Cell{0, 0, 1};
+                p->slots[2] = Cell{1, 0, 1};
+                p->slots[3] = Cell{0, 0, 1};
+                p->secondary[0] = Cell{2, 0, 1};
+                p->secondary[1] = Cell{8, 0, 1};
+              }
             }
 
             sim.applyLevel(*p);
