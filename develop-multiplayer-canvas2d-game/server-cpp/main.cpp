@@ -1636,7 +1636,7 @@ public:
         idx = (int)p.bag.size();
         p.bag.push_back(Cell{EMPTY_ITEM, 0, 0});
       }
-      uint16_t put = std::min(999, (uint16_t)left);
+      uint16_t put = (uint16_t)std::min<int>(999, left);
       p.bag[idx] = Cell{item, rarity, put};
       left -= put;
     }
