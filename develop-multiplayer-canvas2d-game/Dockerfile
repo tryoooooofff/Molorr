@@ -30,7 +30,6 @@ RUN apt-get update -qq && apt-get install -y -qq libssl-dev zlib1g-dev ca-certif
 # Next.js standalone output
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
-COPY --from=build /app/public ./public
 
 # Petalia C++ server binary
 COPY --from=build /app/petalia-server /app/petalia-server
