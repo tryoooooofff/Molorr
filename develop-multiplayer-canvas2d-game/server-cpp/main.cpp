@@ -848,11 +848,6 @@ struct Mob {
     damage = def.damage * enemyDamageMult(rarity_);
     speed = def.speed;
   }
-
-  void addDamage(int playerId, float amount) {
-    if (!playerId || amount <= 0) return;
-    damageByPlayer[playerId] += amount;
-  }
 };
 
 struct Projectile {
@@ -980,7 +975,7 @@ struct PerSocket {
 struct CollisionCounter { int n = 0; };
 
 // =====================================================================
-// Wall colliders
+// Wall colliders (from existing code, kept as-is)
 // =====================================================================
 
 // ArrayWallCollider
@@ -1477,138 +1472,6 @@ static Cell readCell(Reader& r) {
 }
 
 // =====================================================================
-// Poison system (DoT) — matches sim.ts PoisonSystem / PoisonManager
-// =====================================================================
-class PoisonSystem {
-public:
-  int owner = 0;
-  float baseDamage = 0;
-  float duration = 5000.f;
-  float initialMultiplier = 1.5f;
-  float stableMultiplier = 0.5f;
-  bool active = true;
-  int64_t startTime = 0;
-  int64_t lastTickTime = 0;
-  int tickInterval = 100;
-  int stackCount = 1;
-  int maxStack = 10;
-  float decayDuration = 0;
-  float stableDuration = 0;
-  float currentDamage = 0;
-  float totalDamageDealt = 0;
-  int tickCount = 0;
-
-  PoisonSystem(int owner_, float baseDamage_, float duration_ = 5000,
-               float initialMultiplier_ = 1.5f, float stableMultiplier_ = 0.5f)
-    : owner(owner_), baseDamage(baseDamage_), duration(duration_),
-      initialMultiplier(initialMultiplier_), stableMultiplier(stableMultiplier_)
-  {
-    startTime = nowMs();
-    lastTickTime = startTime;
-    decayDuration = duration * 0.3f;
-    stableDuration = duration * 0.7f;
-    currentDamage = baseDamage * initialMultiplier;
-  }
-
-  static int64_t nowMs() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::system_clock::now().time_since_epoch()).count();
-  }
-
-  float getCurrentDamage() {
-    float elapsed = (float)(nowMs() - startTime);
-    if (elapsed >= duration) {
-      active = false;
-      currentDamage = 0;
-      return 0;
-    }
-    if (elapsed < decayDuration) {
-      float progress = decayDuration > 0 ? elapsed / decayDuration : 1.f;
-      currentDamage = baseDamage * initialMultiplier * (1 - progress) +
-                      baseDamage * stableMultiplier * progress;
-    } else {
-      currentDamage = baseDamage * stableMultiplier;
-    }
-    return currentDamage;
-  }
-
-  float updateAndTick() {
-    if (!active) return 0;
-    if (nowMs() - lastTickTime >= tickInterval) {
-      float damage = getCurrentDamage();
-      if (damage > 0) {
-        lastTickTime = nowMs();
-        tickCount++;
-        totalDamageDealt += damage;
-        return damage;
-      } else {
-        active = false;
-      }
-    }
-    return 0;
-  }
-
-  bool isActive() {
-    if (!active) return false;
-    return (float)(nowMs() - startTime) < duration;
-  }
-
-  void reset() {
-    startTime = nowMs();
-    lastTickTime = nowMs();
-    active = true;
-    currentDamage = baseDamage * initialMultiplier;
-  }
-
-  void stack(PoisonSystem& newPoison) {
-    if (stackCount >= maxStack) { reset(); return; }
-    stackCount++;
-    baseDamage += newPoison.baseDamage;
-    currentDamage = baseDamage * initialMultiplier;
-    totalDamageDealt += newPoison.totalDamageDealt;
-    reset();
-  }
-};
-
-class Simulation;
-
-class PoisonManager {
-public:
-  std::unordered_map<const void*, PoisonSystem> activePoisons;
-
-  bool applyPoison(const void* target, int owner, float baseDamage,
-                   float duration = 3000.f, float initialMultiplier = 1.2f,
-                   float stableMultiplier = 0.5f, bool canStack = false) {
-    if (!target) return false;
-    PoisonSystem newPoison(owner, baseDamage, duration, initialMultiplier, stableMultiplier);
-    auto it = activePoisons.find(target);
-    if (it != activePoisons.end()) {
-      if (canStack) {
-        it->second.stack(newPoison);
-      } else {
-        if (newPoison.baseDamage > it->second.baseDamage) {
-          it->second = std::move(newPoison);
-        } else {
-          it->second.reset();
-        }
-      }
-    } else {
-      activePoisons.emplace(target, std::move(newPoison));
-    }
-    return true;
-  }
-
-  // Each tick: apply DoT damage to live targets and clean up finished poisons.
-  void updateAll(Simulation* sim);
-
-  void clearPoison(const void* target) {
-    activePoisons.erase(target);
-  }
-
-  int getActiveCount() const { return (int)activePoisons.size(); }
-};
-
-// =====================================================================
 // Simulation class
 // =====================================================================
 class Simulation {
@@ -1622,7 +1485,6 @@ public:
   int nextDropId = 30000;
   float zoneRefillTimer = 0;
   int mobCollisionSkipFrames = 0;
-  PoisonManager poisonManager;
 
   // Per-map worlds
   struct World {
@@ -1638,11 +1500,6 @@ public:
 
   // Client map reference (set externally from main) for event pushing
   std::unordered_map<uint16_t, ClientState*>* clientMap = nullptr;
-
-  static int64_t nowMs() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-      std::chrono::system_clock::now().time_since_epoch()).count();
-  }
 
   Simulation() {
     for (int i = 0; i < MAP_COUNT; i++) {
@@ -1681,7 +1538,6 @@ public:
       if (!p.squadCode.empty()) {
         removePlayerFromSquad(p);
       }
-      poisonManager.clearPoison(&p);
     }
     players.erase(id);
   }
@@ -1692,12 +1548,6 @@ public:
   }
 
   Player* getPlayer(uint16_t id) { return get(id); }
-
-  ClientState* clientOf(uint16_t playerId) {
-    if (!clientMap) return nullptr;
-    auto it = clientMap->find(playerId);
-    return it != clientMap->end() ? it->second : nullptr;
-  }
 
   // ---- Mob lookup helpers (for pet ID-based storage) ----
   Mob* findMobById(int mapId, int mobId) {
@@ -1898,7 +1748,8 @@ public:
     if (item >= (int)ITEMS.size()) return;
     int required = oracleRequiredCount(rarity);
     if (required < 0) return;
-    int64_t now = nowMs();
+    int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
     if (now < p.nextOracleAt) return;
     int have = countOf(p, item, rarity);
     if (have < required) return;
@@ -1913,7 +1764,8 @@ public:
 
   void trade(ClientState& cs, Player& p, uint8_t item, uint8_t rarity, uint16_t requestedCount) {
     if (item >= (int)ITEMS.size()) return;
-    int64_t now = nowMs();
+    int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
     if (now < p.nextTradeAt) return;
     int have = countOf(p, item, rarity);
     int want = requestedCount > 0 ? std::min((int)requestedCount, have) : have;
@@ -1985,7 +1837,7 @@ public:
     std::vector<int> active;
     for (int petId : p.pets[slot]) {
       Mob* pet = findMobById(p.mapId, petId);
-      if (pet && pet->hp > 0 && pet->mapId == p.mapId) active.push_back(petId);
+      if (pet && pet->hp > 0) active.push_back(petId);
       else {
         for (int m = 0; m < MAP_COUNT; m++) {
           removeMobFromWorld(m, petId);
@@ -2078,6 +1930,10 @@ public:
       }
 
       bool cellChanged = old->item != cell.item || old->rarity != cell.rarity;
+
+      if (!cellChanged && !orbits) {
+        continue;
+      }
 
       if (!cellChanged) {
         continue;
@@ -2420,65 +2276,33 @@ public:
     return eligible;
   }
 
-  // Highest Magic Core rarity a player has equipped, or -1 while no magic
-  // core item exists (MAGIC_CORE_ITEM = -1). Matches sim.ts magicCoreRarity().
-  int magicCoreRarity(Player* p) {
-    if (!p || MAGIC_CORE_ITEM < 0) return -1;
-    int best = -1;
-    for (int i = 0; i < SLOT_COUNT; i++) {
-      Cell& cell = p->slots[i];
-      if (cell.item == (uint8_t)MAGIC_CORE_ITEM && cell.rarity > best) best = cell.rarity;
-    }
-    return best;
-  }
-
-  // ---- Mob killed: XP + loot ----
   void onMobKilled(Mob& mob, int mapId) {
     if (mob.friendly) return;
     const MobDef& def = MOBS[mob.type];
     World& world = worlds[mapId];
 
     // XP and kill event for last hitter
-    ClientState* killerCs = mob.lastHitBy ? clientOf((uint16_t)mob.lastHitBy) : nullptr;
-    Player* killer = killerCs ? killerCs->player : nullptr;
-    if (killer) {
-      int xp = std::round(def.xp * (1 + mob.rarity * 0.9f));
-      killer->xp += xp;
-      applyLevel(*killer);
-      killer->statsDirty = true;
-      pushEvent(*killerCs, EVT_XP, mob.x, mob.y, xp);
-      pushEvent(*killerCs, EVT_KILL, mob.x, mob.y, mob.type, EMPTY_ITEM, (uint8_t)mob.rarity);
-    }
-
-    // Ultra+ rarity kill announcement in chat
-    int ultraIndex = 0;
-    for (int i = 0; i < (int)RARITIES.size(); i++) {
-      if (RARITIES[i].name == "Ultra") { ultraIndex = i; break; }
-    }
-    if (mob.rarity >= ultraIndex && ultraIndex >= 0) {
-      float maxDamage = 0;
-      int topPlayerId = 0;
-      for (auto& [pid, dmg] : mob.damageByPlayer) {
-        if (dmg > maxDamage) { maxDamage = dmg; topPlayerId = pid; }
-      }
-      if (topPlayerId > 0) {
-        ClientState* topCs = clientOf((uint16_t)topPlayerId);
-        Player* topPlayer = topCs ? topCs->player : nullptr;
-        if (topPlayer) {
-          float damagePercent = std::min(1.0f, maxDamage / std::max(1.f, mob.maxHp));
-          const std::string& mobRarityName = RARITIES[std::max(0, std::min(MAX_RARITY, mob.rarity))].name;
-          char msg[256];
-          snprintf(msg, sizeof(msg), "a %s %s has been defeated by %s with %.2f%% damage!",
-                   mobRarityName.c_str(), def.name.c_str(), topPlayer->name.c_str(), damagePercent * 100.f);
+    if (mob.lastHitBy) {
+      Player* killer = get(mob.lastHitBy);
+      if (killer) {
+        int xp = std::round(def.xp * (1 + mob.rarity * 0.9f));
+        killer->xp += xp;
+        applyLevel(*killer);
+        killer->statsDirty = true;
+        // Push XP event to killer's client
+        if (clientMap) {
           for (auto& [csId, cs] : *clientMap) {
-            if (cs->player && cs->player->mapId == mapId) {
-              sendChat(*cs, msg, "System", true, false);
+            if (cs->player == killer) {
+              pushEvent(*cs, EVT_XP, mob.x, mob.y, xp);
+              pushEvent(*cs, EVT_KILL, mob.x, mob.y, mob.type);
+              break;
             }
           }
         }
       }
     }
 
+    // Drop loot
     if (world.drops.size() >= (size_t)MAX_DROPPED_CARDS) {
       world.drops.erase(world.drops.begin(), world.drops.begin() + DROP_TRIM_COUNT);
     }
@@ -2486,43 +2310,35 @@ public:
     if (eligible.empty()) return;
 
     for (int looterId : eligible) {
-      Player* looter = get((uint16_t)looterId);
+      Player* looter = get(looterId);
       if (!looter) continue;
 
-      // Drop multiplier from daily bonus (ceil to int roll count)
+      // Calculate how many times to roll each drop based on bonus multiplier
       int totalRolls = 1;
-      if (looter->bonusEndsAt > 0 && nowMs() < looter->bonusEndsAt) {
+      if (looter->bonusEndsAt > 0 && (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch()).count() < looter->bonusEndsAt) {
         totalRolls = (int)std::ceil(looter->bonusMultiplier);
       }
-      // Magic Core hook (matches sim.ts): inert while MAGIC_CORE_ITEM < 0.
-      // MAGIC_ITEM_MAP is empty until magic items ship, so no item upgrade
-      // happens — the branch is kept for structural parity.
-      int looterCoreRarity = magicCoreRarity(looter);
 
-      // Every loot-table entry drops on every kill; card rarity comes only
-      // from RARITY_DROP_RATES[mob rarity] (drop.chance is legacy, unused).
-      struct Roll { uint8_t item; uint8_t rarity; int dropNum; };
-      std::vector<Roll> rolled;
+      std::vector<std::pair<uint8_t, uint8_t>> rolled;
       for (auto& drop : def.drops) {
+        float roll = (float)rand() / (float)RAND_MAX;
+        if (roll > drop.second) continue; // check drop chance
+
         for (int i = 0; i < totalRolls; i++) {
-          uint8_t item = (uint8_t)drop.first;
+          // Roll drop rarity using RARITY_DROP_RATES table (matches sim.ts exactly)
           uint8_t rarity = (uint8_t)getDropRarityByItem(mob.rarity);
-          if (looterCoreRarity >= 0) {
-            // MAGIC_ITEM_MAP[drop.item] lookup goes here when magic items
-            // are added; see sim.txt onMobKilled (magic upgrade branch).
-          }
-          rolled.push_back({item, rarity, i});
+          rolled.push_back({(uint8_t)drop.first, rarity});
         }
       }
 
       for (auto& roll : rolled) {
         float angle = (float)rand() / (float)RAND_MAX * (float)M_PI * 2;
-        float distance = ((float)rand() / (float)RAND_MAX * 20 + 10) * (1 + roll.dropNum * 0.5f);
+        float distance = ((float)rand() / (float)RAND_MAX * 20 + 10) * (1 + roll.second * 0.5f);
         float x = mob.x + std::cos(angle) * distance;
         float y = mob.y + std::sin(angle) * distance;
-        // Private drop: only this looter can see and loot it.
         std::unordered_set<int> allowSet = {looterId};
-        spawnDrop(mapId, roll.item, roll.rarity, x, y, looterId, allowSet);
+        spawnDrop(mapId, roll.first, roll.second, x, y, looterId, allowSet);
       }
     }
   }
@@ -2569,8 +2385,6 @@ public:
       }
       p.pets[i].clear();
     }
-    // Clear any residual poison on the player
-    poisonManager.clearPoison(&p);
     // Push EVT_DEATH event
     if (clientMap) {
       for (auto& [csId, cs] : *clientMap) {
@@ -2627,9 +2441,6 @@ public:
 
     // Update projectiles
     for (int m = 0; m < MAP_COUNT; m++) updateProjectiles(m, dt, activePlayers);
-
-    // Poison system: tick all active DoTs
-    poisonManager.updateAll(this);
   }
 
   // ---- Player update ----
@@ -2796,55 +2607,10 @@ public:
     }
   }
 
-  // ---- Spatial-grid helpers for petal targeting (matches sim.ts) ----
-  std::vector<Mob*> getNearbyHostilesOptimized(Player& p, World& world, float viewRadiusSq) {
-    const float CELL = MOB_WALL_CELL_SIZE;
-    std::vector<Mob*> result;
-    int minX = (int)std::floor((p.x - std::sqrt(viewRadiusSq)) / CELL);
-    int maxX = (int)std::floor((p.x + std::sqrt(viewRadiusSq)) / CELL);
-    int minY = (int)std::floor((p.y - std::sqrt(viewRadiusSq)) / CELL);
-    int maxY = (int)std::floor((p.y + std::sqrt(viewRadiusSq)) / CELL);
-
-    std::unordered_map<int64_t, std::vector<Mob*>> grid;
-    for (auto& mob : world.mobs) {
-      if (mob.friendly) continue;
-      int64_t k = ((int64_t)((int)std::floor(mob.x / CELL))) * 100000 + (int)std::floor(mob.y / CELL);
-      grid[k].push_back(&mob);
-    }
-
-    for (int gx = minX; gx <= maxX; gx++) {
-      for (int gy = minY; gy <= maxY; gy++) {
-        auto it = grid.find((int64_t)gx * 100000 + gy);
-        if (it == grid.end()) continue;
-        for (auto* mob : it->second) {
-          float dx = mob->x - p.x;
-          float dy = mob->y - p.y;
-          if (dx * dx + dy * dy < viewRadiusSq) result.push_back(mob);
-        }
-      }
-    }
-    return result;
-  }
-
-  std::vector<Mob*> getMobsInRadius(float x, float y, float radius, std::vector<Mob*>& candidates) {
-    float radiusSq = radius * radius;
-    std::vector<Mob*> result;
-    for (auto* mob : candidates) {
-      float dx = mob->x - x;
-      float dy = mob->y - y;
-      if (dx * dx + dy * dy < radiusSq) result.push_back(mob);
-    }
-    return result;
-  }
-
-  // ---- Petal update (throttled targeting + spatial grid, matches sim.ts) ----
+  // ---- Petal update ----
   void updatePetals(Player& p, float dt) {
     if (!p.alive) return;
     World& world = worlds[p.mapId];
-
-    // View-space filtered hostile mobs (spatial grid, O(1) per petal lookups)
-    float viewSq = VIEW_RADIUS * VIEW_RADIUS;
-    std::vector<Mob*> nearbyHostiles = getNearbyHostilesOptimized(p, world, viewSq);
 
     int liveCount = 0;
     for (int i = 0; i < SLOT_COUNT; i++) {
@@ -2921,8 +2687,6 @@ public:
             float amount = std::min(missing, (def.heal > 0 ? def.heal : def.shield) * rarityMult(cell.rarity));
             if (def.heal > 0) p.hp += amount; else p.shield += amount;
             p.statsDirty = true;
-            ClientState* owner = clientOf(p.id);
-            if (owner) pushEvent(*owner, EVT_HEAL, p.x, p.y, (int)std::round(amount), cell.item, cell.rarity);
             st.alive = false; st.hp = 0; st.timer = applyTalentReload(p, def.reload);
           }
           continue;
@@ -2952,101 +2716,47 @@ public:
         }
       }
 
-      // Combat radius (Moon x4 — matches the snapshot visual radius)
-      bool isMoonRadius = def.name == "Moon";
-      float pr = def.radius * (1 + cell.rarity * 0.06f) * (isMoonRadius ? 4 : 1);
-      float dmg = def.damage * rarityMult(cell.rarity) * p.talentBonuses.petalDmgMult;
-      Mob* targetMob = nullptr;
-      float targetDist = 1e30f;
-      float totalIncoming = 0;
-
-      // Throttled target search: only every 2-3 frames
-      st.targetCheckTimer--;
-      if (st.targetCheckTimer <= 0) {
-        st.targetCheckTimer = 2 + ((float)rand() / (float)RAND_MAX * 2);
-        st.targetId = 0;
-
-        float searchRadius = pr + 200;
-        std::vector<Mob*> nearbyMobs = getMobsInRadius(st.x, st.y, searchRadius, nearbyHostiles);
-
-        for (auto* mob : nearbyMobs) {
-          if (mob->friendly) continue;
+      // Petal-to-mob collision damage
+      if (st.hitCd <= 0 && !isSummon) {
+        float pr = def.radius * (1 + cell.rarity * 0.06f);
+        for (auto& mob : world.mobs) {
+          if (mob.friendly) continue;
+          if (mob.hp <= 0) continue;
           collisionCounter.n++;
-          float dx = mob->x - st.x;
-          float dy = mob->y - st.y;
-          float rSum = mob->radius + pr;
-          if (dx * dx + dy * dy >= rSum * rSum) continue;
-          float d = std::hypot(dx, dy);
-          totalIncoming += mob->damage * 0.5f;
-          if (d < targetDist) { targetDist = d; targetMob = mob; }
-        }
-        if (targetMob) st.targetId = targetMob->id;
-      } else {
-        // Non-search frame: reuse cached target
-        if (st.targetId != 0) {
-          Mob* cached = findMobById(p.mapId, st.targetId);
-          if (cached && cached->hp > 0) {
-            targetMob = cached;
-            targetDist = std::hypot(targetMob->x - st.x, targetMob->y - st.y);
-            if (targetDist > pr + 400) { targetMob = nullptr; st.targetId = 0; }
-          } else {
-            st.targetId = 0;
+          float dx = mob.x - st.x, dy = mob.y - st.y;
+          float rSum = mob.radius + pr;
+          if (dx * dx + dy * dy < rSum * rSum) {
+            float d = std::hypot(dx, dy);
+            if (d < 0.001f) continue;
+            float dmg = def.damage * rarityMult(cell.rarity) * p.talentBonuses.petalDmgMult;
+            mob.hp -= dmg;
+            mob.lastHitBy = p.id;
+            mob.damageByPlayer[p.id] += dmg;
+            mob.targetId = p.id;
+            st.hp -= mob.damage * 0.5f;
+            st.hitCd = 0.03f;
+            // Knockback
+            float kb = 90.f / (mob.radius / 20.f);
+            mob.vx += ((mob.x - st.x) / d) * kb;
+            mob.vy += ((mob.y - st.y) / d) * kb;
+            if (st.hp <= 0) {
+              st.alive = false;
+              st.timer = applyTalentReload(p, def.reload);
+            }
+            break;
           }
-        }
-        // Still need incoming damage for petal self-damage
-        float searchRadius = pr + 200;
-        std::vector<Mob*> nearbyMobs = getMobsInRadius(st.x, st.y, searchRadius, nearbyHostiles);
-        for (auto* mob : nearbyMobs) {
-          if (mob->friendly) continue;
-          float dx = mob->x - st.x;
-          float dy = mob->y - st.y;
-          float rSum = mob->radius + pr;
-          if (dx * dx + dy * dy >= rSum * rSum) continue;
-          totalIncoming += mob->damage * 0.5f;
-        }
-      }
-
-      // ---- Missile petal (id 52): fires a projectile toward its orbit angle ----
-      if (cell.item == MISSILE_ITEM && (p.flags & 1) != 0) {
-        float missileAngle = std::atan2(st.y - p.y, st.x - p.x);
-        float muzzleX = st.x + std::cos(missileAngle) * (pr + 6);
-        float muzzleY = st.y + std::sin(missileAngle) * (pr + 6);
-        fireProjectile(p.mapId, muzzleX, muzzleY, missileAngle, MISSILE_SPEED, dmg * 0.3f,
-                       TEAM_FRIENDLY, p.id, cell.item, cell.rarity, 10);
-        st.alive = false;
-        st.hp = 0;
-        st.timer = applyTalentReload(p, def.reload);
-        continue;
-      }
-
-      if (targetMob && st.hitCd <= 0) {
-        targetMob->hp -= dmg;
-        targetMob->lastHitBy = p.id;
-        targetMob->targetId = p.id;
-        targetMob->addDamage(p.id, dmg);
-        st.hp -= totalIncoming;
-        st.hitCd = 0.03f;
-        float kb = 90.f / (targetMob->radius / 20.f);
-        float dd = targetDist > 0 ? targetDist : 1;
-        targetMob->vx += ((targetMob->x - st.x) / dd) * kb;
-        targetMob->vy += ((targetMob->y - st.y) / dd) * kb;
-        if (st.hp <= 0) {
-          st.alive = false;
-          st.timer = applyTalentReload(p, def.reload);
-          st.specialTimer = 0;
-          st.absorbTimer = 0;
-          if (isSummon) despawnPets(p, i);
         }
       }
     }
   }
 
-  // ---- World update (spatial grid + collision throttling, matches sim.ts) ----
+  // ---- World update ----
   void updateWorld(int mapId, float dt, std::vector<Player*>& allPlayers) {
     const MapDef& map = MAPS[mapId];
     auto* collider = wallColliders_[mapId].get();
     World& world = worlds[mapId];
     auto& mobs = world.mobs;
+    auto& proj = world.projectiles;
 
     std::vector<Player*> here;
     for (auto* p : allPlayers) {
@@ -3064,28 +2774,6 @@ public:
     // Dormant system
     float viewRadius = VIEW_RADIUS;
     float viewRadiusSq = viewRadius * viewRadius;
-
-    // ===== Spatial grid for mobs (250px cells; used for mob-to-mob collision) =====
-    constexpr float MOB_CELL_SIZE = MOB_WALL_CELL_SIZE;
-    std::unordered_map<int64_t, std::vector<Mob*>> mobGrid;
-    auto gridKey = [](float x, float y) -> int64_t {
-      return (int64_t)((int)std::floor(x / MOB_CELL_SIZE)) * 100000 + (int)std::floor(y / MOB_CELL_SIZE);
-    };
-    for (auto& mob : mobs) {
-      mobGrid[gridKey(mob.x, mob.y)].push_back(&mob);
-    }
-    auto getNearby = [&](float x, float y) -> std::vector<Mob*> {
-      int cx = (int)std::floor(x / MOB_CELL_SIZE);
-      int cy = (int)std::floor(y / MOB_CELL_SIZE);
-      std::vector<Mob*> r;
-      for (int dx = -1; dx <= 1; dx++) {
-        for (int dy = -1; dy <= 1; dy++) {
-          auto it = mobGrid.find((int64_t)(cx + dx) * 100000 + (cy + dy));
-          if (it != mobGrid.end()) r.insert(r.end(), it->second.begin(), it->second.end());
-        }
-      }
-      return r;
-    };
 
     // Move out-of-view mobs to dormant
     std::vector<DormantMob> toDormant;
@@ -3150,10 +2838,6 @@ public:
       }
     }
 
-    // Global collision throttle: skip mob collisions for the next few frames
-    // when the previous tick exceeded the overload threshold.
-    bool skipThisFrame = mobCollisionSkipFrames > 0;
-
     for (int i = (int)mobs.size() - 1; i >= 0; i--) {
       Mob& mob = mobs[i];
       mob.hitCd = std::max(0.f, mob.hitCd - dt);
@@ -3164,17 +2848,10 @@ public:
       bool inPlayerRegion = playerRegionKeys.count(mobRegionKey) > 0;
 
       if (!inPlayerRegion) {
-        // Basic movement only — but still wall-collide + death-clean every frame.
+        // Basic movement only
         if (mob.speed > 0) {
           mob.vx *= 0.98f;
           mob.vy *= 0.98f;
-        }
-        if (mob.speed > 0 && mob.targetId != 0) {
-          mob.vx += ((std::cos(mob.angle) * mob.speed * 0.3f - mob.vx)) * std::min(1.f, dt * 1.5f);
-          mob.vy += ((std::sin(mob.angle) * mob.speed * 0.3f - mob.vy)) * std::min(1.f, dt * 1.5f);
-        } else if (mob.speed > 0) {
-          mob.vx *= 0.95f;
-          mob.vy *= 0.95f;
         } else {
           mob.vx *= 0.9f;
           mob.vy *= 0.9f;
@@ -3183,13 +2860,11 @@ public:
         mob.y += mob.vy * dt;
         mob.x = clampf(mob.x, mob.radius, map.width - mob.radius);
         mob.y = clampf(mob.y, mob.radius, map.height - mob.radius);
-        auto [wx, wy] = collider->collideCircle(mob.x, mob.y, mob.radius, &collisionCounter, MOB_WALL_INFLATE);
-        mob.x = wx; mob.y = wy;
         if (mob.hp <= 0) {
           if (!mob.friendly) decZoneCount(mapId, zoneAt(mapId, mob.x, mob.y));
           mobs.erase(mobs.begin() + i);
           if (mob.friendly && mob.ownerSlot >= 0) {
-            auto owner = get((uint16_t)mob.ownerId);
+            auto owner = get(mob.ownerId);
             if (owner) {
               auto& ownerPets = owner->pets[mob.ownerSlot];
               ownerPets.erase(std::remove(ownerPets.begin(), ownerPets.end(), mob.id), ownerPets.end());
@@ -3199,7 +2874,7 @@ public:
         continue;
       }
 
-      // ---- Target finding (throttled to MOB_THINK_INTERVAL) ----
+      // ---- Target finding ----
       struct TargetInfo { float x, y; int id; };
       TargetInfo* target = nullptr;
       TargetInfo targetStorage;
@@ -3216,7 +2891,7 @@ public:
               if (d < 520 && d < best) { best = d; targetStorage = {other.x, other.y, other.id}; target = &targetStorage; }
             }
           }
-          auto owner = get((uint16_t)mob.ownerId);
+          auto owner = get(mob.ownerId);
           if (owner) {
             float od = std::hypot(owner->x - mob.x, owner->y - mob.y);
             if (!target || od > 260) { targetStorage = {owner->x, owner->y, owner->id}; target = &targetStorage; }
@@ -3252,7 +2927,7 @@ public:
               }
             }
             if (!found) {
-              auto owner = get((uint16_t)mob.ownerId);
+              auto owner = get(mob.ownerId);
               if (owner) { targetStorage = {owner->x, owner->y, owner->id}; target = &targetStorage; }
               else mob.targetId = 0;
             }
@@ -3301,17 +2976,91 @@ public:
       mob.x = clampf(mob.x, mob.radius, map.width - mob.radius);
       mob.y = clampf(mob.y, mob.radius, map.height - mob.radius);
 
-      // ---- Wall collision (array AABB, wall inflate +10px) ----
+      // ---- Wall collision ----
       auto [wallX, wallY] = collider->collideCircle(mob.x, mob.y, mob.radius, &collisionCounter, MOB_WALL_INFLATE);
-      float stuckThreshold = std::max(PUSH_OUT_THRESHOLD, mob.radius * 0.5f);
-      bool stuck = std::abs(wallX - mob.x) >= stuckThreshold || std::abs(wallY - mob.y) >= stuckThreshold;
-      if (stuck && mob.pushOutCooldown <= 0) {
-        mob.pushOutCooldown = 0.8f;
-        pushOutOfWall(mob, mapId);
+      if (std::abs(wallX - mob.x) >= PUSH_OUT_THRESHOLD || std::abs(wallY - mob.y) >= PUSH_OUT_THRESHOLD) {
+        if (mob.pushOutCooldown <= 0) {
+          mob.pushOutCooldown = 0.8f;
+          pushOutOfWall(mob, mapId);
+        }
       } else {
         mob.x = wallX; mob.y = wallY;
       }
       mob.pushOutCooldown = std::max(0.f, mob.pushOutCooldown - dt);
+
+      // ---- Mob-to-mob collision ----
+      bool isStationary = mob.speed <= 0;
+      if (!isStationary) {
+        mob.collisionTimer -= dt;
+        if (mob.collisionTimer <= 0) {
+          float interval = mob.speed <= MOB_COLLISION_SLOW_SPEED ? MOB_COLLISION_SLOW_INTERVAL : MOB_COLLISION_FAST_INTERVAL;
+          mob.collisionTimer = interval + (float)(rand() % 20) / 1000.f;
+          for (auto& other : mobs) {
+            if (&other == &mob) continue;
+            collisionCounter.n++;
+            float dx = mob.x - other.x, dy = mob.y - other.y;
+            float d = std::hypot(dx, dy);
+            float minDist = mob.radius + other.radius;
+            if (d < minDist && d > 0.001f) {
+              float push = (minDist - d) * 0.4f;
+              mob.x += (dx / d) * push;
+              mob.y += (dy / d) * push;
+              if (mob.friendly != other.friendly && mob.hitCd <= 0) {
+                auto& attacker = mob.friendly ? mob : other;
+                auto& victim = mob.friendly ? other : mob;
+                if (victim.spawnProtection <= 0) {
+                  float dmg = attacker.damage * 0.6f;
+                  victim.hp -= dmg;
+                  victim.lastHitBy = attacker.ownerId;
+                  victim.damageByPlayer[attacker.ownerId] += dmg;
+                }
+                mob.hitCd = 0.1f;
+                other.hitCd = 0.1f;
+              }
+            }
+          }
+        }
+      }
+
+      // ---- Mob-to-player collision ----
+      if (!mob.friendly) {
+        for (auto* p : here) {
+          collisionCounter.n++;
+          float d = std::hypot(p->x - mob.x, p->y - mob.y);
+          float pRadius = PLAYER_RADIUS + soilRadiusBonusOf(*p);
+          if (d < mob.radius + pRadius) {
+            float push = (mob.radius + pRadius - d) * 0.5f;
+            float ux = (p->x - mob.x) / (d > 0.001f ? d : 1);
+            float uy = (p->y - mob.y) / (d > 0.001f ? d : 1);
+            p->x += ux * push;
+            p->y += uy * push;
+            mob.x -= ux * push * 0.4f;
+            mob.y -= uy * push * 0.4f;
+
+            if (p->hurtCd <= 0) {
+              float dmg = mob.damage;
+              if (p->shield > 0 && dmg > 0) {
+                float absorbed = std::min(p->shield * 2.f, dmg);
+                p->shield -= absorbed / 2.f;
+                dmg -= absorbed;
+              }
+              p->hp -= dmg;
+              p->hurtCd = 0.1f;
+              p->statsDirty = true;
+              if (p->hp <= 0) killPlayer(*p);
+            }
+
+            // Player body-contact damage to mob
+            if (mob.hitCd <= 0 && mob.hp > 0 && p->bodyDamage > 0) {
+              float bodyDmg = std::max(1.f, p->bodyDamage * p->talentBonuses.bodyDamageMult);
+              mob.hp -= bodyDmg;
+              mob.lastHitBy = p->id;
+              mob.damageByPlayer[p->id] += bodyDmg;
+              mob.hitCd = 0.1f;
+            }
+          }
+        }
+      }
 
       // ---- Hornet missile ----
       if (mob.type == 16 && target && !mob.friendly) {
@@ -3331,7 +3080,7 @@ public:
         }
       }
 
-      // ---- Scorpion projectile (piercing poison needle) ----
+      // ---- Scorpion projectile ----
       if (mob.type == SCORPION_TYPE && target && !mob.friendly) {
         mob.missileTimer -= dt;
         if (mob.missileTimer <= 0) {
@@ -3351,127 +3100,20 @@ public:
         }
       }
 
-      // ---- Mob-to-mob collision (throttled by speed; spatial grid nearby) ----
-      // Stationary mobs (speed === 0, e.g. nests) skip mob-to-mob entirely.
-      // Slow mobs check every 0.1s, fast mobs every frame. Global overload
-      // throttle skips this whole block for MOB_COLLISION_OVERLOAD_SKIP frames.
-      bool isStationary = mob.speed <= 0;
-      float interval = mob.speed <= MOB_COLLISION_SLOW_SPEED
-        ? MOB_COLLISION_SLOW_INTERVAL
-        : MOB_COLLISION_FAST_INTERVAL;
-      mob.collisionTimer -= dt;
-      bool mobReady = mob.collisionTimer <= 0;
-
-      if (!isStationary) {
-        if (!skipThisFrame && mobReady) {
-          mob.collisionTimer = interval + ((float)rand() / (float)RAND_MAX) * 0.02f;
-
-          std::vector<Mob*> nearby = getNearby(mob.x, mob.y);
-          for (auto* other : nearby) {
-            if (other == &mob) continue;
-            collisionCounter.n++;
-            float dx = mob.x - other->x, dy = mob.y - other->y;
-            float d = std::hypot(dx, dy);
-            float min = mob.radius + other->radius;
-            if (d < min && d > 0.001f) {
-              float push = (min - d) * 0.4f;
-              mob.x += (dx / d) * push;
-              mob.y += (dy / d) * push;
-
-              // Hostile-friend contact damage (reciprocal)
-              if (mob.friendly != other->friendly && mob.hitCd <= 0) {
-                Mob& attacker = mob.friendly ? mob : *other;
-                Mob& victim = mob.friendly ? *other : mob;
-                if (victim.spawnProtection <= 0) {
-                  float dmg = attacker.damage * 0.6f;
-                  victim.hp -= dmg;
-                  victim.lastHitBy = attacker.ownerId;
-                  if (!victim.friendly && attacker.friendly && attacker.ownerId) {
-                    victim.addDamage(attacker.ownerId, dmg);
-                  }
-                }
-                if (attacker.spawnProtection <= 0) {
-                  attacker.hp -= victim.damage * 0.3f;
-                }
-                mob.hitCd = 0.1f;
-                other->hitCd = 0.1f;
-              }
-            }
-          }
-        }
-      }
-
-      // ---- Mob-to-player collision ----
-      if (!mob.friendly) {
-        // Stationary mobs always collide with players; slow/fast mobs follow
-        // the same throttled cadence. Global overload skip applies too.
-        bool playerCollisionReady = isStationary ? true : mobReady;
-        if (!(isStationary == false && skipThisFrame) && playerCollisionReady) {
-          for (auto* p : here) {
-            collisionCounter.n++;
-            float d = std::hypot(p->x - mob.x, p->y - mob.y);
-            float pRadius = PLAYER_RADIUS + soilRadiusBonusOf(*p);
-            if (d < mob.radius + pRadius) {
-              float push = (mob.radius + pRadius - d) * 0.5f;
-              float ux = (p->x - mob.x) / (d > 0.001f ? d : 1);
-              float uy = (p->y - mob.y) / (d > 0.001f ? d : 1);
-              p->x += ux * push;
-              p->y += uy * push;
-              mob.x -= ux * push * 0.4f;
-              mob.y -= uy * push * 0.4f;
-
-              if (p->hurtCd <= 0) {
-                float dmg = mob.damage;
-                if (p->shield > 0 && dmg > 0) {
-                  float absorbed = std::min(p->shield * 2.f, dmg);
-                  p->shield -= absorbed / 2.f;
-                  dmg -= absorbed;
-                }
-                p->hp -= dmg;
-                p->hurtCd = 0.1f;
-                p->statsDirty = true;
-                ClientState* c = clientOf(p->id);
-                if (c) pushEvent(*c, EVT_HIT, p->x, p->y, (int)std::round(mob.damage));
-                if (p->hp <= 0) killPlayer(*p);
-              }
-
-              // Player body-contact damage to mob
-              if (mob.hitCd <= 0 && mob.hp > 0 && p->bodyDamage > 0) {
-                float bodyDmg = std::max(1.f, std::round(p->bodyDamage * p->talentBonuses.bodyDamageMult));
-                mob.hp -= bodyDmg;
-                mob.lastHitBy = p->id;
-                mob.addDamage(p->id, bodyDmg);
-                mob.hitCd = 0.1f;
-                if (mob.hp <= 0) onMobKilled(mob, mapId);
-              }
-            }
-          }
-        }
-      }
-
-      // ---- Spawner logic (12-try wall-checked placement) ----
+      // ---- Spawner logic ----
       if (!mob.friendly) {
         const MobDef& mobDef = MOBS[mob.type];
         if (mobDef.isSpawner) {
-          float hpPct = mob.maxHp > 0 ? mob.hp / mob.maxHp : 0;
+          float hpPct = mob.hp / mob.maxHp;
           for (float threshold : mobDef.spawnThresholds) {
             if (hpPct <= threshold && !mob.spawnedThresholds.count(threshold)) {
               mob.spawnedThresholds.insert(threshold);
               for (int spawnId : mobDef.spawnMobIds) {
                 const MobDef& spawnDef = MOBS[spawnId];
-                float sx = mob.x, sy = mob.y;
-                bool placed = false;
-                for (int tries = 0; tries < 12; tries++) {
-                  float angle = (float)rand() / (float)RAND_MAX * (float)M_PI * 2;
-                  float dist = mob.radius + spawnDef.radius + 12 + (float)rand() / (float)RAND_MAX * 28;
-                  float tx = clampf(mob.x + std::cos(angle) * dist, spawnDef.radius + 4, map.width - spawnDef.radius - 4);
-                  float ty = clampf(mob.y + std::sin(angle) * dist, spawnDef.radius + 4, map.height - spawnDef.radius - 4);
-                  auto [rx, ry] = collider->collideCircle(tx, ty, spawnDef.radius + 4, &collisionCounter, MOB_WALL_INFLATE);
-                  if (std::abs(rx - tx) < 0.01f && std::abs(ry - ty) < 0.01f) {
-                    sx = tx; sy = ty; placed = true; break;
-                  }
-                  sx = rx; sy = ry;
-                }
+                float angle = (float)rand() / (float)RAND_MAX * (float)M_PI * 2;
+                float dist = mob.radius + spawnDef.radius + 12 + (float)rand() / (float)RAND_MAX * 28;
+                float sx = clampf(mob.x + std::cos(angle) * dist, spawnDef.radius + 4, map.width - spawnDef.radius - 4);
+                float sy = clampf(mob.y + std::sin(angle) * dist, spawnDef.radius + 4, map.height - spawnDef.radius - 4);
                 mobs.push_back(Mob(nextMobId++, spawnId, mapId, sx, sy, mob.rarity));
               }
             }
@@ -3484,7 +3126,7 @@ public:
         if (!mob.friendly) decZoneCount(mapId, zoneAt(mapId, mob.x, mob.y));
         mobs.erase(mobs.begin() + i);
         if (mob.friendly) {
-          auto owner = get((uint16_t)mob.ownerId);
+          auto owner = get(mob.ownerId);
           if (owner && mob.ownerSlot >= 0) {
             auto& ownerPets = owner->pets[mob.ownerSlot];
             ownerPets.erase(std::remove(ownerPets.begin(), ownerPets.end(), mob.id), ownerPets.end());
@@ -3494,13 +3136,6 @@ public:
         onMobKilled(mob, mapId);
         continue;
       }
-    }
-
-    // ---- Global collision pressure throttle ----
-    if (collisionCounter.n > MOB_COLLISION_OVERLOAD_THRESHOLD) {
-      mobCollisionSkipFrames = MOB_COLLISION_OVERLOAD_SKIP;
-    } else if (mobCollisionSkipFrames > 0) {
-      mobCollisionSkipFrames--;
     }
 
     // ---- Drop updates ----
@@ -3513,7 +3148,7 @@ public:
     }
   }
 
-  // ---- Pickup drops (per-item LOOT event, matches sim.ts) ----
+  // ---- Pickup drops ----
   void pickupDrops(Player& p, float dt) {
     if (!p.alive) return;
     World& world = worlds[p.mapId];
@@ -3540,8 +3175,7 @@ public:
         if (dist < 20 || d.suctionTimer <= dt) {
           if (addItem(p, d.item, d.rarity, d.count)) {
             world.drops.erase(world.drops.begin() + i);
-            ClientState* c = clientOf(p.id);
-            if (c) pushEvent(*c, EVT_LOOT, p.x, p.y - (looted++ % 3) * 18, 0, d.item, d.rarity);
+            looted++;
           }
           continue;
         }
@@ -3553,8 +3187,17 @@ public:
       if (dist < 50) {
         if (addItem(p, d.item, d.rarity, d.count)) {
           world.drops.erase(world.drops.begin() + i);
-          ClientState* c = clientOf(p.id);
-          if (c) pushEvent(*c, EVT_LOOT, d.x, d.y - (looted++ % 3) * 18, 0, d.item, d.rarity);
+          looted++;
+        }
+      }
+    }
+
+    // Push EVT_LOOT event if anything was picked up
+    if (looted > 0 && clientMap) {
+      for (auto& [csId, cs] : *clientMap) {
+        if (cs->player == &p) {
+          pushEvent(*cs, EVT_LOOT, p.x, p.y, looted);
+          break;
         }
       }
     }
@@ -3577,7 +3220,7 @@ public:
     return total;
   }
 
-  // ---- Projectile update (petal block, repulsion, poison; matches sim.ts) ----
+  // ---- Projectile update ----
   void updateProjectiles(int mapId, float dt, std::vector<Player*>& players) {
     auto& proj = worlds[mapId].projectiles;
     const MapDef& map = MAPS[mapId];
@@ -3614,72 +3257,11 @@ public:
         proj.erase(proj.begin() + i); continue;
       }
 
-      // Repulsion from opposite-team entities (soft push so projectiles
-      // slide around targets instead of overlapping them).
+      // Hit detection
       if (p.team == TEAM_HOSTILE) {
-        for (auto* pl : players) {
-          if (pl->mapId != mapId || !pl->alive) continue;
-          float dx = p.x - pl->x;
-          float dy = p.y - pl->y;
-          float d = std::hypot(dx, dy);
-          float plRadius = PLAYER_RADIUS + soilRadiusBonusOf(*pl);
-          float minDist = p.radius + plRadius;
-          if (d < minDist && d > 0.001f) {
-            float push = (minDist - d) * 0.3f;
-            p.x += (dx / d) * push;
-            p.y += (dy / d) * push;
-          }
-        }
-      } else {
-        for (auto& mob : mobs) {
-          if (mob.friendly || mob.hp <= 0) continue;
-          float dx = p.x - mob.x;
-          float dy = p.y - mob.y;
-          float d = std::hypot(dx, dy);
-          float minDist = p.radius + mob.radius;
-          if (d < minDist && d > 0.001f) {
-            float push = (minDist - d) * 0.3f;
-            p.x += (dx / d) * push;
-            p.y += (dy / d) * push;
-          }
-        }
-      }
-
-      // ---- Hit detection ----
-      if (p.team == TEAM_HOSTILE) {
-        bool hitAny = false;
+        // Hit players
         for (auto* pl : players) {
           if (pl->mapId != mapId || !pl->alive || p.hitCd > 0) continue;
-          // Petal shield block: alive petals absorb hostile projectiles.
-          bool blocked = false;
-          for (int pi = 0; pi < SLOT_COUNT; pi++) {
-            PetalState& petal = pl->petals[pi];
-            Cell& pcell = pl->slots[pi];
-            if (pcell.item == EMPTY_ITEM || !petal.alive || petal.hp <= 0) continue;
-            const ItemDef* petalDef = &ITEMS[pcell.item];
-            bool isMoon = petalDef->name == "Moon";
-            float petalRadius = petalDef->radius * (1 + petal.rarity * 0.06f) * (isMoon ? 4 : 1);
-            float pd = std::hypot(petal.x - p.x, petal.y - p.y);
-            if (pd < petalRadius + p.radius) {
-              petal.hp -= p.damage;
-              petal.hitCd = 0.01f;
-              p.hitCd = PROJECTILE_HIT_CD;
-              if (petal.hp <= 0) {
-                petal.alive = false;
-                petal.hp = 0;
-                petal.timer = petalDef->reload; // matches sim.ts: reload ?? 1 (0 = instant respawn)
-              }
-              hitAny = true;
-              blocked = true;
-              if (!p.isPiercing) { p.hp = 0; break; }
-              float petalDmg = petalDef->damage * rarityMult(petal.rarity);
-              p.hp -= std::max(1.f, petalDmg);
-              break;
-            }
-          }
-          if (blocked) break;
-
-          // Player body
           float d = std::hypot(pl->x - p.x, pl->y - p.y);
           float plRadius = PLAYER_RADIUS + soilRadiusBonusOf(*pl);
           if (d < plRadius + p.radius && pl->hurtCd <= 0) {
@@ -3692,44 +3274,27 @@ public:
             pl->hp -= dmg;
             pl->hurtCd = 0.1f;
             pl->statsDirty = true;
-            ClientState* cc = clientOf(pl->id);
-            if (cc) pushEvent(*cc, EVT_HIT, pl->x, pl->y, (int)std::round(p.damage));
-            if (pl->hp <= 0) killPlayer(*pl);
-
-            // Scorpion poison needle applies a DoT on player hit
-            if (p.sourceType == SCORPION_TYPE) {
-              poisonManager.applyPoison(pl, p.ownerId, p.damage * 0.4f, 3000, 1.2f, 0.5f, false);
-            }
             p.hitCd = PROJECTILE_HIT_CD;
-            hitAny = true;
-            if (!p.isPiercing) { p.hp = 0; break; }
+            if (pl->hp <= 0) killPlayer(*pl);
+            if (!p.isPiercing) { proj.erase(proj.begin() + i); break; }
             p.hp -= 1;
+            if (p.hp <= 0) { proj.erase(proj.begin() + i); break; }
           }
         }
-        if (hitAny && p.hp <= 0) {
-          proj.erase(proj.begin() + i);
-          continue;
-        }
       } else {
-        // Friendly projectile → hostile mobs
-        bool hitAny = false;
+        // Hit hostile mobs
         for (auto& mob : mobs) {
           if (mob.friendly || mob.hp <= 0 || p.hitCd > 0) continue;
           float d = std::hypot(mob.x - p.x, mob.y - p.y);
           if (d < mob.radius + p.radius) {
             mob.hp -= p.damage;
             mob.lastHitBy = p.ownerId;
-            if (p.ownerId) mob.addDamage(p.ownerId, p.damage);
+            mob.damageByPlayer[p.ownerId] += p.damage;
             p.hitCd = PROJECTILE_HIT_CD;
-            if (mob.hp <= 0) onMobKilled(mob, mapId);
-            hitAny = true;
-            if (!p.isPiercing) { p.hp = 0; break; }
-            p.hp -= mob.damage;
+            if (!p.isPiercing) { proj.erase(proj.begin() + i); break; }
+            p.hp -= mob.damage * 0.5f;
+            if (p.hp <= 0) { proj.erase(proj.begin() + i); break; }
           }
-        }
-        if (hitAny && p.hp <= 0) {
-          proj.erase(proj.begin() + i);
-          continue;
         }
       }
     }
@@ -3931,7 +3496,7 @@ public:
       Cell& scell = me.slots[si];
       PetalState& sst = me.petals[si];
       const ItemDef* sdef = scell.item != EMPTY_ITEM ? &ITEMS[scell.item] : nullptr;
-      if (scell.item != EMPTY_ITEM && sst.alive && sdef && orbitsAsPetal(sdef->kind)) {
+      if (!scell.item != EMPTY_ITEM && sst.alive && sdef && orbitsAsPetal(sdef->kind)) {
         body.u8v(255);
       } else if (scell.item != EMPTY_ITEM && sdef && orbitsAsPetal(sdef->kind)) {
         float total = sdef->reload > 0 ? sdef->reload : 1;
@@ -3976,7 +3541,8 @@ public:
 
   // ---- Stats writer ----
   Writer statsFor(Player& p) {
-    int64_t now = nowMs();
+    int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
     uint32_t oracleSecLeft = std::max(0, (int)std::ceil((p.nextOracleAt - now) / 1000.0));
     uint32_t tradeSecLeft = std::max(0, (int)std::ceil((p.nextTradeAt - now) / 1000.0));
     Writer w;
@@ -4040,7 +3606,8 @@ public:
     int safeMultiplier = std::max(1, std::min(5, (int)multiplier));
     int safeSeconds = std::max(0, std::min(60 * 60, (int)seconds));
     p.bonusMultiplier = safeSeconds > 0 ? safeMultiplier : 1;
-    p.bonusEndsAt = safeSeconds > 0 ? nowMs() + safeSeconds * 1000 : 0;
+    p.bonusEndsAt = safeSeconds > 0 ?
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count() + safeSeconds * 1000 : 0;
   }
 
   // ---- Chat commands ----
@@ -4059,7 +3626,7 @@ public:
       Squad sq;
       sq.code = key;
       sq.isPublic = (command == "/create_public_squad");
-      sq.createdAt = nowMs();
+      sq.createdAt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
       SquadMember sm;
       sm.clientId = cs.playerId;
       sm.playerId = p.id;
@@ -4079,6 +3646,7 @@ public:
         sendChat(cs, "Usage: /join_squad <CODE>", "System", true, false);
         return;
       }
+      // Convert to uppercase
       for (auto& c : code) c = toupper(c);
       if (!p.squadCode.empty()) {
         sendChat(cs, "Already in a squad.", "System", true, false);
@@ -4105,6 +3673,7 @@ public:
       sendChat(cs, "Joined squad! Code: " + code + " (" + std::to_string(it->second.members.size()) + " members)", "System", true, false);
       Writer w = squadUpdateWriter(code);
       cs.events.push_back(w.b);
+      // Send existing members' states
       for (auto& [pid, member] : it->second.members) {
         if (pid != p.id) {
           Writer mw = squadMemberStateWriter(member.playerId, member.level, member.rarity);
@@ -4188,32 +3757,6 @@ private:
   std::vector<std::unique_ptr<PolygonWallCollider>> playerWallColliders_;
   std::vector<std::unique_ptr<ArrayWallCollider>> wallColliders_;
 };
-
-// =====================================================================
-// PoisonManager tick (defined after Simulation so Player is complete)
-// =====================================================================
-void PoisonManager::updateAll(Simulation* sim) {
-  std::vector<const void*> toRemove;
-  for (auto& [target, poison] : activePoisons) {
-    if (!target) { toRemove.push_back(target); continue; }
-    Player* p = (Player*)target;
-    bool isDead = !p->alive || p->hp <= 0;
-    if (isDead) { toRemove.push_back(target); continue; }
-
-    float damage = poison.updateAndTick();
-    if (damage > 0 && !isDead) {
-      p->hp -= damage;
-      p->statsDirty = true;
-      if (sim) {
-        ClientState* c = sim->clientOf(p->id);
-        if (c) sim->pushEvent(*c, EVT_HIT, p->x, p->y, (int)std::round(damage));
-      }
-    }
-
-    if (!poison.isActive()) toRemove.push_back(target);
-  }
-  for (const void* t : toRemove) activePoisons.erase(t);
-}
 
 // =====================================================================
 // Map data
@@ -4379,7 +3922,7 @@ int main() {
             }
             uint32_t oracleSecLeft = r.u32v();
             uint32_t tradeSecLeft = r.u32v();
-            int64_t now = Simulation::nowMs();
+            int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
             p->nextOracleAt = oracleSecLeft > 0 ? now + oracleSecLeft * 1000 : 0;
             p->nextTradeAt = tradeSecLeft > 0 ? now + tradeSecLeft * 1000 : 0;
             if (r.remaining() >= 3) {
