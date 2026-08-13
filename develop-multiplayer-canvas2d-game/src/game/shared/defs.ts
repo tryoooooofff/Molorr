@@ -1231,31 +1231,54 @@ export function dropRarityChancesForMob(mobRarity: number): { rarity: string; ch
 /**
  * Pick the rarity of a single drop from the mob's rarity row.
  *
- * This intentionally follows `RARITY_DROP_RATES` directly:
- *   "mob rarity" -> { "drop rarity": probability }
- * Item-specific `dropFactor` / drop-entry `chance` values do not alter the
- * selected rarity anymore, so a Rare mob always uses the Rare row, an Ultra mob
- * always uses the Ultra row, and so on.
+ * The `chance` field from the drop entry influences the rarity roll:
+ *   - Higher chance  (e.g. 0.7) → the item is common, rolls toward lower rarities
+ *   - Lower chance  (e.g. 0.005) → the item is rare, rolls toward higher rarities
+ *
+ * The chance value is used as an inverse bias: 1 - chance gives a "rarity bias"
+ * that shifts probability mass toward higher rarities when the item is rare.
  */
 export function getDropRarityByItem(
   _itemType: number,
   mobRarity: string,
-  _factorOverride?: number,
+  factorOverride?: number,
 ): string {
   const base = RARITY_DROP_RATES[mobRarity];
   if (!base) return "Common";
+  // chance = 0.5 means neutral; <0.5 shifts toward higher rarities; >0.5 toward lower
+  const chance = factorOverride ?? 0.5;
+  const rarityBias = Math.max(0, Math.min(1, 1 - chance));
 
   const entries = RARITY_ORDER
     .map((rarity) => ({ rarity, chance: Math.max(0, base[rarity] ?? 0) }))
     .filter((entry) => entry.chance > 0);
   if (entries.length === 0) return "Common";
 
-  const total = entries.reduce((sum, entry) => sum + entry.chance, 0);
+  if (rarityBias > 0.001) {
+    // Apply bias: shift probability mass toward higher rarities
+    // Higher rarityBias → more weight on higher-tier rarities
+    const totalEntries = entries.length;
+    for (let i = 0; i < totalEntries; i++) {
+      const t = i / Math.max(1, totalEntries - 1); // 0..1, 0 = lowest, 1 = highest
+      entries[i].chance *= (1 + (t - 0.5) * rarityBias * 2);
+    }
+  } else if (rarityBias < -0.001) {
+    // Shift toward lower rarities (very high chance items)
+    const totalEntries = entries.length;
+    for (let i = 0; i < totalEntries; i++) {
+      const t = i / Math.max(1, totalEntries - 1);
+      entries[i].chance *= (1 + (0.5 - t) * Math.abs(rarityBias) * 2);
+    }
+  }
+
+  const total = entries.reduce((sum, entry) => sum + Math.max(0, entry.chance), 0);
   if (total <= 0) return "Common";
 
   let roll = Math.random() * total;
   for (const entry of entries) {
-    roll -= entry.chance;
+    const w = Math.max(0, entry.chance);
+    if (w <= 0) continue;
+    roll -= w;
     if (roll <= 0) return entry.rarity;
   }
 

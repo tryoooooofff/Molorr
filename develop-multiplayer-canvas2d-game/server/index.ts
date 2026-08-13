@@ -14,14 +14,38 @@
  * so gameplay is identical whether you host it or play offline.
  */
 import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
 import { WebSocketServer, WebSocket } from "ws";
 import { GameServer } from "../src/game/shared/sim";
+import type { PlayerSave } from "../src/game/shared/sim";
 import { AFK_CLOSE_CODE, AFK_CLOSE_REASON, TICK_MS } from "../src/game/shared/defs";
 
 const PORT = Number(process.env.PORT || 8080);
 const MAX_PLAYERS = Number(process.env.GAME_MAX_PLAYERS || 8);
 const MOB_CAP_SCALE = Number(process.env.GAME_MOB_CAP_SCALE || 0.5);
-const game = new GameServer({ mobCapScale: MOB_CAP_SCALE });
+const SAVE_FILE = process.env.GAME_SAVE_FILE || path.join(process.cwd(), "data", "player_saves.json");
+
+// Load existing saves from disk
+let savesOnDisk: Record<number, PlayerSave> = {};
+try {
+  if (fs.existsSync(SAVE_FILE)) {
+    savesOnDisk = JSON.parse(fs.readFileSync(SAVE_FILE, "utf-8"));
+    console.log(`[petalia] loaded ${Object.keys(savesOnDisk).length} player saves from disk`);
+  }
+} catch (err) {
+  console.error("[petalia] failed to load saves:", err);
+}
+
+// Ensure data directory exists
+const dir = path.dirname(SAVE_FILE);
+if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+const persistCallback = (clientId: number, save: PlayerSave) => {
+  savesOnDisk[clientId] = save;
+};
+
+const game = new GameServer({ mobCapScale: MOB_CAP_SCALE, persistCallback });
 let nextClientId = 1;
 
 const httpServer = http.createServer((req, res) => {
@@ -71,12 +95,23 @@ wss.on("connection", (socket: WebSocket) => {
 });
 
 let last = Date.now();
+let flushTimer = 0;
 setInterval(() => {
   const now = Date.now();
   const dt = Math.min(0.25, (now - last) / 1000);
   last = now;
   try {
     game.tick(dt);
+    // Flush saves to disk every 30 seconds
+    flushTimer += dt;
+    if (flushTimer >= 30) {
+      flushTimer = 0;
+      try {
+        fs.writeFileSync(SAVE_FILE, JSON.stringify(savesOnDisk, null, 2));
+      } catch (err) {
+        console.error("[petalia] failed to flush saves:", err);
+      }
+    }
     // Players who ignored the on-screen [AFK CHECK] button are dropped here.
     // The close event runs removeClient(), so no extra cleanup is needed.
     for (const id of game.drainKicks()) {
@@ -99,3 +134,16 @@ httpServer.listen(PORT, () => {
     `[petalia] game server listening on :${PORT} | maxPlayers=${MAX_PLAYERS} | mobCapScale=${MOB_CAP_SCALE}`,
   );
 });
+
+// Save on shutdown
+function shutdown() {
+  console.log("[petalia] shutting down, saving player data...");
+  try {
+    fs.writeFileSync(SAVE_FILE, JSON.stringify(savesOnDisk, null, 2));
+  } catch (err) {
+    console.error("[petalia] failed to save on shutdown:", err);
+  }
+  process.exit(0);
+}
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
