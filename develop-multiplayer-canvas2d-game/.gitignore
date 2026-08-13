@@ -5,3 +5,7 @@ dist
 out
 *.log
 *.tsbuildinfo
+
+# C++ server build artifacts
+uWebSockets/
+server-cpp/petalia-server
