@@ -866,14 +866,12 @@ struct Projectile {
 struct Drop {
   int id = 0, mapId = 0;
   float x = 0, y = 0;
-  float vx = 0, vy = 0;            // physics velocity (matches sim.ts drop physics)
   uint8_t item = 0, rarity = 0;
   uint16_t count = 1;
   int ownerId = 0;
   float ttl = 50;
-  float groundTimer = 0.5f;        // cooldown after landing before magnet can pull
+  float groundTimer = 0.5f;
   float suctionTimer = 0;
-  bool landed = false;             // true once first wall/floor bounce settles
   std::unordered_set<int> allowedPlayerIds; // empty = anyone can loot
   bool hasAllowList = false;
 };
@@ -1505,13 +1503,8 @@ public:
 
   Simulation() {
     for (int i = 0; i < MAP_COUNT; i++) {
-      // Use the same AABB-based collider for players as for mobs. The polygon
-      // variant rasterizes the wall rectangles to a 256x256 grid and then adds
-      // random per-vertex noise, which turns each wall into a jagged surface.
-      // With a player move step of ~r*0.45 px, the player can tunnel through
-      // those noise gaps and stop registering collisions.
       playerWallColliders_.push_back(
-        std::make_unique<ArrayWallCollider>(MAPS[i].walls, MAPS[i].width, MAPS[i].height, 256));
+        std::make_unique<PolygonWallCollider>(MAPS[i].walls, MAPS[i].width, MAPS[i].height, 256));
       wallColliders_.push_back(
         std::make_unique<ArrayWallCollider>(MAPS[i].walls, MAPS[i].width, MAPS[i].height, 256));
     }
@@ -2211,8 +2204,7 @@ public:
   }
 
   // ---- Drop system ----
-  void spawnDrop(int mapId, uint8_t item, uint8_t rarity, float x, float y,
-                 float vx, float vy, int ownerId, const std::unordered_set<int>& allowed) {
+  void spawnDrop(int mapId, uint8_t item, uint8_t rarity, float x, float y, int ownerId, const std::unordered_set<int>& allowed) {
     World& world = worlds[mapId];
     for (auto& d : world.drops) {
       if (d.item != item || d.rarity != rarity || d.count >= DROP_STACK_MAX) continue;
@@ -2235,14 +2227,12 @@ public:
     nd.id = nextDropId++;
     nd.mapId = mapId;
     nd.x = x; nd.y = y;
-    nd.vx = vx; nd.vy = vy;
     nd.item = item; nd.rarity = rarity;
     nd.count = 1;
     nd.ownerId = ownerId;
     nd.ttl = 50;
     nd.groundTimer = 0.5f;
     nd.suctionTimer = 0;
-    nd.landed = false;
     nd.hasAllowList = !allowed.empty();
     nd.allowedPlayerIds = allowed;
     world.drops.push_back(nd);
@@ -2343,16 +2333,12 @@ public:
       }
 
       for (auto& roll : rolled) {
-        // sim.ts: drop spawns at mob center, then projectile physics (vx, vy) take over.
-        // Initial speed scales with rarity so higher-tier loot pops farther.
         float angle = (float)rand() / (float)RAND_MAX * (float)M_PI * 2;
-        float speed = 180.f + (float)rand() / (float)RAND_MAX * 140.f;
-        speed *= 1.f + roll.second * 0.35f;
-        float vx = std::cos(angle) * speed;
-        // Bias upward so loot tosses out of the corpse before gravity pulls it back.
-        float vy = std::sin(angle) * speed - (160.f + (float)rand() / (float)RAND_MAX * 80.f);
+        float distance = ((float)rand() / (float)RAND_MAX * 20 + 10) * (1 + roll.second * 0.5f);
+        float x = mob.x + std::cos(angle) * distance;
+        float y = mob.y + std::sin(angle) * distance;
         std::unordered_set<int> allowSet = {looterId};
-        spawnDrop(mapId, roll.first, roll.second, mob.x, mob.y, vx, vy, looterId, allowSet);
+        spawnDrop(mapId, roll.first, roll.second, x, y, looterId, allowSet);
       }
     }
   }
@@ -2661,17 +2647,6 @@ public:
 
       st.hitCd = std::max(0.f, st.hitCd - dt);
 
-      // Pre-compute the target orbit slot so respawn can drop the petal at its
-      // real destination instead of on top of the player.
-      bool absorbsEarly = isAbsorbItem(cell.item) && (def.heal > 0 || def.shield > 0);
-      bool staysTightEarly = isSummon || def.name == "Magnet" || def.name == "Bubble";
-      float orbitRadiusEarly = (absorbsEarly || staysTightEarly) ? std::min(p.orbit, 62.f) : p.orbit;
-      bool isMoonEarly = (def.name == "Moon");
-      float orbitCxEarly = isMoonEarly ? p.x : orbitCenterX;
-      float orbitCyEarly = isMoonEarly ? p.y : orbitCenterY;
-      float targetX = orbitCxEarly + std::cos(slotAngle) * orbitRadiusEarly;
-      float targetY = orbitCyEarly + std::sin(slotAngle) * orbitRadiusEarly;
-
       if (!st.alive) {
         st.timer -= dt;
         if (st.timer <= 0) {
@@ -2680,15 +2655,7 @@ public:
           st.hp = st.maxHp;
           st.specialTimer = isAbsorbItem(cell.item) ? ROSE_HEAL_DELAY : 0;
           st.absorbTimer = 0;
-          // Spawn the petal at its target orbit slot rather than on top of the
-          // player. The previous code placed it at p.x/p.y and then lerped it
-          // outwards with dt*14 smoothing, which (a) made every respawn visibly
-          // pop out of the player body, and (b) skipped the wall collider, so a
-          // petal could respawn inside a wall if the player was hugging one.
-          auto* pCollider = wallColliders_[p.mapId].get();
-          bool slotFree = pCollider ? pCollider->isFree(targetX, targetY, def.radius + 1.f) : true;
-          if (slotFree) { st.x = targetX; st.y = targetY; }
-          else { st.x = p.x; st.y = p.y; }
+          st.x = p.x; st.y = p.y;
         }
         continue;
       }
@@ -3172,65 +3139,12 @@ public:
     }
 
     // ---- Drop updates ----
-    // sim.ts: drops are short-lived physics projectiles spawned at the mob center.
-    // They get initial vx/vy, fall under gravity, bounce off walls, then settle on
-    // the ground where they can be magnet-pulled. We mirror that here so the loot
-    // scatter and the "wait for it to land before you can vacuum it" feel matches.
-    {
-      auto* dCollider = wallColliders_[mapId].get();
-      const float DROP_RADIUS = 12.f;
-      const float DROP_GRAVITY = 720.f;   // px/s^2 (tuned to feel like sim.ts)
-      const float DROP_FRICTION = 0.92f;  // per-frame velocity damping
-      const float DROP_BOUNCE = 0.45f;    // restitution on wall contact
-      const float DROP_LAND_VEL = 28.f;   // |vy| threshold to count as "settled"
-
-      for (int i = (int)world.drops.size() - 1; i >= 0; i--) {
-        Drop& d = world.drops[i];
-        d.ttl -= dt;
-        if (d.groundTimer > 0) d.groundTimer = std::max(0.f, d.groundTimer - dt);
-        if (d.suctionTimer > 0) d.suctionTimer = std::max(0.f, d.suctionTimer - dt);
-
-        if (!d.landed) {
-          // Gravity + air friction. The sim.ts source applies a continuous-time
-          // exponential decay (vx *= Math.pow(k, dt)), so we mirror that here.
-          d.vy += DROP_GRAVITY * dt;
-          float frameFric = std::pow(DROP_FRICTION, dt);
-          d.vx *= frameFric;
-          d.vy *= frameFric;
-
-          // Substep the move so a fast drop can't tunnel through a wall in one tick.
-          float dist = std::hypot(d.vx * dt, d.vy * dt);
-          int steps = std::max(1, (int)std::ceil(dist / std::max(4.f, DROP_RADIUS * 0.5f)));
-          float sx = (d.vx * dt) / steps;
-          float sy = (d.vy * dt) / steps;
-          for (int s = 0; s < steps; s++) {
-            float nx = d.x + sx;
-            float ny = d.y + sy;
-            auto [cx, cy] = dCollider->collideCircle(nx, ny, DROP_RADIUS);
-            if (std::abs(cx - nx) > 0.05f || std::abs(cy - ny) > 0.05f) {
-              // Hit a wall — reflect the axis that moved and dampen.
-              if (std::abs(cx - nx) > 0.05f) d.vx = -d.vx * DROP_BOUNCE;
-              if (std::abs(cy - ny) > 0.05f) d.vy = -d.vy * DROP_BOUNCE;
-              // Nudge out of the wall so the next step isn't stuck inside.
-              d.x = cx; d.y = cy;
-            } else {
-              d.x = nx; d.y = ny;
-            }
-          }
-          // Clamp to map bounds (the polygon collider won't push us back from
-          // the world edge, only from interior walls).
-          d.x = std::clamp(d.x, DROP_RADIUS, map.width - DROP_RADIUS);
-          d.y = std::clamp(d.y, DROP_RADIUS, map.height - DROP_RADIUS);
-
-          if (std::abs(d.vy) < DROP_LAND_VEL && std::abs(d.vx) < DROP_LAND_VEL) {
-            d.landed = true;
-            d.vx = 0; d.vy = 0;
-            d.groundTimer = 0.5f;  // brief "just hit the floor" cooldown
-          }
-        }
-
-        if (d.ttl <= 0) world.drops.erase(world.drops.begin() + i);
-      }
+    for (int i = (int)world.drops.size() - 1; i >= 0; i--) {
+      Drop& d = world.drops[i];
+      d.ttl -= dt;
+      if (d.groundTimer > 0) d.groundTimer = std::max(0.f, d.groundTimer - dt);
+      if (d.suctionTimer > 0) d.suctionTimer = std::max(0.f, d.suctionTimer - dt);
+      if (d.ttl <= 0) world.drops.erase(world.drops.begin() + i);
     }
   }
 
@@ -3840,7 +3754,7 @@ public:
   }
 
 private:
-  std::vector<std::unique_ptr<ArrayWallCollider>> playerWallColliders_;
+  std::vector<std::unique_ptr<PolygonWallCollider>> playerWallColliders_;
   std::vector<std::unique_ptr<ArrayWallCollider>> wallColliders_;
 };
 
