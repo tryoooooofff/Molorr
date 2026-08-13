@@ -1637,26 +1637,14 @@ public:
       Player& p = it->second;
       // Save player data to disk before removal
       savePlayerData(p);
-      // Remove pets — but keep friendly mobs alive (they persist after disconnect)
+      // Remove all pets (including friendly mobs) on disconnect
       for (int i = 0; i < SLOT_COUNT; i++) {
         for (int petId : p.pets[i]) {
-          Mob* pet = findMobById(p.mapId, petId);
-          // Skip friendly mobs — they persist even after player disconnects
-          if (pet && pet->friendly) continue;
           for (int m = 0; m < MAP_COUNT; m++) {
             removeMobFromWorld(m, petId);
           }
         }
-        // Only clear the pet list reference; the actual mobs stay in the world
-        if (!p.pets[i].empty()) {
-          // Check if any pets are friendly — if so, keep their reference
-          bool hasFriendly = false;
-          for (int petId : p.pets[i]) {
-            Mob* pet = findMobById(p.mapId, petId);
-            if (pet && pet->friendly) { hasFriendly = true; break; }
-          }
-          if (!hasFriendly) p.pets[i].clear();
-        }
+        p.pets[i].clear();
       }
       // Remove from squad
       if (!p.squadCode.empty()) {
@@ -2041,9 +2029,7 @@ public:
       const ItemDef* def = cell.item != EMPTY_ITEM ? &ITEMS[cell.item] : nullptr;
       bool orbits = def && orbitsAsPetal(def->kind);
 
-      // Check if summon needs despawning — but friendly mobs persist
-      // even when the summon card is swapped out or removed.
-      /* 友方生物不会因卡片换下而消失，注释掉销毁逻辑
+      // Check if summon needs despawning (when the card is swapped or removed)
       if (def && def->kind == IK_SUMMON) {
         bool sameSummon = true;
         for (int petId : p.pets[i]) {
@@ -2054,7 +2040,6 @@ public:
         }
         if (!p.pets[i].empty() && !sameSummon) despawnPets(p, i);
       }
-      */
 
       bool cellChanged = old->item != cell.item || old->rarity != cell.rarity;
 
@@ -2854,7 +2839,7 @@ public:
       if (st.hitCd <= 0 && !isSummon) {
         float pr = def.radius * (1 + cell.rarity * 0.06f);
         for (auto& mob : world.mobs) {
-          if (mob.friendly) continue;
+          if (mob.friendly && mob.ownerId == p.id) continue;  // don't damage your own pets
           if (mob.hp <= 0) continue;
           collisionCounter.n++;
           float dx = mob.x - st.x, dy = mob.y - st.y;
@@ -3142,8 +3127,8 @@ public:
               if (mob.friendly != other.friendly && mob.hitCd <= 0) {
                 auto& attacker = mob.friendly ? mob : other;
                 auto& victim = mob.friendly ? other : mob;
-                // 友方生物无敌: 不受任何伤害
-                if (!victim.friendly && victim.spawnProtection <= 0) {
+                // 友方生物不再无敌：受到攻击会扣血
+                if (victim.spawnProtection <= 0) {
                   float dmg = attacker.damage * 0.6f;
                   victim.hp -= dmg;
                   victim.lastHitBy = attacker.ownerId;
@@ -3417,9 +3402,9 @@ public:
           }
         }
       } else {
-        // Hit hostile mobs
+        // Hit hostile mobs and friendly mobs (no more invincibility for friendly)
         for (auto& mob : mobs) {
-          if (mob.friendly || mob.hp <= 0 || p.hitCd > 0) continue;
+          if (mob.hp <= 0 || p.hitCd > 0) continue;
           float d = std::hypot(mob.x - p.x, mob.y - p.y);
           if (d < mob.radius + p.radius) {
             mob.hp -= p.damage;
