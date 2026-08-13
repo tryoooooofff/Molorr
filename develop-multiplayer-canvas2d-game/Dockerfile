@@ -40,7 +40,7 @@ COPY --from=build /app/server.js /app/server.js
 
 ENV NODE_ENV=production
 ENV PORT=8080
-ENV NEXT_PUBLIC_GAME_WS=wss://molorr.onrender.com
+ENV NEXT_PUBLIC_GAME_WS=wss://molorr-server.onrender.com
 
 # Proxy listens on :8080 → Next.js (internal) + C++ WebSocket (internal :8081)
 EXPOSE 8080
