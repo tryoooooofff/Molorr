@@ -4,7 +4,7 @@
  * WebSocket game connections to the C++ server on :8081.
  */
 const http = require("http");
-const httpProxy = require("http");
+const net = require("net");
 const { spawn } = require("child_process");
 const path = require("path");
 
@@ -22,16 +22,47 @@ cpp.on("exit", (code) => {
 });
 
 // ── 2. Start the Next.js standalone server ────────────────────────────
-// The Next.js server is at /app/nextjs/server.js (copied from .next/standalone)
 const nextServer = spawn("node", [path.join(__dirname, "nextjs", "server.js")], {
   stdio: "inherit",
   env: { ...process.env, PORT: "3080" },
   cwd: path.join(__dirname, "nextjs"),
 });
 
-// ── 3. Wait for both servers to be ready, then start proxy ────────────
-const startProxy = () => {
-  const proxy = httpProxy.createServer((req, res) => {
+// ── 3. Health check helper: wait for a TCP port to be ready ───────────
+function waitForPort(port, host, retries = 30, delay = 500) {
+  return new Promise((resolve, reject) => {
+    let attempts = 0;
+    const check = () => {
+      const sock = new net.Socket();
+      sock.setTimeout(1000);
+      sock.on("connect", () => { sock.destroy(); resolve(); });
+      sock.on("error", () => { sock.destroy(); });
+      sock.on("timeout", () => { sock.destroy(); });
+      sock.connect(port, host);
+      sock.on("close", () => {
+        attempts++;
+        if (attempts >= retries) reject(new Error(`port ${port} not ready`));
+        else setTimeout(check, delay);
+      });
+    };
+    check();
+  });
+}
+
+// ── 4. Wait for both servers, then start proxy ────────────────────────
+const startProxy = async () => {
+  try {
+    await Promise.all([
+      waitForPort(3080, "127.0.0.1"),
+      waitForPort(CPP_PORT, "127.0.0.1"),
+    ]);
+    console.log("[entry] Both upstream servers ready, starting proxy...");
+  } catch (e) {
+    console.error("[entry] Upstream servers not ready:", e.message);
+    // Still start the proxy — it will return 502 until they are ready
+  }
+
+  const proxy = http.createServer((req, res) => {
     const options = {
       hostname: "127.0.0.1",
       port: 3080,
@@ -50,22 +81,22 @@ const startProxy = () => {
     req.pipe(proxyReq);
   });
 
+  // WebSocket upgrade: proxy to the C++ server via raw TCP
   proxy.on("upgrade", (req, socket, head) => {
-    const options = {
-      hostname: "127.0.0.1",
-      port: CPP_PORT,
-      path: req.url,
-      headers: req.headers,
-    };
-    const proxyReq = http.request(options);
-    proxyReq.on("upgrade", (proxyRes, proxySocket) => {
-      // Pipe the raw socket data
-      proxySocket.pipe(socket).pipe(proxySocket);
+    const client = net.connect(CPP_PORT, "127.0.0.1", () => {
+      // Forward the HTTP upgrade request to the C++ server
+      const reqLine = `GET ${req.url} HTTP/1.1\r\n`;
+      const headers = Object.entries(req.headers)
+        .map(([k, v]) => `${k}: ${v}`)
+        .join("\r\n");
+      client.write(reqLine + headers + "\r\n\r\n");
+      // Forward any data already received (should be empty for WebSocket)
+      if (head && head.length > 0) client.write(head);
+      // Bidirectional pipe
+      client.pipe(socket).pipe(client);
     });
-    proxyReq.on("error", () => {
-      socket.destroy();
-    });
-    proxyReq.end();
+    client.on("error", () => { try { socket.destroy(); } catch {} });
+    socket.on("error", () => { try { client.destroy(); } catch {} });
   });
 
   proxy.listen(RENDER_PORT, () => {
@@ -73,5 +104,4 @@ const startProxy = () => {
   });
 };
 
-// Give both servers a moment to start, then launch the proxy
-setTimeout(startProxy, 2000);
+startProxy();
