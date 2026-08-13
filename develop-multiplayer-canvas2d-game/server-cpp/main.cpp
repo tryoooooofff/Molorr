@@ -3162,14 +3162,22 @@ public:
                     other.damageByPlayer[mob.ownerId] += dmg;
                   }
                 } else if (mob.friendly || other.friendly) {
-                  // 非友方攻击友方（或反过来，但至少一个是友方）
+                  // 至少一个是友方：双方互相伤害
                   auto& nonFriendly = mob.friendly ? other : mob;
                   auto& friendly = mob.friendly ? mob : other;
+                  // 非友方攻击友方
                   if (friendly.spawnProtection <= 0) {
                     float dmg = nonFriendly.damage * 0.6f;
                     friendly.hp -= dmg;
                     friendly.lastHitBy = nonFriendly.ownerId;
                     friendly.damageByPlayer[nonFriendly.ownerId] += dmg;
+                  }
+                  // 友方攻击非友方
+                  if (nonFriendly.spawnProtection <= 0 && friendly.damage > 0) {
+                    float dmg = friendly.damage * 0.6f;
+                    nonFriendly.hp -= dmg;
+                    nonFriendly.lastHitBy = friendly.ownerId;
+                    nonFriendly.damageByPlayer[friendly.ownerId] += dmg;
                   }
                 }
                 mob.hitCd = 0.1f;
@@ -3281,7 +3289,10 @@ public:
 
       // ---- Death check ----
       if (mob.hp <= 0) {
-        if (!mob.friendly) decZoneCount(mapId, zoneAt(mapId, mob.x, mob.y));
+        if (!mob.friendly) {
+          decZoneCount(mapId, zoneAt(mapId, mob.x, mob.y));
+          onMobKilled(mob, mapId);  // 必须在erase之前调用，否则mob引用悬空
+        }
         mobs.erase(mobs.begin() + i);
         if (mob.friendly) {
           auto owner = get(mob.ownerId);
@@ -3291,7 +3302,6 @@ public:
           }
           continue;
         }
-        onMobKilled(mob, mapId);
         continue;
       }
     }
