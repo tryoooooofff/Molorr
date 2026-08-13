@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: Molorr_server
+    name: molorr-server-t34o
     runtime: docker
     repo: https://github.com/tryoooooofff/Molorr
     rootDir: develop-multiplayer-canvas2d-game
