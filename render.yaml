@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: petalia-server
+    runtime: docker
+    repo: https://github.com/tryoooooofff/Molorr
+    rootDir: develop-multiplayer-canvas2d-game
+    dockerfilePath: Dockerfile
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: NODE_ENV
+        value: production
+      - key: NEXT_PUBLIC_GAME_WS
+        value: wss://petalia-server.onrender.com
+      - key: DATABASE_URL
+        sync: false
