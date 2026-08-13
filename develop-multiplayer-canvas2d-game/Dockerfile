@@ -11,9 +11,11 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-# Build C++ server
-RUN git clone --recursive https://github.com/uNetworking/uWebSockets.git && \
-    make -s -j$(nproc) -C uWebSockets && \
+# Build C++ server — only build uSockets (not the full uWebSockets examples)
+RUN git clone --depth 1 --recursive https://github.com/uNetworking/uWebSockets.git && \
+    cd uWebSockets && \
+    make -s -j$(nproc) -C uSockets && \
+    cd .. && \
     g++ -std=c++20 -O2 server-cpp/main.cpp \
         -IuWebSockets/src -IuWebSockets/uSockets/src \
         uWebSockets/uSockets/*.o -lz -lssl -lcrypto -o /app/petalia-server
