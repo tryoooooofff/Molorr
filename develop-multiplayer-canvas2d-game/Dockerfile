@@ -35,10 +35,13 @@ COPY --from=build /app/public ./public
 # Petalia C++ server binary
 COPY --from=build /app/petalia-server /app/petalia-server
 
+# Proxy script
+COPY --from=build /app/server.js /app/server.js
+
 ENV NODE_ENV=production
 ENV PORT=8080
-ENV NEXT_PUBLIC_GAME_WS=ws://localhost:8080
+ENV NEXT_PUBLIC_GAME_WS=wss://molorr.onrender.com
 
-# Start both servers: C++ WebSocket server on :8080, Next.js on :3000
-EXPOSE 8080 3000
-CMD sh -c "/app/petalia-server & node /app/server.js -p 3000 & wait"
+# Proxy listens on :8080 → Next.js (internal) + C++ WebSocket (internal :8081)
+EXPOSE 8080
+CMD ["node", "/app/server.js"]
