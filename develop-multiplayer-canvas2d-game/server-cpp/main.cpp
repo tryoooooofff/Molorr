@@ -653,15 +653,46 @@ static const float RARITY_DROP_RATES[11][11] = {
   {0,     0,     0,    0,    0,   0,   0,    0,    0,  0,   0},
 };
 
-static int getDropRarityByItem(int mobRarityIdx) {
+/**
+ * Pick the rarity of a single drop from the mob's rarity row.
+ * The `chance` parameter influences the rarity selection:
+ *   - Higher chance (e.g. 0.7) → the item is common, rolls toward lower rarities
+ *   - Lower chance (e.g. 0.005) → the item is rare, rolls toward higher rarities
+ * The chance is used as an inverse bias: 1 - chance shifts probability mass
+ * toward higher rarities when the item is rare.
+ */
+static int getDropRarityByItem(int mobRarityIdx, float chance = 0.5f) {
   int idx = std::max(0, std::min(MAX_RARITY, mobRarityIdx));
-  float roll = (float)rand() / (float)RAND_MAX;
-  float cumulative = 0;
+  float rarityBias = std::max(0.0f, std::min(1.0f, 1.0f - chance));
+
+  // Copy weights and apply bias
+  float weights[11];
+  int nWeights = 0;
   for (int i = 0; i <= MAX_RARITY; i++) {
-    cumulative += RARITY_DROP_RATES[idx][i];
-    if (roll <= cumulative) return i;
+    weights[i] = std::max(0.0f, RARITY_DROP_RATES[idx][i]);
+    if (weights[i] > 0) nWeights = i + 1;
   }
-  return 0; // fallback to Common
+
+  if (rarityBias > 0.001f) {
+    // Shift probability mass toward higher rarities
+    for (int i = 0; i < nWeights; i++) {
+      float t = (float)i / std::max(1, nWeights - 1); // 0..1, 0 = lowest, 1 = highest
+      weights[i] *= (1.0f + (t - 0.5f) * rarityBias * 2.0f);
+    }
+  }
+
+  float total = 0;
+  for (int i = 0; i < nWeights; i++) total += std::max(0.0f, weights[i]);
+  if (total <= 0) return 0;
+
+  float roll = (float)rand() / (float)RAND_MAX * total;
+  for (int i = 0; i < nWeights; i++) {
+    float w = std::max(0.0f, weights[i]);
+    if (w <= 0) continue;
+    roll -= w;
+    if (roll <= 0) return i;
+  }
+  return nWeights - 1;
 }
 
 // =====================================================================
@@ -1504,7 +1535,7 @@ public:
   Simulation() {
     for (int i = 0; i < MAP_COUNT; i++) {
       playerWallColliders_.push_back(
-        std::make_unique<PolygonWallCollider>(MAPS[i].walls, MAPS[i].width, MAPS[i].height, 256));
+        std::make_unique<ArrayWallCollider>(MAPS[i].walls, MAPS[i].width, MAPS[i].height, 256));
       wallColliders_.push_back(
         std::make_unique<ArrayWallCollider>(MAPS[i].walls, MAPS[i].width, MAPS[i].height, 256));
     }
@@ -2322,12 +2353,10 @@ public:
 
       std::vector<std::pair<uint8_t, uint8_t>> rolled;
       for (auto& drop : def.drops) {
-        float roll = (float)rand() / (float)RAND_MAX;
-        if (roll > drop.second) continue; // check drop chance
-
         for (int i = 0; i < totalRolls; i++) {
           // Roll drop rarity using RARITY_DROP_RATES table (matches sim.ts exactly)
-          uint8_t rarity = (uint8_t)getDropRarityByItem(mob.rarity);
+          // drop.second (chance) influences the rarity roll: lower chance → higher rarity
+          uint8_t rarity = (uint8_t)getDropRarityByItem(mob.rarity, drop.second);
           rolled.push_back({(uint8_t)drop.first, rarity});
         }
       }
@@ -3008,7 +3037,8 @@ public:
               if (mob.friendly != other.friendly && mob.hitCd <= 0) {
                 auto& attacker = mob.friendly ? mob : other;
                 auto& victim = mob.friendly ? other : mob;
-                if (victim.spawnProtection <= 0) {
+                // 友方生物无敌: 不受任何伤害
+                if (!victim.friendly && victim.spawnProtection <= 0) {
                   float dmg = attacker.damage * 0.6f;
                   victim.hp -= dmg;
                   victim.lastHitBy = attacker.ownerId;
@@ -3754,7 +3784,7 @@ public:
   }
 
 private:
-  std::vector<std::unique_ptr<PolygonWallCollider>> playerWallColliders_;
+  std::vector<std::unique_ptr<ArrayWallCollider>> playerWallColliders_;
   std::vector<std::unique_ptr<ArrayWallCollider>> wallColliders_;
 };
 

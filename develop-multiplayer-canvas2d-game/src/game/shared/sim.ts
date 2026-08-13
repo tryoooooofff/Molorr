@@ -1741,6 +1741,12 @@ interface GameServerOptions {
    * 默认 1（无缩放）。例如 viewScale=2 时，视野半径减半。
    */
   viewScale?: number;
+  /**
+   * 持久化回调：服务器定期（每 30 秒）和玩家断开时调用，
+   * 将玩家数据保存到数据库或文件，防止服务器重启导致数据丢失。
+   * 回调参数为 (clientId, PlayerSave)。
+   */
+  persistCallback?: (clientId: number, save: PlayerSave) => void;
 }
 
 export class GameServer {
@@ -1750,8 +1756,8 @@ export class GameServer {
 
   // 生物墙壁碰撞：数组 AABB（直接使用墙壁数组，无噪声多边形；碰撞时墙向外 +10px）
   private wallColliders: ArrayWallCollider[] = [];
-  // 玩家墙壁碰撞：凹凸多边形 + BVH 精确碰撞（与客户端渲染的视觉墙一致）
-  private playerWallColliders: PolygonWallCollider[] = [];
+  // 玩家墙壁碰撞：数组 AABB 碰撞器（与 mob 共用逻辑，直 AABB 圆-矩碰撞，无栅格无噪声）
+  private playerWallColliders: ArrayWallCollider[] = [];
 
   private tickCount = 0;
   private mobCapScale: number;
@@ -1759,6 +1765,10 @@ export class GameServer {
   private zoneRefillTimer = 0;
   /** 视野缩放因子，VIEW_RADIUS 会被除以该值。 */
   private viewScale: number;
+  /** 持久化回调（传参注入） */
+  private persistCallback: (clientId: number, save: PlayerSave) => void;
+  /** 持久化计时器，累计满 SAVE_INTERVAL 后执行一次批量保存。 */
+  private persistTimer = 0;
 
   /**
    * 全局生物碰撞限流计数器：上一帧碰撞检测次数超过 MOB_COLLISION_OVERLOAD_THRESHOLD
@@ -1804,9 +1814,11 @@ export class GameServer {
         ? options.viewScale ?? 1
         : 1;
 
-    // 玩家：凹凸多边形 + BVH 精确碰撞器（与客户端渲染的视觉墙一致）
+    this.persistCallback = options.persistCallback ?? (() => {});
+
+    // 玩家：数组 AABB 碰撞器（与 mob 同一套，无栅格无噪声）
     for (const map of MAPS) {
-      this.playerWallColliders.push(new PolygonWallCollider(map.walls, map.width, map.height, 256));
+      this.playerWallColliders.push(new ArrayWallCollider(map.walls, map.width, map.height, 256));
     }
     // 生物：数组 AABB 碰撞器（直接使用墙壁数组，无噪声多边形；碰撞时墙向外 +10px）
     for (const map of MAPS) {
@@ -2002,7 +2014,9 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
 
   removeClient(id: number) {
     const c = this.clients.get(id);
+    // 断开前保存玩家数据
     if (c?.player) {
+      this.persistCallback(id, this.getSave(id)!);
       const w = this.worlds[c.player.mapId];
       w.mobs = w.mobs.filter((m) => m.ownerId !== c.player!.id);
       if (c.player.squadCode) {
@@ -3329,6 +3343,16 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
     // 毒伤系统：所有活跃毒伤按 100ms tick 节奏结算一次伤害
     this.poisonManager.updateAll(this);
     for (const c of this.clients.values()) this.sendState(c);
+    // 持久化：每 30 秒保存一次所有在线玩家的数据
+    this.persistTimer += dt;
+    if (this.persistTimer >= 30) {
+      this.persistTimer = 0;
+      for (const [id, c] of this.clients) {
+        if (c.player) {
+          this.persistCallback(id, this.getSave(id)!);
+        }
+      }
+    }
   }
 
   // 碰撞逻辑已迁移到 C++ 服务器，此处仅做基础移动，不做碰撞检测
@@ -3479,6 +3503,17 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
       const slotAngle = p.baseAngle + (index / Math.max(1, liveCount)) * Math.PI * 2;
       index++;
       st.hitCd = Math.max(0, st.hitCd - dt);
+
+      // Pre-calculate orbit parameters (needed for both revival and movement)
+      const absorbs = isAbsorbItem(cell.item) && (!!def.heal || !!def.shield);
+      const staysTight = isSummon || (def.name ?? "").toLowerCase().includes("magnet") || (def.name ?? "").toLowerCase().includes("bubble");
+      const orbitRadius = (absorbs || staysTight) ? Math.min(p.orbit, 62) : p.orbit;
+      const isMoon = (def.name ?? "").toLowerCase().includes("moon");
+      const cx = isMoon ? p.x : orbitCenterX;
+      const cy = isMoon ? p.y : orbitCenterY;
+      const tx = cx + Math.cos(slotAngle) * orbitRadius;
+      const ty = cy + Math.sin(slotAngle) * orbitRadius;
+
       if (!st.alive) {
         st.timer -= dt;
         if (st.timer <= 0) {
@@ -3487,8 +3522,17 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
           st.hp = st.maxHp;
           st.specialTimer = isAbsorbItem(cell.item) ? ROSE_HEAL_DELAY : 0;
           st.absorbTimer = 0;
-          st.x = p.x;
-          st.y = p.y;
+          // 复活前检查目标轨道位置是否安全（不卡墙）
+          const collider = this.wallColliders[p.mapId];
+          const petalR = def.radius * (1 + cell.rarity * 0.06);
+          if (collider.isFree(tx, ty, petalR + 1)) {
+            st.x = tx;
+            st.y = ty;
+          } else {
+            // 目标位置卡墙，回退到玩家身上
+            st.x = p.x;
+            st.y = p.y;
+          }
         }
         continue;
       }
@@ -3497,18 +3541,6 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
         st.alive = false; st.hp = 0; st.timer = this.applyTalentReload(p, def.reload);
         continue;
       }
-      const absorbs = isAbsorbItem(cell.item) && (!!def.heal || !!def.shield);
-      // Magnets and summons (eggs) stay close like Rose/Shell — they never
-      // spread out no matter the spread flag, so their visual radius stays
-      // tight while other petals still fan out on attack.
-      const staysTight = isSummon || (def.name ?? "").toLowerCase().includes("magnet") || (def.name ?? "").toLowerCase().includes("bubble");
-      const orbitRadius = (absorbs || staysTight) ? Math.min(p.orbit, 62) : p.orbit;
-      // Moon orbits the player; every other petal orbits the Moon (if alive).
-      const isMoon = (def.name ?? "").toLowerCase().includes("moon");
-      const cx = isMoon ? p.x : orbitCenterX;
-      const cy = isMoon ? p.y : orbitCenterY;
-      const tx = cx + Math.cos(slotAngle) * orbitRadius;
-      const ty = cy + Math.sin(slotAngle) * orbitRadius;
       if (absorbs) {
         const missing = def.heal ? Math.max(0, p.maxHp - p.hp) : Math.max(0, p.maxHp - p.shield);
         st.specialTimer = Math.max(0, st.specialTimer - dt);
@@ -4189,10 +4221,10 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
       for (const drop of def.drops) {
         for (let i = 0; i < looterDropMult; i++) {
           let item = drop.item;
-          let rarity = rarityIndexOf(getDropRarityByItem(drop.item, mobRarityName));
+          let rarity = rarityIndexOf(getDropRarityByItem(drop.item, mobRarityName, drop.chance));
           const magicItem = MAGIC_ITEM_MAP[drop.item];
           if (magicItem !== undefined && looterCoreRarity >= 0) {
-            const magicRarity = rarityIndexOf(getDropRarityByItem(magicItem, mobRarityName));
+            const magicRarity = rarityIndexOf(getDropRarityByItem(magicItem, mobRarityName, drop.chance));
             if (magicRarity > 0) { item = magicItem; rarity = Math.min(magicRarity, looterCoreRarity); }
           }
           rolled.push({ item, rarity, dropNum: i });
