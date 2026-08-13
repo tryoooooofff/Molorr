@@ -1578,7 +1578,7 @@ class PolygonWallCollider {
 //    并允许每次实体更新（位置积分后）直接调用。
 // ---------------------------------------------------------------------
 
-class ArrayWallCollider {
+export class ArrayWallCollider {
   private walls: Wall[];
   private mapWidth: number;
   private mapHeight: number;
