@@ -7033,9 +7033,13 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.sinceSnapshot = 0;
     this.snapshotStalled = false;
     this.stallNoticeAnim = 0;
+    this.debugPingMs = 0;
+    this.debugPingTimer = 0;
     net.onOpen = () => {
       this.connected = true;
       this.sendJoin();
+      // 连接成功后立即发一次 ping
+      this.sendPing();
     };
     net.onClose = (code?: number) => {
       this.connected = false;
