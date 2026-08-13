@@ -53,8 +53,8 @@ function waitForPort(port, host, retries = 30, delay = 500) {
 const startProxy = async () => {
   try {
     await Promise.all([
-      waitForPort(3080, "127.0.0.1"),
-      waitForPort(CPP_PORT, "127.0.0.1"),
+      waitForPort(3080, "0.0.0.0", 60),
+      waitForPort(CPP_PORT, "0.0.0.0"),
     ]);
     console.log("[entry] Both upstream servers ready, starting proxy...");
   } catch (e) {
@@ -64,7 +64,7 @@ const startProxy = async () => {
 
   const proxy = http.createServer((req, res) => {
     const options = {
-      hostname: "127.0.0.1",
+      hostname: "0.0.0.0",
       port: 3080,
       path: req.url,
       method: req.method,
