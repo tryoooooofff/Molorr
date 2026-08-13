@@ -2029,16 +2029,21 @@ public:
       const ItemDef* def = cell.item != EMPTY_ITEM ? &ITEMS[cell.item] : nullptr;
       bool orbits = def && orbitsAsPetal(def->kind);
 
-      // Check if summon needs despawning (when the card is swapped or removed)
-      if (def && def->kind == IK_SUMMON) {
-        bool sameSummon = true;
-        for (int petId : p.pets[i]) {
-          Mob* pet = findMobById(p.mapId, petId);
-          if (!pet || pet->type != def->petMob || pet->sourceItem != cell.item || pet->sourceRarity != cell.rarity) {
-            sameSummon = false; break;
+      // Check if the slot previously had a summon that needs despawning
+      // (when the summon card is swapped out, removed, or changed)
+      const ItemDef* oldDef = old->item != EMPTY_ITEM ? &ITEMS[old->item] : nullptr;
+      bool wasSummon = oldDef && oldDef->kind == IK_SUMMON && !p.pets[i].empty();
+      if (wasSummon) {
+        bool sameSummon = def && def->kind == IK_SUMMON;
+        if (sameSummon) {
+          for (int petId : p.pets[i]) {
+            Mob* pet = findMobById(p.mapId, petId);
+            if (!pet || pet->type != def->petMob || pet->sourceItem != cell.item || pet->sourceRarity != cell.rarity) {
+              sameSummon = false; break;
+            }
           }
         }
-        if (!p.pets[i].empty() && !sameSummon) despawnPets(p, i);
+        if (!sameSummon) despawnPets(p, i);
       }
 
       bool cellChanged = old->item != cell.item || old->rarity != cell.rarity;
@@ -2414,12 +2419,23 @@ public:
       }
     }
 
-    // Drop loot
+    // Drop loot — 100% drop for all non-friendly mobs
     if (world.drops.size() >= (size_t)MAX_DROPPED_CARDS) {
       world.drops.erase(world.drops.begin(), world.drops.begin() + DROP_TRIM_COUNT);
     }
     auto eligible = computeEligibleLooters(mob);
-    if (eligible.empty()) return;
+    // 即使没有玩家造成足够伤害，也确保掉落100%触发
+    // 回退到 lastHitBy 玩家或地图上所有玩家
+    if (eligible.empty()) {
+      if (mob.lastHitBy) {
+        eligible.insert(mob.lastHitBy);
+      } else {
+        // 没有玩家参与击杀，但仍然掉落（给所有在线的玩家）
+        for (auto& [pid, p] : players) {
+          if (p.mapId == mapId) eligible.insert(pid);
+        }
+      }
+    }
 
     for (int looterId : eligible) {
       Player* looter = get(looterId);
@@ -3124,15 +3140,37 @@ public:
               float push = (minDist - d) * 0.4f;
               mob.x += (dx / d) * push;
               mob.y += (dy / d) * push;
-              if (mob.friendly != other.friendly && mob.hitCd <= 0) {
-                auto& attacker = mob.friendly ? mob : other;
-                auto& victim = mob.friendly ? other : mob;
-                // 友方生物不再无敌：受到攻击会扣血
-                if (victim.spawnProtection <= 0) {
-                  float dmg = attacker.damage * 0.6f;
-                  victim.hp -= dmg;
-                  victim.lastHitBy = attacker.ownerId;
-                  victim.damageByPlayer[attacker.ownerId] += dmg;
+              if (mob.hitCd <= 0) {
+                // 允许友方生物被伤害：
+                // 1. 非友方生物 vs 友方生物 → 非友方攻击友方
+                // 2. 不同玩家的友方生物互伤
+                // 3. 跳过同一玩家的友方生物互伤
+                bool sameOwner = mob.friendly && other.friendly && mob.ownerId != 0 && mob.ownerId == other.ownerId;
+                if (sameOwner) { /* skip own pets */ }
+                else if (mob.friendly && other.friendly) {
+                  // 不同玩家的友方生物：互相伤害
+                  if (mob.spawnProtection <= 0) {
+                    float dmg = other.damage * 0.6f;
+                    mob.hp -= dmg;
+                    mob.lastHitBy = other.ownerId;
+                    mob.damageByPlayer[other.ownerId] += dmg;
+                  }
+                  if (other.spawnProtection <= 0) {
+                    float dmg = mob.damage * 0.6f;
+                    other.hp -= dmg;
+                    other.lastHitBy = mob.ownerId;
+                    other.damageByPlayer[mob.ownerId] += dmg;
+                  }
+                } else if (mob.friendly || other.friendly) {
+                  // 非友方攻击友方（或反过来，但至少一个是友方）
+                  auto& nonFriendly = mob.friendly ? other : mob;
+                  auto& friendly = mob.friendly ? mob : other;
+                  if (friendly.spawnProtection <= 0) {
+                    float dmg = nonFriendly.damage * 0.6f;
+                    friendly.hp -= dmg;
+                    friendly.lastHitBy = nonFriendly.ownerId;
+                    friendly.damageByPlayer[nonFriendly.ownerId] += dmg;
+                  }
                 }
                 mob.hitCd = 0.1f;
                 other.hitCd = 0.1f;
