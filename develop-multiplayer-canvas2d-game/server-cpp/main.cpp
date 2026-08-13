@@ -626,10 +626,42 @@ static int pickWeightedMob(int mapId, const std::vector<int>& defaultMobs) {
   return defaultMobs.back();
 }
 
-// Drop rarity tables
-static std::string getDropRarityName(int mobRarity) {
-  int idx = std::max(0, std::min(MAX_RARITY, mobRarity));
-  return RARITIES[idx].name;
+// Drop rarity tables — matches defs.ts RARITY_DROP_RATES exactly
+// RARITY_DROP_RATES[mobRarityIdx][dropRarityIdx] = probability
+static const float RARITY_DROP_RATES[11][11] = {
+  // Common
+  {0.80f, 0.20f, 0,    0,    0,   0,   0,   0,   0,   0,   0},
+  // Unusual
+  {0.45f, 0.55f, 0,    0,    0,   0,   0,   0,   0,   0,   0},
+  // Rare
+  {0.25f, 0.60f, 0.15f,0,    0,   0,   0,   0,   0,   0,   0},
+  // Epic
+  {0,     0.13f, 0.77f,0.10f,0,   0,   0,   0,   0,   0,   0},
+  // Legendary
+  {0,     0,     0.10f,0.86f,0.04f,0,   0,   0,   0,   0,   0},
+  // Mythic
+  {0,     0,     0,    0.08f,0.90f,0.02f,0,   0,   0,   0,   0},
+  // Ultra
+  {0,     0,     0,    0,    0.38f,0.617f,0.003f,0, 0,   0,   0},
+  // Super
+  {0,     0,     0,    0,    0,   0.88f,0.1199f,0.0001f,0,0, 0},
+  // Omega
+  {0,     0,     0,    0,    0,   0.15f,0.845f,0.005f,0, 0,   0},
+  // Eternal
+  {0,     0,     0,    0,    0,   0.01f,0.96f, 0.02f, 0, 0,   0},
+  // Unique
+  {0,     0,     0,    0,    0,   0,   0,    0,    0,  0,   0},
+};
+
+static int getDropRarityByItem(int mobRarityIdx) {
+  int idx = std::max(0, std::min(MAX_RARITY, mobRarityIdx));
+  float roll = (float)rand() / (float)RAND_MAX;
+  float cumulative = 0;
+  for (int i = 0; i <= MAX_RARITY; i++) {
+    cumulative += RARITY_DROP_RATES[idx][i];
+    if (roll <= cumulative) return i;
+  }
+  return 0; // fallback to Common
 }
 
 // =====================================================================
@@ -905,7 +937,7 @@ struct Player {
   Cell secondary[SECONDARY_SLOT_COUNT];
   std::vector<Cell> bag;
   PetalState petals[SLOT_COUNT];
-  std::vector<Mob*> pets[SLOT_COUNT];
+  std::vector<int> pets[SLOT_COUNT]; // store mob IDs for pointer safety
   std::vector<LoadoutConfig> loadouts;
   TalentTreeLevels talentLevels;
   TalentBonuses talentBonuses;
@@ -1466,6 +1498,9 @@ public:
   // Per-map zone counts
   std::unordered_map<std::string, int> zoneMobCounts[3];
 
+  // Client map reference (set externally from main) for event pushing
+  std::unordered_map<uint16_t, ClientState*>* clientMap = nullptr;
+
   Simulation() {
     for (int i = 0; i < MAP_COUNT; i++) {
       playerWallColliders_.push_back(
@@ -1491,10 +1526,10 @@ public:
       Player& p = it->second;
       // Remove pets
       for (int i = 0; i < SLOT_COUNT; i++) {
-        for (auto* pet : p.pets[i]) {
-          if (pet) {
-            World& w = worlds[pet->mapId];
-            w.mobs.erase(std::remove_if(w.mobs.begin(), w.mobs.end(), [pet](const Mob& m) { return m.id == pet->id; }), w.mobs.end());
+        for (int petId : p.pets[i]) {
+          // Find which map this pet is on
+          for (int m = 0; m < MAP_COUNT; m++) {
+            removeMobFromWorld(m, petId);
           }
         }
         p.pets[i].clear();
@@ -1513,6 +1548,20 @@ public:
   }
 
   Player* getPlayer(uint16_t id) { return get(id); }
+
+  // ---- Mob lookup helpers (for pet ID-based storage) ----
+  Mob* findMobById(int mapId, int mobId) {
+    World& w = worlds[mapId];
+    for (auto& m : w.mobs) {
+      if (m.id == mobId) return &m;
+    }
+    return nullptr;
+  }
+
+  void removeMobFromWorld(int mapId, int mobId) {
+    World& w = worlds[mapId];
+    w.mobs.erase(std::remove_if(w.mobs.begin(), w.mobs.end(), [mobId](const Mob& m) { return m.id == mobId; }), w.mobs.end());
+  }
 
   // ---- Cell access helpers ----
   Cell* cellAt(Player& p, int idx) {
@@ -1776,22 +1825,23 @@ public:
 
   // ---- Petal system ----
   void despawnPets(Player& p, int slot) {
-    for (auto* pet : p.pets[slot]) {
-      if (pet) {
-        World& w = worlds[pet->mapId];
-        w.mobs.erase(std::remove_if(w.mobs.begin(), w.mobs.end(), [pet](const Mob& m) { return m.id == pet->id; }), w.mobs.end());
+    for (int petId : p.pets[slot]) {
+      for (int m = 0; m < MAP_COUNT; m++) {
+        removeMobFromWorld(m, petId);
       }
     }
     p.pets[slot].clear();
   }
 
   void cleanupPets(Player& p, int slot) {
-    std::vector<Mob*> active;
-    for (auto* pet : p.pets[slot]) {
-      if (pet && pet->hp > 0 && pet->mapId == (int)p.mapId) active.push_back(pet);
-      else if (pet) {
-        World& w = worlds[pet->mapId];
-        w.mobs.erase(std::remove_if(w.mobs.begin(), w.mobs.end(), [pet](const Mob& m) { return m.id == pet->id; }), w.mobs.end());
+    std::vector<int> active;
+    for (int petId : p.pets[slot]) {
+      Mob* pet = findMobById(p.mapId, petId);
+      if (pet && pet->hp > 0) active.push_back(petId);
+      else {
+        for (int m = 0; m < MAP_COUNT; m++) {
+          removeMobFromWorld(m, petId);
+        }
       }
     }
     p.pets[slot] = active;
@@ -1853,8 +1903,9 @@ public:
       m.damage = m.damage * p.talentBonuses.summonDmgMult;
       if (m.speed > 0) m.speed = std::max(70.f, m.speed * 1.5f);
       m.spawnProtection = protection;
+      int mobId = m.id;
       worlds[p.mapId].mobs.push_back(m);
-      p.pets[slot].push_back(&worlds[p.mapId].mobs.back());
+      p.pets[slot].push_back(mobId);
     }
   }
 
@@ -1869,7 +1920,8 @@ public:
       // Check if summon needs despawning
       if (def && def->kind == IK_SUMMON) {
         bool sameSummon = true;
-        for (auto* pet : p.pets[i]) {
+        for (int petId : p.pets[i]) {
+          Mob* pet = findMobById(p.mapId, petId);
           if (!pet || pet->type != def->petMob || pet->sourceItem != cell.item || pet->sourceRarity != cell.rarity) {
             sameSummon = false; break;
           }
@@ -2237,7 +2289,16 @@ public:
         killer->xp += xp;
         applyLevel(*killer);
         killer->statsDirty = true;
-        // We'll send events later via the client state
+        // Push XP event to killer's client
+        if (clientMap) {
+          for (auto& [csId, cs] : *clientMap) {
+            if (cs->player == killer) {
+              pushEvent(*cs, EVT_XP, mob.x, mob.y, xp);
+              pushEvent(*cs, EVT_KILL, mob.x, mob.y, mob.type);
+              break;
+            }
+          }
+        }
       }
     }
 
@@ -2249,23 +2310,35 @@ public:
     if (eligible.empty()) return;
 
     for (int looterId : eligible) {
-      std::vector<std::tuple<uint8_t, uint8_t, int>> rolled;
+      Player* looter = get(looterId);
+      if (!looter) continue;
+      
+      // Calculate how many times to roll each drop based on bonus multiplier
+      int totalRolls = 1;
+      if (looter->bonusEndsAt > 0 && (int64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::system_clock::now().time_since_epoch()).count() < looter->bonusEndsAt) {
+        totalRolls = (int)std::ceil(looter->bonusMultiplier);
+      }
+      
+      std::vector<std::pair<uint8_t, uint8_t>> rolled;
       for (auto& drop : def.drops) {
-        for (int i = 0; i < 1; i++) { // bonusMultiplier simplified
-          uint8_t item = drop.first;
-          std::string mobRarityName = getDropRarityName(mob.rarity);
-          // Simplified: just use the mob's rarity as drop rarity
-          uint8_t rarity = (uint8_t)std::max(0, std::min(MAX_RARITY, mob.rarity));
-          rolled.push_back({item, rarity, i});
+        float roll = (float)rand() / (float)RAND_MAX;
+        if (roll > drop.second) continue; // check drop chance
+        
+        for (int i = 0; i < totalRolls; i++) {
+          // Roll drop rarity using RARITY_DROP_RATES table (matches sim.ts exactly)
+          uint8_t rarity = (uint8_t)getDropRarityByItem(mob.rarity);
+          rolled.push_back({(uint8_t)drop.first, rarity});
         }
       }
+      
       for (auto& roll : rolled) {
         float angle = (float)rand() / (float)RAND_MAX * (float)M_PI * 2;
-        float distance = ((float)rand() / (float)RAND_MAX * 20 + 10) * (1 + std::get<2>(roll) * 0.5f);
+        float distance = ((float)rand() / (float)RAND_MAX * 20 + 10) * (1 + roll.second * 0.5f);
         float x = mob.x + std::cos(angle) * distance;
         float y = mob.y + std::sin(angle) * distance;
         std::unordered_set<int> allowSet = {looterId};
-        spawnDrop(mapId, std::get<0>(roll), std::get<1>(roll), x, y, looterId, allowSet);
+        spawnDrop(mapId, roll.first, roll.second, x, y, looterId, allowSet);
       }
     }
   }
@@ -2305,13 +2378,21 @@ public:
     p.deathY = p.y;
     // Remove pets
     for (int i = 0; i < SLOT_COUNT; i++) {
-      for (auto* pet : p.pets[i]) {
-        if (pet) {
-          World& w = worlds[pet->mapId];
-          w.mobs.erase(std::remove_if(w.mobs.begin(), w.mobs.end(), [pet](const Mob& m) { return m.id == pet->id; }), w.mobs.end());
+      for (int petId : p.pets[i]) {
+        for (int m = 0; m < MAP_COUNT; m++) {
+          removeMobFromWorld(m, petId);
         }
       }
       p.pets[i].clear();
+    }
+    // Push EVT_DEATH event
+    if (clientMap) {
+      for (auto& [csId, cs] : *clientMap) {
+        if (cs->player == &p) {
+          pushEvent(*cs, EVT_DEATH, p.x, p.y, (int)p.level);
+          break;
+        }
+      }
     }
   }
 
@@ -2785,9 +2866,8 @@ public:
           if (mob.friendly && mob.ownerSlot >= 0) {
             auto owner = get(mob.ownerId);
             if (owner) {
-              owner->pets[mob.ownerSlot].erase(
-                std::remove(owner->pets[mob.ownerSlot].begin(), owner->pets[mob.ownerSlot].end(), &mob),
-                owner->pets[mob.ownerSlot].end());
+              auto& ownerPets = owner->pets[mob.ownerSlot];
+              ownerPets.erase(std::remove(ownerPets.begin(), ownerPets.end(), mob.id), ownerPets.end());
             }
           }
         }
@@ -3048,9 +3128,8 @@ public:
         if (mob.friendly) {
           auto owner = get(mob.ownerId);
           if (owner && mob.ownerSlot >= 0) {
-            owner->pets[mob.ownerSlot].erase(
-              std::remove(owner->pets[mob.ownerSlot].begin(), owner->pets[mob.ownerSlot].end(), &mob),
-              owner->pets[mob.ownerSlot].end());
+            auto& ownerPets = owner->pets[mob.ownerSlot];
+            ownerPets.erase(std::remove(ownerPets.begin(), ownerPets.end(), mob.id), ownerPets.end());
           }
           continue;
         }
@@ -3109,6 +3188,16 @@ public:
         if (addItem(p, d.item, d.rarity, d.count)) {
           world.drops.erase(world.drops.begin() + i);
           looted++;
+        }
+      }
+    }
+
+    // Push EVT_LOOT event if anything was picked up
+    if (looted > 0 && clientMap) {
+      for (auto& [csId, cs] : *clientMap) {
+        if (cs->player == &p) {
+          pushEvent(*cs, EVT_LOOT, p.x, p.y, looted);
+          break;
         }
       }
     }
@@ -3778,6 +3867,7 @@ int main() {
   using WS = uWS::WebSocket<false, true, PerSocket>;
   std::unordered_map<uint16_t, WS*> sockets;
   std::unordered_map<uint16_t, ClientState*> clientStates;
+  sim.clientMap = &clientStates;
 
   const int port = std::getenv("PORT") ? std::atoi(std::getenv("PORT")) : 8080;
 
@@ -3791,7 +3881,8 @@ int main() {
         cs->playerId = data->id;
         data->client = cs;
         clientStates[data->id] = cs;
-        sim.add(data->id);
+        Player& player = sim.add(data->id);
+        cs->player = &player;
         sockets[data->id] = ws;
       },
       .message = [&](auto* ws, std::string_view msg, uWS::OpCode) {
