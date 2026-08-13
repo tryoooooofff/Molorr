@@ -9,7 +9,7 @@ RUN apt-get update -qq && apt-get install -y -qq git g++ make libssl-dev zlib1g-
 COPY package*.json ./
 RUN npm ci
 COPY . .
-ENV NEXT_PUBLIC_GAME_WS=wss://molorr-server.onrender.com
+ENV NEXT_PUBLIC_GAME_WS=wss://molorr-server-t34o.onrender.com
 RUN npm run build
 
 # Build C++ server
@@ -28,20 +28,20 @@ WORKDIR /app
 RUN apt-get update -qq && apt-get install -y -qq libssl-dev zlib1g-dev ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Next.js standalone output
-COPY --from=build /app/.next/standalone ./
-COPY --from=build /app/.next/static ./.next/static
+# Next.js standalone output → /app/nextjs/
+RUN mkdir -p /app/nextjs
+COPY --from=build /app/.next/standalone/. /app/nextjs/
+COPY --from=build /app/.next/static /app/nextjs/.next/static
 
 # Petalia C++ server binary
 COPY --from=build /app/petalia-server /app/petalia-server
 
-# Proxy script
-COPY --from=build /app/server.js /app/server.js
+# Entry script (kept separate from Next.js server.js to avoid name collision)
+COPY --from=build /app/entry.js /app/entry.js
 
 ENV NODE_ENV=production
 ENV PORT=8080
-ENV NEXT_PUBLIC_GAME_WS=wss://molorr-server.onrender.com
 
-# Proxy listens on :8080 → Next.js (internal) + C++ WebSocket (internal :8081)
+# Entry listens on :8080 → Next.js (internal :3080) + C++ WebSocket (internal :8081)
 EXPOSE 8080
-CMD ["node", "/app/server.js"]
+CMD ["node", "/app/entry.js"]

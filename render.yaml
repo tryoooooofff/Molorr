@@ -12,6 +12,6 @@ services:
       - key: NODE_ENV
         value: production
       - key: NEXT_PUBLIC_GAME_WS
-        value: wss://molorr-server.onrender.com
+        value: wss://molorr-server-t34o.onrender.com
       - key: DATABASE_URL
         sync: false
