@@ -9,7 +9,7 @@ RUN apt-get update -qq && apt-get install -y -qq git g++ make libssl-dev zlib1g-
 COPY package*.json ./
 RUN npm ci
 COPY . .
-ENV NEXT_PUBLIC_GAME_WS=wss://molorr-server.onrender.com
+ENV NEXT_PUBLIC_GAME_WS=wss://molorr-server-t34o.onrender.com
 RUN npm run build
 
 # Build C++ server
