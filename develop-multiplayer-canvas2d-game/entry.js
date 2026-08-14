@@ -24,7 +24,7 @@ cpp.on("exit", (code) => {
 // ── 2. Start the Next.js standalone server ────────────────────────────
 const nextServer = spawn("node", [path.join(__dirname, "nextjs", "server.js")], {
   stdio: "inherit",
-  env: { ...process.env, PORT: "3080" },
+  env: { ...process.env, PORT: "3080", HOST: "0.0.0.0" },
   cwd: path.join(__dirname, "nextjs"),
 });
 
