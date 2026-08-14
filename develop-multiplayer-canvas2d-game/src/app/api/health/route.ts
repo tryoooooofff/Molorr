@@ -5,12 +5,33 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   const database = db;
-  if (!database) return Response.json({ ok: true, db: false });
-
-  try {
-    await database.execute(sql`select 1`);
-    return Response.json({ ok: true, db: true });
-  } catch {
-    return Response.json({ ok: false, db: true }, { status: 500 });
+  let body;
+  if (!database) {
+    body = JSON.stringify({ ok: true, db: false });
+  } else {
+    try {
+      await database.execute(sql`select 1`);
+      body = JSON.stringify({ ok: true, db: true });
+    } catch {
+      body = JSON.stringify({ ok: false, db: true });
+    }
   }
+  return new Response(body, {
+    status: 200,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+    },
+  });
+}
+
+export async function OPTIONS() {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Headers": "*",
+    },
+  });
 }
