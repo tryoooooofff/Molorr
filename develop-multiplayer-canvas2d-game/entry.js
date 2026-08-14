@@ -42,10 +42,10 @@ cpp.on("error", (err) => {
 });
 
 // ── 2. Start the Next.js standalone server ────────────────────────────
-const nextServer = spawn("node", ["--max-old-space-size=256", path.join(__dirname, "nextjs", "server.js")], {
+const nextServer = spawn("node", ["--max-old-space-size=256", path.join(__dirname, ".next", "standalone", "server.js")], {
   stdio: "inherit",
   env: { ...process.env, PORT: "3080", HOST: "0.0.0.0" },
-  cwd: path.join(__dirname, "nextjs"),
+  cwd: path.join(__dirname, ".next", "standalone"),
 });
 nextServer.on("exit", (code) => {
   nextReady = false;
