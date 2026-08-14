@@ -33,3 +33,21 @@ services:
         value: wss://molorr-server-sg.onrender.com
       - key: DATABASE_URL
         sync: false
+
+  - type: web
+    name: molorr-server-hk
+    runtime: docker
+    repo: https://github.com/tryoooooofff/Molorr
+    rootDir: develop-multiplayer-canvas2d-game
+    dockerfilePath: Dockerfile
+    region: hong kong
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: NODE_ENV
+        value: production
+      - key: NEXT_PUBLIC_GAME_WS
+        value: wss://molorr-server-hk.onrender.com
+      - key: DATABASE_URL
+        sync: false

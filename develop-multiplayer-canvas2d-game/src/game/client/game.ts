@@ -6218,10 +6218,11 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     maxLife: number;
   }> = [];
 
-  private serverRegion: "eu" | "as" = "eu";
+  private serverRegion: "eu" | "as" | "hk" = "hk";
   private static readonly SERVER_URLS: Record<string, string> = {
     eu: "wss://molorr-server-t34o.onrender.com",
     as: "wss://molorr-server-sg.onrender.com",
+    hk: "wss://molorr-server-hk.onrender.com",
   };
   private serverBtnRects: Record<string, { x: number; y: number; w: number; h: number }> = {};
 
@@ -9973,7 +9974,7 @@ private bagLayout() {
     }
 
     // Server selector buttons
-    for (const key of ['eu', 'as'] as const) {
+    for (const key of ['eu', 'as', 'hk'] as const) {
       const r = this.serverBtnRects[key];
       if (r && hit(r, mx, my)) {
         if (this.serverRegion !== key) {
