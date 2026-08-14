@@ -16,6 +16,10 @@ let cppReady = false;
 let nextReady = false;
 let cppExitCode = null;
 
+// Connection management (OOM prevention)
+const MAX_CONN = parseInt(process.env.MAX_CONN || "50", 10);
+let activeConn = 0;
+
 // ── 1. Start the C++ game server on :8081 ─────────────────────────────
 const cpp = spawn(path.join(__dirname, "petalia-server"), [], {
   stdio: "inherit",
@@ -148,20 +152,52 @@ const startProxy = async () => {
       socket.destroy();
       return;
     }
+
+    // Enforce connection limit (OOM prevention)
+    if (activeConn >= MAX_CONN) {
+      console.error("[entry] Max connections reached, rejecting");
+      socket.destroy();
+      return;
+    }
+
     const client = net.connect(CPP_PORT, "localhost", () => {
+      activeConn++;
       const reqLine = `GET ${req.url} HTTP/1.1\r\n`;
       const headers = Object.entries(req.headers)
         .map(([k, v]) => `${k}: ${v}`)
         .join("\r\n");
       client.write(reqLine + headers + "\r\n\r\n");
       if (head && head.length > 0) client.write(head);
-      client.pipe(socket).pipe(client);
+
+      // Bidirectional pipe with proper cleanup
+      socket.pipe(client);
+      client.pipe(socket);
     });
+
+    // Shared cleanup: decrement counter and destroy both sockets
+    const cleanup = () => {
+      activeConn = Math.max(0, activeConn - 1);
+      socket.destroy();
+      client.destroy();
+    };
+
     client.on("error", (err) => {
       console.error("[entry] WebSocket proxy to C++ failed:", err.message);
-      try { socket.destroy(); } catch {}
+      cleanup();
     });
-    socket.on("error", () => { try { client.destroy(); } catch {} });
+    socket.on("error", cleanup);
+
+    // Clean up on close events too (catches remote disconnect)
+    socket.on("close", cleanup);
+    client.on("close", cleanup);
+
+    // Idle timeout: kill zombie connections after 5 minutes
+    const idleTimer = setTimeout(() => {
+      console.error("[entry] Idle connection timeout, closing");
+      cleanup();
+    }, 5 * 60 * 1000);
+    socket.on("data", () => { idleTimer.refresh(); });
+    client.on("data", () => { idleTimer.refresh(); });
   });
 
   proxy.listen(RENDER_PORT, () => {
@@ -176,6 +212,14 @@ const startProxy = async () => {
       console.log(`[entry] C++ server status changed: ${alive ? "up" : "down"}`);
     }
   }, 15000);
+
+  // ── Memory monitoring (OOM early warning) ───────────────────────────
+  setInterval(() => {
+    const mem = process.memoryUsage();
+    const rssMB = (mem.rss / 1024 / 1024).toFixed(0);
+    const heapMB = (mem.heapUsed / 1024 / 1024).toFixed(0);
+    console.log(`[mem] rss=${rssMB}MB heap=${heapMB}MB conn=${activeConn}/${MAX_CONN}`);
+  }, 30000);
 };
 
 startProxy();

@@ -46,4 +46,4 @@ ENV PORT=8080
 
 # Entry listens on :8080 → Next.js (internal :3080) + C++ WebSocket (internal :8081)
 EXPOSE 8080
-CMD ["node", "/app/entry.js"]
+CMD ["node", "--max-old-space-size=384", "/app/entry.js"]
