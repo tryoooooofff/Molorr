@@ -20,6 +20,11 @@ let cppExitCode = null;
 const MAX_CONN = parseInt(process.env.MAX_CONN || "50", 10);
 let activeConn = 0;
 
+// Debug mode (set DEBUG=true to enable 20s debug output)
+const DEBUG = process.env.DEBUG === "true";
+let totalRequests = 0;
+let totalUpgrades = 0;
+
 // ── 1. Start the C++ game server on :8081 ─────────────────────────────
 const cpp = spawn(path.join(__dirname, "petalia-server"), [], {
   stdio: "inherit",
@@ -37,14 +42,15 @@ cpp.on("error", (err) => {
 });
 
 // ── 2. Start the Next.js standalone server ────────────────────────────
-const nextServer = spawn("node", [path.join(__dirname, "nextjs", "server.js")], {
+const nextServer = spawn("node", ["--max-old-space-size=256", path.join(__dirname, "nextjs", "server.js")], {
   stdio: "inherit",
   env: { ...process.env, PORT: "3080", HOST: "0.0.0.0" },
   cwd: path.join(__dirname, "nextjs"),
 });
 nextServer.on("exit", (code) => {
   nextReady = false;
-  console.error(`[entry] Next.js server exited with code ${code}`);
+  console.error(`[entry] Next.js server exited with code ${code} — exiting to trigger Render restart`);
+  setImmediate(() => process.exit(code || 1));
 });
 nextServer.on("error", (err) => {
   console.error("[entry] Next.js server failed to spawn:", err.message);
@@ -114,6 +120,8 @@ const startProxy = async () => {
   console.log("[entry] Starting proxy...");
 
   const proxy = http.createServer((req, res) => {
+    totalRequests++;
+
     // ── /status endpoint for debugging ────────────────────────────────
     if (req.url === "/status") {
       res.writeHead(200, { "content-type": "application/json" });
@@ -123,6 +131,29 @@ const startProxy = async () => {
         cpp: cppReady,
         cppExitCode: cppExitCode,
         uptime: process.uptime(),
+      }));
+      return;
+    }
+
+    // ── /debug endpoint (full server state, lightweight) ──────────────
+    if (req.url === "/debug") {
+      const mem = process.memoryUsage();
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        ok: cppReady && nextReady,
+        next: nextReady,
+        cpp: cppReady,
+        cppExitCode: cppExitCode,
+        uptime: process.uptime(),
+        pid: process.pid,
+        memory: {
+          rssMB: +(mem.rss / 1024 / 1024).toFixed(1),
+          heapUsedMB: +(mem.heapUsed / 1024 / 1024).toFixed(1),
+          heapTotalMB: +(mem.heapTotal / 1024 / 1024).toFixed(1),
+        },
+        connections: { active: activeConn, max: MAX_CONN, totalUpgrades },
+        requests: { total: totalRequests },
+        debug: DEBUG,
       }));
       return;
     }
@@ -162,6 +193,7 @@ const startProxy = async () => {
 
     const client = net.connect(CPP_PORT, "localhost", () => {
       activeConn++;
+      totalUpgrades++;
       const reqLine = `GET ${req.url} HTTP/1.1\r\n`;
       const headers = Object.entries(req.headers)
         .map(([k, v]) => `${k}: ${v}`)
@@ -213,13 +245,28 @@ const startProxy = async () => {
     }
   }, 15000);
 
-  // ── Memory monitoring (OOM early warning) ───────────────────────────
+  // ── Debug / status output every 20 seconds ──────────────────────────
   setInterval(() => {
     const mem = process.memoryUsage();
     const rssMB = (mem.rss / 1024 / 1024).toFixed(0);
     const heapMB = (mem.heapUsed / 1024 / 1024).toFixed(0);
-    console.log(`[mem] rss=${rssMB}MB heap=${heapMB}MB conn=${activeConn}/${MAX_CONN}`);
-  }, 30000);
+
+    if (DEBUG) {
+      // Full debug dump — includes all server state
+      console.log(
+        `[debug] ` +
+        `mem=${rssMB}/${heapMB}MB ` +
+        `conn=${activeConn}/${MAX_CONN} ` +
+        `total=${totalRequests}req ${totalUpgrades}ws ` +
+        `cpp=${cppReady ? "up" : "down"} ` +
+        `next=${nextReady ? "up" : "down"} ` +
+        `uptime=${(process.uptime() / 60).toFixed(1)}min`
+      );
+    } else {
+      // Lightweight keepalive — minimal info
+      console.log(`[mem] rss=${rssMB}MB heap=${heapMB}MB conn=${activeConn}/${MAX_CONN}`);
+    }
+  }, 20000);
 };
 
 startProxy();
