@@ -32,14 +32,21 @@ const nextServer = spawn("node", [path.join(__dirname, "nextjs", "server.js")], 
 function waitForPort(port, host, retries = 30, delay = 500) {
   return new Promise((resolve, reject) => {
     let attempts = 0;
+    let done = false;
     const check = () => {
+      if (done) return;
       const sock = new net.Socket();
       sock.setTimeout(1000);
-      sock.on("connect", () => { sock.destroy(); resolve(); });
+      sock.on("connect", () => {
+        done = true;
+        sock.destroy();
+        resolve();
+      });
       sock.on("error", () => { sock.destroy(); });
       sock.on("timeout", () => { sock.destroy(); });
       sock.connect(port, host);
       sock.on("close", () => {
+        if (done) return;
         attempts++;
         if (attempts >= retries) reject(new Error(`port ${port} not ready`));
         else setTimeout(check, delay);
@@ -53,8 +60,8 @@ function waitForPort(port, host, retries = 30, delay = 500) {
 const startProxy = async () => {
   try {
     await Promise.all([
-      waitForPort(3080, "0.0.0.0", 60),
-      waitForPort(CPP_PORT, "0.0.0.0"),
+      waitForPort(3080, "127.0.0.1", 60),
+      waitForPort(CPP_PORT, "127.0.0.1"),
     ]);
     console.log("[entry] Both upstream servers ready, starting proxy...");
   } catch (e) {
@@ -64,7 +71,7 @@ const startProxy = async () => {
 
   const proxy = http.createServer((req, res) => {
     const options = {
-      hostname: "0.0.0.0",
+      hostname: "127.0.0.1",
       port: 3080,
       path: req.url,
       method: req.method,
