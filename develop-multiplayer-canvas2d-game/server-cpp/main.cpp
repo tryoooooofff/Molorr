@@ -3570,13 +3570,15 @@ public:
 
     World& world = worlds[me.mapId];
     Writer body;
+    body.b.reserve(2048); // 预分配减少 realloc
     uint16_t count = 0;
+    float snapViewX = VIEW_RADIUS * VIEW_SCALE;
+    float snapViewY = snapViewX * 0.73f; // 保持宽高比
 
     // Players
     for (auto& [id, other] : players) {
       if (other.mapId != me.mapId || !other.alive) continue;
-      float viewX = 1300, viewY = 950;
-      if (&other != &me && (std::abs(other.x - me.x) >= viewX || std::abs(other.y - me.y) >= viewY)) continue;
+      if (&other != &me && (std::abs(other.x - me.x) >= snapViewX || std::abs(other.y - me.y) >= snapViewY)) continue;
       float opRadius = PLAYER_RADIUS + soilRadiusBonusOf(other);
       body.u8v(ENT_PLAYER);
       body.u16v(other.id);
@@ -3615,7 +3617,7 @@ public:
 
     // Mobs
     for (auto& mob : world.mobs) {
-      if (std::abs(mob.x - me.x) >= 1300 || std::abs(mob.y - me.y) >= 950) continue;
+      if (std::abs(mob.x - me.x) >= snapViewX || std::abs(mob.y - me.y) >= snapViewY) continue;
       body.u8v(ENT_MOB);
       body.u16v(mob.id);
       body.u8v(mob.type);
@@ -3635,7 +3637,7 @@ public:
 
     // Drops
     for (auto& d : world.drops) {
-      if (std::abs(d.x - me.x) >= 1300 || std::abs(d.y - me.y) >= 950) continue;
+      if (std::abs(d.x - me.x) >= snapViewX || std::abs(d.y - me.y) >= snapViewY) continue;
       if (d.hasAllowList && !d.allowedPlayerIds.count(me.id)) continue;
       uint8_t dropRadius = d.suctionTimer > 0 ? (12 | 0x80) : 12;
       body.u8v(ENT_DROP);
@@ -4468,7 +4470,7 @@ int main() {
       }
     }
 
-    // State sync for all players
+    // State sync for all players (every other tick = 10 Hz)
     for (auto& [id, ws] : *socketsPtr) {
       Player* p = simPtr->get(id);
       if (!p) continue;
@@ -4476,8 +4478,8 @@ int main() {
       if (csIt == clientStatesPtr->end()) continue;
       ClientState* cs = csIt->second;
 
-      // Snapshot
-      if (!p->menuMode) {
+      // Snapshot (10 Hz to reduce CPU load)
+      if (!p->menuMode && (simPtr->tickCount & 1)) {
         Writer snap = simPtr->snapshotFor(*p, simPtr->tickCount, *clientStatesPtr);
         ws->send(snap.view(), uWS::OpCode::BINARY);
       }
