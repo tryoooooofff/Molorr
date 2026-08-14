@@ -3400,6 +3400,7 @@ public:
     const MapDef& map = MAPS[mapId];
     auto* collider = wallColliders_[mapId].get();
     auto& mobs = worlds[mapId].mobs;
+    float projViewRadiusSq = (VIEW_RADIUS * VIEW_SCALE) * (VIEW_RADIUS * VIEW_SCALE);
 
     for (int i = (int)proj.size() - 1; i >= 0; i--) {
       Projectile& p = proj[i];
@@ -3437,7 +3438,7 @@ public:
         for (auto* pl : players) {
           if (pl->mapId != mapId || !pl->alive || p.hitCd > 0) continue;
           float pdx = pl->x - p.x, pdy = pl->y - p.y;
-          if (pdx * pdx + pdy * pdy > viewRadiusSq) continue; // 视野裁剪
+          if (pdx * pdx + pdy * pdy > projViewRadiusSq) continue; // 视野裁剪
           float d = std::hypot(pdx, pdy);
           float plRadius = PLAYER_RADIUS + soilRadiusBonusOf(*pl);
           if (d < plRadius + p.radius && pl->hurtCd <= 0) {
@@ -3462,7 +3463,7 @@ public:
         for (auto& mob : mobs) {
           if (mob.hp <= 0 || p.hitCd > 0) continue;
           float mdx = mob.x - p.x, mdy = mob.y - p.y;
-          if (mdx * mdx + mdy * mdy > viewRadiusSq) continue; // 视野裁剪
+          if (mdx * mdx + mdy * mdy > projViewRadiusSq) continue; // 视野裁剪
           float d = std::hypot(mdx, mdy);
           if (d < mob.radius + p.radius) {
             mob.hp -= p.damage;
