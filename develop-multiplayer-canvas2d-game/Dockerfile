@@ -12,8 +12,9 @@ COPY . .
 RUN npm run build
 
 # Build C++ server — only build uSockets (not the full uWebSockets examples)
-RUN git clone --depth 1 --recursive https://github.com/uNetworking/uWebSockets.git && \
+RUN git clone --depth 1 https://github.com/uNetworking/uWebSockets.git && \
     cd uWebSockets && \
+    git submodule update --init --depth 1 uSockets && \
     make -s -j$(nproc) -C uSockets && \
     cd .. && \
     g++ -std=c++20 -O2 server-cpp/main.cpp \
