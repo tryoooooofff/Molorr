@@ -47,6 +47,7 @@ import {
 } from "../shared/defs";
 import { C2S, ENT, EVT, LOADOUT_OP, Reader, S2C, SWAP_ROW_ALL, TEAM, Writer } from "../shared/protocol";
 import type { Cell, LoadoutConfig } from "../shared/sim";
+import { PLAYER_RADIUS, ArrayWallCollider } from "../shared/sim";
 import { createTransport, Transport } from "./transport";
 import {
   button,
@@ -6287,6 +6288,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private worldW = 3200;
   private worldH = 3200;
   private walls: Wall[] = [];
+  private wallCollider: ArrayWallCollider | null = null;
   private ents = new Map<number, Ent>();
   private snapshotSequence = 0;
   private camX = 0;
@@ -7225,6 +7227,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       for (let i = 0; i < wallCount; i++) {
         this.walls.push({ x: r.u16(), y: r.u16(), w: r.u16(), h: r.u16() });
       }
+      this.wallCollider = new ArrayWallCollider(this.walls, this.worldW, this.worldH, 256);
       this.ents.clear();
       this.roseParticles.length = 0;
       this.mapFlash = 1;
@@ -7710,6 +7713,17 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       // burst the instant the connection recovers.
       if (this.snapshotStalled) e.seen += dt;
       else if (this.time - e.seen > 0.6) this.ents.delete(e.id);
+    }
+
+    // ---- 玩家与墙壁的精确碰撞 ----
+    if (this.wallCollider) {
+      const me = this.ents.get(this.selfId);
+      if (me) {
+        const r = PLAYER_RADIUS; // 客户端不追踪 soil radius bonus，使用基础半径
+        const [nx, ny] = this.wallCollider.collideCircle(me.x, me.y, r);
+        me.x = nx;
+        me.y = ny;
+      }
     }
 
     // ---- 检测视野内最近的 Ultra+ 生物（Ultra=6, Super=7, Omega=8, Eternal=9） ----

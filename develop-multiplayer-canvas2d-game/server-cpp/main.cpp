@@ -85,6 +85,7 @@ constexpr float PETAL_TARGET_RECHECK_FRAMES = 3;
 constexpr float MOB_WALL_CELL_SIZE = 250.f;
 constexpr float REGION_SIZE = 2000.f;
 constexpr float VIEW_RADIUS = 1300.f;
+constexpr float VIEW_SCALE = 1.0f; // 视野缩放系数，可调整碰撞检测的范围
 constexpr float ZONE_REFILL_INTERVAL = 5.f;
 constexpr int BLOCK_GRID_COLS = 40;
 constexpr int BLOCK_GRID_ROWS = 40;
@@ -2610,11 +2611,13 @@ public:
     p.y = clampf(newY, playerRadius, map.height - playerRadius);
 
     // Player-to-player push
+    float ppViewRadiusSq = (VIEW_RADIUS * VIEW_SCALE) * (VIEW_RADIUS * VIEW_SCALE);
     for (auto* o : allPlayers) {
       if (o == &p || o->mapId != p.mapId || !o->alive) continue;
-      collisionCounter.n++;
       float dx = p.x - o->x;
       float dy = p.y - o->y;
+      if (dx * dx + dy * dy > ppViewRadiusSq) continue; // 视野裁剪
+      collisionCounter.n++;
       float d = std::hypot(dx, dy);
       float oRadius = PLAYER_RADIUS + soilRadiusBonusOf(*o);
       float minDist = playerRadius + oRadius;
@@ -2907,7 +2910,7 @@ public:
     }
 
     // Dormant system
-    float viewRadius = VIEW_RADIUS;
+    float viewRadius = VIEW_RADIUS * VIEW_SCALE;
     float viewRadiusSq = viewRadius * viewRadius;
 
     // Move out-of-view mobs to dormant
@@ -3132,8 +3135,9 @@ public:
           mob.collisionTimer = interval + (float)(rand() % 20) / 1000.f;
           for (auto& other : mobs) {
             if (&other == &mob) continue;
-            collisionCounter.n++;
             float dx = mob.x - other.x, dy = mob.y - other.y;
+            if (dx * dx + dy * dy > viewRadiusSq) continue; // 视野裁剪：跳过过远的生物
+            collisionCounter.n++;
             float d = std::hypot(dx, dy);
             float minDist = mob.radius + other.radius;
             if (d < minDist && d > 0.001f) {
@@ -3191,8 +3195,10 @@ public:
       // ---- Mob-to-player collision ----
       if (!mob.friendly) {
         for (auto* p : here) {
+          float dx = p->x - mob.x, dy = p->y - mob.y;
+          if (dx * dx + dy * dy > viewRadiusSq) continue; // 视野裁剪：跳过过远的玩家
           collisionCounter.n++;
-          float d = std::hypot(p->x - mob.x, p->y - mob.y);
+          float d = std::hypot(dx, dy);
           float pRadius = PLAYER_RADIUS + soilRadiusBonusOf(*p);
           if (d < mob.radius + pRadius) {
             float push = (mob.radius + pRadius - d) * 0.5f;
@@ -3430,7 +3436,9 @@ public:
         // Hit players
         for (auto* pl : players) {
           if (pl->mapId != mapId || !pl->alive || p.hitCd > 0) continue;
-          float d = std::hypot(pl->x - p.x, pl->y - p.y);
+          float pdx = pl->x - p.x, pdy = pl->y - p.y;
+          if (pdx * pdx + pdy * pdy > viewRadiusSq) continue; // 视野裁剪
+          float d = std::hypot(pdx, pdy);
           float plRadius = PLAYER_RADIUS + soilRadiusBonusOf(*pl);
           if (d < plRadius + p.radius && pl->hurtCd <= 0) {
             float dmg = p.damage;
@@ -3453,7 +3461,9 @@ public:
         // Hit hostile mobs and friendly mobs (no more invincibility for friendly)
         for (auto& mob : mobs) {
           if (mob.hp <= 0 || p.hitCd > 0) continue;
-          float d = std::hypot(mob.x - p.x, mob.y - p.y);
+          float mdx = mob.x - p.x, mdy = mob.y - p.y;
+          if (mdx * mdx + mdy * mdy > viewRadiusSq) continue; // 视野裁剪
+          float d = std::hypot(mdx, mdy);
           if (d < mob.radius + p.radius) {
             mob.hp -= p.damage;
             mob.lastHitBy = p.ownerId;
