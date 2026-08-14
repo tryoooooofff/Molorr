@@ -48,27 +48,27 @@ nextServer.on("error", (err) => {
 
 // ── 3. Health check helper: wait for a TCP port to be ready ───────────
 function waitForPort(port, host, retries = 30, delay = 500) {
+  let attempts = 0;
   return new Promise((resolve, reject) => {
-    let attempts = 0;
-    let done = false;
     const check = () => {
-      if (done) return;
       const sock = new net.Socket();
       sock.setTimeout(1000);
+      let done = false;
+      // Register ALL handlers BEFORE connect() to avoid race conditions
       sock.on("connect", () => {
         done = true;
         sock.destroy();
         resolve();
       });
-      sock.on("error", () => { sock.destroy(); });
-      sock.on("timeout", () => { sock.destroy(); });
-      sock.connect(port, host);
+      sock.on("error", () => { if (!done) { sock.destroy(); } });
+      sock.on("timeout", () => { if (!done) { sock.destroy(); } });
       sock.on("close", () => {
         if (done) return;
         attempts++;
         if (attempts >= retries) reject(new Error(`port ${port} not ready`));
         else setTimeout(check, delay);
       });
+      sock.connect(port, host);
     };
     check();
   });
@@ -79,9 +79,10 @@ function checkPort(port, host) {
   return new Promise((resolve) => {
     const sock = new net.Socket();
     sock.setTimeout(1000);
-    sock.on("connect", () => { sock.destroy(); resolve(true); });
-    sock.on("error", () => { sock.destroy(); resolve(false); });
-    sock.on("timeout", () => { sock.destroy(); resolve(false); });
+    let done = false;
+    sock.on("connect", () => { done = true; sock.destroy(); resolve(true); });
+    sock.on("error", () => { if (!done) { sock.destroy(); resolve(false); } });
+    sock.on("timeout", () => { if (!done) { sock.destroy(); resolve(false); } });
     sock.connect(port, host);
   });
 }
