@@ -44,6 +44,7 @@ function waitForPort(port, host, retries = 30, delay = 500) {
       });
       sock.on("error", () => { sock.destroy(); });
       sock.on("timeout", () => { sock.destroy(); });
+      // Try both IPv4 and IPv6
       sock.connect(port, host);
       sock.on("close", () => {
         if (done) return;
@@ -59,9 +60,10 @@ function waitForPort(port, host, retries = 30, delay = 500) {
 // ── 4. Wait for both servers, then start proxy ────────────────────────
 const startProxy = async () => {
   try {
+    // Try localhost first (resolves to both 127.0.0.1 and ::1)
     await Promise.all([
-      waitForPort(3080, "127.0.0.1", 60),
-      waitForPort(CPP_PORT, "127.0.0.1"),
+      waitForPort(3080, "localhost", 60),
+      waitForPort(CPP_PORT, "localhost"),
     ]);
     console.log("[entry] Both upstream servers ready, starting proxy...");
   } catch (e) {
@@ -71,7 +73,7 @@ const startProxy = async () => {
 
   const proxy = http.createServer((req, res) => {
     const options = {
-      hostname: "127.0.0.1",
+      hostname: "localhost",
       port: 3080,
       path: req.url,
       method: req.method,
@@ -90,7 +92,7 @@ const startProxy = async () => {
 
   // WebSocket upgrade: proxy to the C++ server via raw TCP
   proxy.on("upgrade", (req, socket, head) => {
-    const client = net.connect(CPP_PORT, "127.0.0.1", () => {
+    const client = net.connect(CPP_PORT, "localhost", () => {
       // Forward the HTTP upgrade request to the C++ server
       const reqLine = `GET ${req.url} HTTP/1.1\r\n`;
       const headers = Object.entries(req.headers)
