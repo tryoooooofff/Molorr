@@ -7041,6 +7041,8 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     net.onOpen = () => {
       this.connected = true;
       this.sendJoin();
+      // 连接成功后立即发送天赋数据
+      this.sendTalent();
       // 连接成功后立即发一次 ping
       this.sendPing();
     };
