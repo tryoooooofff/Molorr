@@ -50,8 +50,8 @@ export class ArenaPanel {
     if (!this.panelOpen) return;
 
     // 面板居中
-    this.panelX = (ctx.canvas.width - this.panelW) / 2;
-    this.panelY = (ctx.canvas.height - this.panelH) / 2;
+    this.panelX = 10;
+    this.panelY = 60;
 
     // 半透明遮罩
     ctx.fillStyle = 'rgba(0,0,0,0.45)';
