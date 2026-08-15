@@ -83,6 +83,8 @@ import { BonusSystem } from "./bonus";
 import { MobGallery } from "./mobGallery";
 import { TalentSystem } from "./talent";
 import type { TalentBonuses, TalentHost, TalentPetalLike } from "./talent";
+import { ArenaPanel } from "./arenaPanel";
+import type { PlayerBrief, RoomBrief } from "./arenaPanel";
 import { CloudStorage } from "./storage";
 
 interface Ent {
@@ -6206,6 +6208,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   /** Canvas-painted account panel (local-storage based). */
   private accountSystem = new AccountSystem();
   private squadCode = "";
+  private arenaPanel = new ArenaPanel();
+  private arenaWalls: Wall[] | null = null;
+  private arenaSeed = 0;
 
   private roseParticles: Array<{
     x: number;
@@ -6541,7 +6546,10 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
    */
   private talentHost(): TalentHost {
     return {
-      getLevel: () => this.level,
+      getLevel: () => {
+        if (this.arenaPanel.state === 'in-game') return 0; // arena 模式天赋不生效
+        return this.level;
+      },
       getHp: () => this.hp,
       getMaxHp: () => this.maxHp,
       isInGame: () => this.scene === "game",
@@ -7045,6 +7053,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       this.sendTalent();
       // 连接成功后立即发一次 ping
       this.sendPing();
+      this.arenaPanel.sendPacket = (data: Uint8Array) => {
+        if (this.net && this.connected) this.net.send(data);
+      };
     };
     net.onClose = (code?: number) => {
       this.connected = false;
@@ -7472,6 +7483,85 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         this.saveLoadoutsLocal();
         break;
       }
+    // ── Arena 模式 ──
+    case S2C.ARENA_LOBBY: {
+      const code = r.str();
+      const hostSeat = r.u8();
+      const size = r.u8();
+      const mode = r.u8();
+      const seatCount = r.u8();
+      const seats: PlayerBrief[] = [];
+      for (let i = 0; i < seatCount; i++) {
+        seats.push({
+          id: r.u16(), name: r.str(), level: r.u16(), maxRarity: r.u8(),
+          team: r.u8(), alive: r.u8() === 1, lives: r.u8(), ready: r.u8() === 1, hasWheel: r.u8() === 1,
+        });
+      }
+      // 找到自己的 seat
+      let mySeat = 0;
+      for (let i = 0; i < seats.length; i++) { if (seats[i].id === this.selfId) { mySeat = i; break; } }
+      this.arenaPanel.onLobbyUpdate({ code, hostSeat, size, mode, seats, mySeat, myTeam: seats[mySeat]?.team ?? 0 });
+      break;
+    }
+    case S2C.ARENA_UPDATE: {
+      const type = r.u8();
+      const seat = r.u8();
+      const payload = type === 2 ? r.u8() : type === 3 ? r.u16() : 0;
+      this.arenaPanel.onUpdate(type, seat, payload);
+      break;
+    }
+    case S2C.ARENA_START: {
+      const seed = r.u32();
+      const wallCount = r.u16();
+      const walls: Wall[] = [];
+      for (let i = 0; i < wallCount; i++) {
+        walls.push({ x: r.u16(), y: r.u16(), w: r.u16(), h: r.u16() });
+      }
+      this.arenaPanel.onStart(seed, walls);
+      this.arenaWalls = walls;
+      this.arenaSeed = seed;
+      break;
+    }
+    case S2C.ARENA_EVENT: {
+      const type = r.u8();
+      const seat = r.u8();
+      const payload = r.u16();
+      if (type === 0) this.arenaPanel.onLifeLost(seat);
+      break;
+    }
+    case S2C.ARENA_RESULT: {
+      const winnerTeam = r.u8();
+      const cardCount = r.u8();
+      const wonCards: Cell[] = [];
+      for (let i = 0; i < cardCount; i++) {
+        wonCards.push({ item: r.u8(), rarity: r.u8(), count: r.u16() });
+      }
+      // 胜方：把卡加入 bag
+      if (this.arenaPanel.currentRoom?.myTeam === winnerTeam) {
+        for (const card of wonCards) {
+          if (card.item !== 255) this.bag.push(card);
+        }
+        this.saveDirty = true;
+      }
+      // 1.5s 后回主菜单
+      setTimeout(() => {
+        this.gotoMenu();
+        this.arenaPanel.close();
+      }, 1500);
+      break;
+    }
+    case S2C.ARENA_LIST: {
+      const count = r.u8();
+      const rooms: RoomBrief[] = [];
+      for (let i = 0; i < count; i++) {
+        rooms.push({
+          code: r.str(), hostName: r.str(), mode: r.u8(),
+          filled: r.u8(), capacity: r.u8(),
+        });
+      }
+      this.arenaPanel.onList(rooms);
+      break;
+    }
     default:
       break;
   }
@@ -8762,6 +8852,11 @@ private bagLayout() {
       e.preventDefault();
       return;
     }
+    // Arena 搜索框键盘输入
+    if (this.arenaPanel.panelOpen && this.arenaPanel.state === 'lobby-list') {
+      if (e.key === 'Backspace') { this.arenaPanel.handleKeyInput('\b'); e.preventDefault(); return; }
+      else if (e.key.length === 1) { this.arenaPanel.handleKeyInput(e.key); e.preventDefault(); return; }
+    }
     this.keys.add(e.code);
     if (e.code === "Space" || e.code.startsWith("Shift")) e.preventDefault();
     if (e.code === "KeyE" || e.code === "KeyI") this.toggleBag();
@@ -9545,6 +9640,38 @@ private bagLayout() {
         });
         break;
       }
+      // Arena: crossed swords
+      case 'arena': {
+        // Left sword
+        ctx.beginPath();
+        ctx.moveTo(cx - s * 0.15, cy - s * 0.85);
+        ctx.lineTo(cx - s * 0.45, cy - s * 0.55);
+        ctx.lineTo(cx - s * 0.10, cy - s * 0.20);
+        ctx.moveTo(cx - s * 0.15, cy - s * 0.85);
+        ctx.lineTo(cx - s * 0.05, cy - s * 0.95);
+        ctx.lineTo(cx + s * 0.05, cy - s * 0.85);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        // Right sword
+        ctx.beginPath();
+        ctx.moveTo(cx + s * 0.15, cy - s * 0.85);
+        ctx.lineTo(cx + s * 0.45, cy - s * 0.55);
+        ctx.lineTo(cx + s * 0.10, cy - s * 0.20);
+        ctx.moveTo(cx + s * 0.15, cy - s * 0.85);
+        ctx.lineTo(cx + s * 0.05, cy - s * 0.95);
+        ctx.lineTo(cx - s * 0.05, cy - s * 0.85);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        // Shield
+        ctx.beginPath();
+        ctx.arc(cx, cy + s * 0.15, s * 0.35, Math.PI * 0.1, Math.PI * 0.9);
+        ctx.lineTo(cx, cy + s * 0.70);
+        ctx.closePath();
+        ctx.stroke();
+        break;
+      }
     }
     ctx.restore();
   }
@@ -9695,7 +9822,7 @@ private bagLayout() {
 
     // 顶部栏 8 个图标按钮：全部移到左上角（桌面/手机同一布局，
     // 手机端按钮自动缩小以适应宽度，无需单独分支）。
-    const topOrder = ['top_account', 'top_shop', 'top_hunting_quest', 'top_talent', 'top_mob_gallery', 'top_achievement', 'top_settings', 'top_changelog'];
+    const topOrder = ['top_account', 'top_shop', 'top_hunting_quest', 'top_talent', 'top_mob_gallery', 'top_achievement', 'top_arena', 'top_settings', 'top_changelog'];
     const TOP_GAP = 8;
     const topSize = Math.max(32, Math.min(44, (W - 16 - TOP_GAP * (topOrder.length - 1)) / topOrder.length));
     topOrder.forEach((key, i) => {
@@ -9747,6 +9874,11 @@ private bagLayout() {
       this.connect();
       return;
     }
+    // Arena 面板：面板打开时截获点击
+    if (this.arenaPanel.panelOpen && this.arenaPanel.handleClick(mx, my)) {
+      return;
+    }
+
     // Bonus 面板常驻主菜单：面板区域内的点击一律由面板处理并吞掉，
     // 不会穿透到下方的按钮（防止点开其它面板）。
     // 其它模态面板（画廊/日志/账号/设置/背包/合成）打开时不触发 bonus。
@@ -9928,6 +10060,21 @@ private bagLayout() {
       this.talent.toggle();
       return;
     }
+    // Arena 面板：主菜单 Arena 图标打开/关闭
+    if (actions.top_arena && hit(actions.top_arena, mx, my)) {
+      this.focus = null;
+      this.bagOpen = false;
+      this.craftOpen = false;
+      this.settings.close();
+      if (this.mobGallery.visible) this.mobGallery.close();
+      this.changelog.close();
+      this.achievements.panelOpen = false;
+      this.shopSystem.close();
+      this.challenges.panelOpen = false;
+      this.loadoutPanelOpen = false;
+      this.arenaPanel.toggle();
+      return;
+    }
 
     // Loadout 按钮（主菜单也支持）
     if (hit(this.loadoutBtnRect, mx, my)) {
@@ -10053,6 +10200,8 @@ private bagLayout() {
       this.shopSystem.close();
       this.challenges.panelOpen = false;
       this.loadoutPanelOpen = false;
+      this.arenaPanel.close();
+      this.arenaPanel.state = 'closed';
       this.updateMobileLayout();
       // 进入游戏场景：执行天赋的延迟等级同步（load 时若在菜单则挂起）。
       this.talent.onGameStart();
@@ -10080,6 +10229,8 @@ private bagLayout() {
       this.shopSystem.close();
       this.challenges.panelOpen = false;
       this.loadoutPanelOpen = false;
+      this.arenaPanel.close();
+      this.arenaPanel.state = 'closed';
       this.updateMobileLayout();
       // 回到主页面后重新建立服务器连接(主页面同样进行 AFK 检测,
       // 以菜单模式 JOIN,不进入世界模拟)。
@@ -10100,6 +10251,10 @@ private bagLayout() {
     if (this.talent.isOpen) {
       if (this.talent.handleClick([mx, my])) return;
       this.talent.close();
+      return;
+    }
+    // Arena 面板：面板打开时截获点击
+    if (this.arenaPanel.panelOpen && this.arenaPanel.handleClick(mx, my)) {
       return;
     }
     // After an AFK kick the only thing left to do is go back to the menu.
@@ -11185,6 +11340,7 @@ private bagLayout() {
       top_talent:        [142, 68, 173],
       top_mob_gallery:   [155, 89, 182],
       top_achievement:   [230, 126, 34],
+      top_arena:         [231, 76, 60],
       top_settings:      [51, 51, 85],
       top_changelog:     [21, 142, 24],
     };
@@ -11195,6 +11351,7 @@ private bagLayout() {
       top_talent:        [155, 89, 182],
       top_mob_gallery:   [142, 68, 173],
       top_achievement:   [211, 84, 0],
+      top_arena:         [192, 57, 43],
       top_settings:      [85, 85, 119],
       top_changelog:     [28, 180, 32],
     };
@@ -11343,6 +11500,9 @@ private bagLayout() {
     if (this.loadoutPanelOpen) {
       this.drawLoadoutPanel();
     }
+
+    // Arena 面板（主菜单 Arena 图标入口）
+    this.arenaPanel.draw(ctx);
 
     // ─── "Coming soon" toast（未实现按钮的点击反馈）───
     if (this.menuToast && this.time < this.menuToast.until) {
@@ -11641,8 +11801,17 @@ private bagLayout() {
     this.chat.draw(this.ctx, this.h - this.hotbarHeight() + chatLift);
     this.renderBag();
     this.renderCraft();
+
+    // Arena 战场渲染
+    if (this.arenaPanel.state === 'in-game') {
+      this.renderArenaBattlefield(ctx);
+    }
+
     // 天赋面板（游戏内由主菜单 Talent 入口打开后显示在最上层）。
     this.talent.draw(this.ctx);
+
+    // Arena 面板（游戏内也可显示）
+    this.arenaPanel.draw(ctx);
 
 if (this.drag) {
   const size = 60;
@@ -11702,6 +11871,72 @@ if (this.drag) {
     if (this.loadoutPanelOpen) {
       this.drawLoadoutPanel();
     }
+  }
+
+  private renderArenaBattlefield(ctx: CanvasRenderingContext2D) {
+    const R = 4000; // 球形战场半径
+    const cx = this.camX; // 相机中心
+    const cy = this.camY;
+
+    ctx.save();
+    // 圆形裁剪
+    ctx.beginPath();
+    ctx.arc(cx, cy, Math.min(this.w, this.h) / 2, 0, Math.PI * 2);
+    ctx.clip();
+
+    // 背景
+    ctx.fillStyle = '#1a1a2e';
+    ctx.fillRect(0, 0, this.w, this.h);
+
+    // 网格地板 - 同心圆
+    const viewZoom = this.viewZoom || 1;
+    for (let r = 200; r <= R; r += 200) {
+      ctx.strokeStyle = r % 800 === 0 ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.05)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * viewZoom, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // 极轴线
+    for (let a = 0; a < 360; a += 30) {
+      const rad = a * Math.PI / 180;
+      ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + Math.cos(rad) * R * viewZoom, cy + Math.sin(rad) * R * viewZoom);
+      ctx.stroke();
+    }
+
+    // 边界圆环
+    ctx.strokeStyle = '#e74c3c';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R * viewZoom, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // 渲染随机墙（使用 this.arenaWalls）
+    if (this.arenaWalls) {
+      ctx.fillStyle = '#2c3e50';
+      ctx.strokeStyle = '#444';
+      ctx.lineWidth = 1;
+      for (const wall of this.arenaWalls) {
+        const wx = (wall.x - this.camX) * viewZoom + this.w / 2;
+        const wy = (wall.y - this.camY) * viewZoom + this.h / 2;
+        const ww = wall.w * viewZoom;
+        const wh = wall.h * viewZoom;
+        ctx.fillRect(wx, wy, ww, wh);
+        ctx.strokeRect(wx, wy, ww, wh);
+      }
+    }
+
+    // HUD
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 16px Arial';
+    ctx.textAlign = 'left';
+    ctx.fillText(`命数: ${'♥'.repeat(this.arenaPanel.lives)}${'♡'.repeat(2 - this.arenaPanel.lives)}`, 10, 25);
+
+    ctx.restore();
   }
 
 
