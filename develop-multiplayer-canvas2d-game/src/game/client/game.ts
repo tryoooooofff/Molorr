@@ -7506,7 +7506,16 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     case S2C.ARENA_UPDATE: {
       const type = r.u8();
       const seat = r.u8();
-      const payload = type === 2 ? r.u8() : type === 3 ? r.u16() : 0;
+      let payload: any = 0;
+      if (type === 2) {
+        payload = r.u8();
+      } else if (type === 3) {
+        // wheel: 读取完整 Cell 数据
+        const item = r.u16();
+        const rarity = r.u8();
+        const count = r.u16();
+        payload = { item, rarity, count };
+      }
       this.arenaPanel.onUpdate(type, seat, payload);
       break;
     }
@@ -11515,6 +11524,7 @@ private bagLayout() {
     }
 
     // Arena 面板（主菜单 Arena 图标入口）
+    this.arenaPanel.setBag(this.bag);
     this.arenaPanel.draw(ctx);
 
     // ─── "Coming soon" toast（未实现按钮的点击反馈）───
@@ -11824,6 +11834,7 @@ private bagLayout() {
     this.talent.draw(this.ctx);
 
     // Arena 面板（游戏内也可显示）
+    this.arenaPanel.setBag(this.bag);
     this.arenaPanel.draw(ctx);
 
 if (this.drag) {

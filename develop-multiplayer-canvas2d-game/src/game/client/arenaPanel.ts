@@ -1,7 +1,8 @@
 import { C2S, Writer } from "../shared/protocol";
 import type { Cell } from "../shared/sim";
 import type { Wall } from "../shared/defs";
-import { panel, button, searchField, text, roundRect, shade, type Rect, hit } from "./ui";
+import { EMPTY_ITEM } from "../shared/defs";
+import { panel, button, searchField, text, roundRect, drawCard, type Rect, hit } from "./ui";
 
 // 接口定义
 export interface PlayerBrief {
@@ -21,11 +22,13 @@ export class ArenaPanel {
   loadout: (Cell | null)[] = new Array(10).fill(null);
   ready = false;
   lives = 2;
+  // 背包数据（由 GameClient 设置）
+  bagData: (Cell | null)[] = [];
   // 网络回调（由 GameClient 注入）
   sendPacket: ((data: Uint8Array) => void) | null = null;
 
   // 面板布局
-  panelX = 0; panelY = 0; panelW = 520; panelH = 620;
+  panelX = 0; panelY = 0; panelW = 520; panelH = 700;
   searchFieldRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
   createBtnRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
   quickJoinBtnRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
@@ -36,13 +39,27 @@ export class ArenaPanel {
   leaveBtnRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
   wheelCenterX = 0; wheelCenterY = 0; wheelRadius = 100;
 
+  // 背包网格
+  bagCardSize = 38;
+  bagCardGap = 4;
+  bagCols = 12;
+  bagStartX = 0;
+  bagStartY = 0;
+  bagRects: Rect[] = [];
+
   // 滚动
   scrollOffset = 0;
   private hoveredBtn: string | null = null;
+  private hoveredBagSlot: number = -1;
+  private hoveredLoadoutSlot: number = -1;
 
   open() { this.panelOpen = true; if (this.state === 'closed') this.state = 'lobby-list'; }
   close() { this.panelOpen = false; }
   toggle() { if (this.panelOpen) this.close(); else this.open(); }
+
+  setBag(bag: (Cell | null)[]) {
+    this.bagData = bag;
+  }
 
   update(dt: number) {}
 
@@ -163,16 +180,16 @@ export class ArenaPanel {
       const cy = this.wheelCenterY + Math.sin(angle) * (this.wheelRadius - 28);
       const slotR = 20;
       const isMine = seats[i] && seats[i].id === this.currentRoom!.mySeat;
-      ctx.save();
-      ctx.beginPath(); ctx.arc(cx, cy, slotR, 0, Math.PI * 2);
-      ctx.fillStyle = isMine ? '#c0392b' : '#3a4a5a';
-      ctx.fill();
-      ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 2; ctx.stroke();
-      if (this.wheelCards[i]) {
-        ctx.beginPath(); ctx.arc(cx, cy, slotR - 3, 0, Math.PI * 2);
-        ctx.fillStyle = '#f1c40f'; ctx.fill();
-      }
-      ctx.restore();
+      // 用 drawCard 渲染槽位小卡片
+      const cardRect: Rect = { x: cx - slotR, y: cy - slotR, w: slotR * 2, h: slotR * 2 };
+      const card = this.wheelCards[i];
+      const hovered = isMine && this.hoveredBagSlot === -2;
+      drawCard(ctx, cardRect, card, {
+        hovered,
+        empty: isMine ? (card ? '' : '+') : '',
+        scale: 0.85,
+        showName: false,
+      });
     }
 
     // 配装槽
@@ -183,15 +200,9 @@ export class ArenaPanel {
     const loadoutStartX = (this.panelW - totalLoadoutW) / 2;
     for (let i = 0; i < 10; i++) {
       const lx = loadoutStartX + i * (loadoutW + loadoutGap);
-      ctx.save();
-      roundRect(ctx, lx, loadoutY, loadoutW, loadoutW, 5);
-      ctx.fillStyle = '#2a3644'; ctx.fill();
-      ctx.lineWidth = 2; ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.stroke();
-      if (this.loadout[i]) {
-        roundRect(ctx, lx + 4, loadoutY + 4, loadoutW - 8, loadoutW - 8, 4);
-        ctx.fillStyle = '#f1c40f'; ctx.fill();
-      }
-      ctx.restore();
+      const cardRect: Rect = { x: lx, y: loadoutY, w: loadoutW, h: loadoutW };
+      const hovered = this.hoveredLoadoutSlot === i;
+      drawCard(ctx, cardRect, this.loadout[i], { hovered, empty: '', showName: false });
     }
 
     // 准备按钮
@@ -203,6 +214,54 @@ export class ArenaPanel {
     this.leaveBtnRect = { x: this.panelW - 85, y: 12, w: 70, h: 32 };
     const leaveHovered = this.hoveredBtn === 'leave';
     button(ctx, this.leaveBtnRect, 'leave', '#c0392b', leaveHovered, 14);
+
+    // ─── 背包网格 ───
+    this.drawBagGrid(ctx);
+  }
+
+  private drawBagGrid(ctx: CanvasRenderingContext2D) {
+    const bagY = 495;
+    const padX = 10;
+    this.bagStartX = padX;
+    this.bagStartY = bagY;
+    this.bagRects = [];
+
+    // 标题
+    text(ctx, 'Backpack', this.panelW / 2, bagY - 8, 14, '#aaa', 'center');
+
+    // 计算网格
+    const cols = this.bagCols;
+    const size = this.bagCardSize;
+    const gap = this.bagCardGap;
+
+    this.bagStartX = padX;
+    this.bagStartY = bagY + 4;
+
+    // 裁剪区域
+    const gridH = Math.ceil(this.bagData.length / cols) * (size + gap);
+    const maxVisibleH = this.panelH - this.bagStartY - 10;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(this.bagStartX, this.bagStartY, this.panelW - padX * 2, Math.min(gridH, maxVisibleH));
+    ctx.clip();
+
+    for (let i = 0; i < this.bagData.length; i++) {
+      const cell = this.bagData[i];
+      if (!cell || cell.item === EMPTY_ITEM) continue;
+      const row = Math.floor(i / cols);
+      const col = i % cols;
+      const bx = this.bagStartX + col * (size + gap);
+      const by = this.bagStartY + row * (size + gap);
+      const rect: Rect = { x: bx, y: by, w: size, h: size };
+      this.bagRects[i] = rect;
+      const hovered = this.hoveredBagSlot === i;
+      // 检查该卡是否已在 wheel 上（自己的 slot）
+      const mySeat = this.currentRoom?.mySeat ?? -1;
+      const wheelCard = mySeat >= 0 ? this.wheelCards[mySeat] : null;
+      const dimmed = wheelCard !== null && wheelCard.item === cell.item && wheelCard.rarity === cell.rarity;
+      drawCard(ctx, rect, cell, { hovered, dim: dimmed ? 0.35 : 1, showName: false });
+    }
+    ctx.restore();
   }
 
   private drawTeamPanel(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, players: PlayerBrief[], team: number) {
@@ -236,6 +295,8 @@ export class ArenaPanel {
     const px = mx - this.panelX;
     const py = my - this.panelY;
     this.hoveredBtn = null;
+    this.hoveredBagSlot = -1;
+    this.hoveredLoadoutSlot = -1;
     if (px < 0 || px > this.panelW || py < 0 || py > this.panelH) return;
     if (this.state === 'lobby-list') {
       if (hit(this.createBtnRect, px, py)) this.hoveredBtn = 'create';
@@ -243,6 +304,13 @@ export class ArenaPanel {
     } else if (this.state === 'in-room') {
       if (hit(this.readyBtnRect, px, py)) this.hoveredBtn = 'ready';
       else if (hit(this.leaveBtnRect, px, py)) this.hoveredBtn = 'leave';
+      // 背包格子悬停
+      for (let i = 0; i < this.bagRects.length; i++) {
+        if (this.bagRects[i] && hit(this.bagRects[i], px, py)) {
+          this.hoveredBagSlot = i;
+          return;
+        }
+      }
     }
   }
 
@@ -297,6 +365,19 @@ export class ArenaPanel {
         this.currentRoom = null;
         return 'arena_leave';
       }
+
+      // 背包格子点击 -> 放置到 Wheel
+      for (let i = 0; i < this.bagRects.length; i++) {
+        if (this.bagRects[i] && hit(this.bagRects[i], px, py)) {
+          const cell = this.bagData[i];
+          if (!cell || cell.item === EMPTY_ITEM) continue;
+          // 发送 C2S_ARENA_WHEEL (op=22, bagSlot=u16)
+          const w = new Writer(3);
+          w.u8(C2S.ARENA_WHEEL).u16(i);
+          this.sendPacket?.(w.bytes());
+          return 'arena_wheel';
+        }
+      }
     }
 
     return null;
@@ -346,7 +427,7 @@ export class ArenaPanel {
       // ready
       if (this.currentRoom?.seats[seat]) this.currentRoom.seats[seat].ready = payload === 1;
     } else if (type === 3) {
-      // wheel
+      // wheel - payload 是 Cell 对象
       this.wheelCards[seat] = payload;
     }
   }
