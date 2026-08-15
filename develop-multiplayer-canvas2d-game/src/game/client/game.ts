@@ -7530,6 +7530,8 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       this.arenaWalls = walls;
       this.arenaSeed = seed;
       // 切换到游戏场景，进入竞技场战场
+      this.sinceSnapshot = 0;
+      this.stallNoticeAnim = 0;
       this.pendingScene = () => {
         this.scene = "game";
         this.alive = true;
