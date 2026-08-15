@@ -6218,7 +6218,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     maxLife: number;
   }> = [];
 
-  private serverRegion: "eu" | "as" | "hk" = "hk";
+  private serverRegion: "eu" | "as" | "hk" = "as";
   private static readonly SERVER_URLS: Record<string, string> = {
     eu: "wss://molorr-server-t34o.onrender.com",
     as: "wss://molorr-server-sg.onrender.com",
@@ -6886,7 +6886,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         }
       }
       const sr = localStorage.getItem("petalia.server");
-      if (sr === "eu" || sr === "as") this.serverRegion = sr;
+      if (sr === "eu" || sr === "as" || sr === "hk") this.serverRegion = sr;
     } catch {
       /* ignore */
     }
