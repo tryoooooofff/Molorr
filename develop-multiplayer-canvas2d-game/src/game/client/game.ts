@@ -7506,7 +7506,16 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     case S2C.ARENA_UPDATE: {
       const type = r.u8();
       const seat = r.u8();
-      const payload = type === 2 ? r.u8() : type === 3 ? r.u16() : 0;
+      let payload: any = 0;
+      if (type === 2) {
+        payload = r.u8();
+      } else if (type === 3) {
+        // wheel: 读取完整 Cell 数据
+        const item = r.u16();
+        const rarity = r.u8();
+        const count = r.u16();
+        payload = { item, rarity, count };
+      }
       this.arenaPanel.onUpdate(type, seat, payload);
       break;
     }
@@ -7520,6 +7529,18 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       this.arenaPanel.onStart(seed, walls);
       this.arenaWalls = walls;
       this.arenaSeed = seed;
+      // 切换到游戏场景，进入竞技场战场
+      this.pendingScene = () => {
+        this.scene = "game";
+        this.alive = true;
+        this.settings.close();
+        this.mobGallery.close();
+        this.shopSystem.close();
+        this.challenges.panelOpen = false;
+        this.loadoutPanelOpen = false;
+        this.updateMobileLayout();
+        // 不重新连接，保持现有服务器连接
+      };
       break;
     }
     case S2C.ARENA_EVENT: {
@@ -11503,6 +11524,7 @@ private bagLayout() {
     }
 
     // Arena 面板（主菜单 Arena 图标入口）
+    this.arenaPanel.setBag(this.bag);
     this.arenaPanel.draw(ctx);
 
     // ─── "Coming soon" toast（未实现按钮的点击反馈）───
@@ -11732,6 +11754,11 @@ private bagLayout() {
       this.drawWallsCached(ctx, { x: this.camX, y: this.camY });
     }
 
+    // Arena 战场渲染（在实体渲染之前，让实体显示在深色背景之上）
+    if (this.arenaPanel.state === 'in-game') {
+      this.renderArenaBattlefield(ctx);
+    }
+
     ctx.save();
     ctx.translate(this.w / 2, this.h / 2);
     ctx.scale(this.viewZoom, this.viewZoom);
@@ -11803,15 +11830,11 @@ private bagLayout() {
     this.renderBag();
     this.renderCraft();
 
-    // Arena 战场渲染
-    if (this.arenaPanel.state === 'in-game') {
-      this.renderArenaBattlefield(ctx);
-    }
-
     // 天赋面板（游戏内由主菜单 Talent 入口打开后显示在最上层）。
     this.talent.draw(this.ctx);
 
     // Arena 面板（游戏内也可显示）
+    this.arenaPanel.setBag(this.bag);
     this.arenaPanel.draw(ctx);
 
 if (this.drag) {
@@ -11876,8 +11899,8 @@ if (this.drag) {
 
   private renderArenaBattlefield(ctx: CanvasRenderingContext2D) {
     const R = 4000; // 球形战场半径
-    const cx = this.camX; // 相机中心
-    const cy = this.camY;
+    const cx = this.w / 2; // 屏幕中心
+    const cy = this.h / 2;
 
     ctx.save();
     // 圆形裁剪
