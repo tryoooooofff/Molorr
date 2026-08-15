@@ -42,18 +42,49 @@ cpp.on("error", (err) => {
 });
 
 // ── 2. Start the Next.js standalone server ────────────────────────────
-const nextServer = spawn("node", ["--max-old-space-size=256", path.join(__dirname, "nextjs", "server.js")], {
-  stdio: "inherit",
+const nextServerPath = path.join(__dirname, "nextjs", "server.js");
+const nextServerCwd = path.join(__dirname, "nextjs");
+
+// Pre-flight: verify the standalone server file exists before spawning.
+// This gives a clear, actionable error instead of a silent spawn failure.
+const fs = require("fs");
+console.log(`[entry] Next.js binary: ${nextServerPath}`);
+console.log(`[entry] Next.js cwd:    ${nextServerCwd}`);
+console.log(`[entry] __dirname contents: ${fs.readdirSync(__dirname).join(", ")}`);
+if (fs.existsSync(nextServerCwd)) {
+  try {
+    console.log(`[entry] nextjs/ contents: ${fs.readdirSync(nextServerCwd).join(", ")}`);
+  } catch (e) {
+    console.error(`[entry] cannot read nextjs/: ${e.message}`);
+  }
+} else {
+  console.error(`[entry] FATAL: nextjs/ directory does not exist — npm run build likely failed`);
+}
+if (!fs.existsSync(nextServerPath)) {
+  console.error(`[entry] FATAL: ${nextServerPath} not found — cannot start Next.js`);
+}
+
+const nextServer = spawn("node", ["--max-old-space-size=256", nextServerPath], {
+  stdio: ["ignore", "pipe", "pipe"],
   env: { ...process.env, PORT: "3080", HOST: "0.0.0.0" },
-  cwd: path.join(__dirname, "nextjs"),
+  cwd: nextServerCwd,
 });
-nextServer.on("exit", (code) => {
+
+// Forward Next.js stdout/stderr to our logs with a clear prefix.
+nextServer.stdout.on("data", (buf) => {
+  process.stdout.write(`[next] ${buf}`);
+});
+nextServer.stderr.on("data", (buf) => {
+  process.stderr.write(`[next] ${buf}`);
+});
+
+nextServer.on("exit", (code, signal) => {
   nextReady = false;
-  console.error(`[entry] Next.js server exited with code ${code} — exiting to trigger Render restart`);
+  console.error(`[entry] Next.js server exited with code=${code} signal=${signal} — exiting to trigger Render restart`);
   setImmediate(() => process.exit(code || 1));
 });
 nextServer.on("error", (err) => {
-  console.error("[entry] Next.js server failed to spawn:", err.message);
+  console.error(`[entry] Next.js server failed to spawn: ${err.message} (path=${nextServerPath}, cwd=${nextServerCwd})`);
 });
 
 // ── 3. Health check helper: wait for a TCP port to be ready ───────────
