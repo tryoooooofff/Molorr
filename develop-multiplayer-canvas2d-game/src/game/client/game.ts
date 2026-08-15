@@ -47,7 +47,7 @@ import {
 } from "../shared/defs";
 import { C2S, ENT, EVT, LOADOUT_OP, Reader, S2C, SWAP_ROW_ALL, TEAM, Writer } from "../shared/protocol";
 import type { Cell, LoadoutConfig } from "../shared/sim";
-import { PLAYER_RADIUS, ArrayWallCollider } from "../shared/sim";
+import { PLAYER_RADIUS, ArrayWallCollider, PolygonWallCollider } from "../shared/sim";
 import { createTransport, Transport } from "./transport";
 import {
   button,
@@ -6289,7 +6289,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private worldW = 3200;
   private worldH = 3200;
   private walls: Wall[] = [];
-  private wallCollider: ArrayWallCollider | null = null;
+  private wallCollider: PolygonWallCollider | null = null;
   private ents = new Map<number, Ent>();
   private snapshotSequence = 0;
   private camX = 0;
@@ -7228,7 +7228,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       for (let i = 0; i < wallCount; i++) {
         this.walls.push({ x: r.u16(), y: r.u16(), w: r.u16(), h: r.u16() });
       }
-      this.wallCollider = new ArrayWallCollider(this.walls, this.worldW, this.worldH, 256);
+      this.wallCollider = new PolygonWallCollider(this.walls, this.worldW, this.worldH, 256);
       this.ents.clear();
       this.roseParticles.length = 0;
       this.mapFlash = 1;
