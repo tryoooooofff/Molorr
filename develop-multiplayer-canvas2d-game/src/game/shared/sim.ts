@@ -1117,7 +1117,7 @@ interface GridCell {
   edges: WallEdge[];
 }
 
-class PolygonWallCollider {
+export class PolygonWallCollider {
   private polygons: { x: number; y: number }[][] = [];
   private edges: WallEdge[] = [];
   private bvh: BVHNode | null = null;
