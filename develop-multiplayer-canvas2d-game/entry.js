@@ -66,7 +66,7 @@ if (!fs.existsSync(nextServerPath)) {
 
 const nextServer = spawn("node", ["--max-old-space-size=256", nextServerPath], {
   stdio: ["ignore", "pipe", "pipe"],
-  env: { ...process.env, PORT: "3080", HOST: "0.0.0.0" },
+  env: { ...process.env, PORT: "3080", HOSTNAME: "0.0.0.0" },
   cwd: nextServerCwd,
 });
 
