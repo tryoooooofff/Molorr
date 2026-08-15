@@ -325,6 +325,7 @@ export class ArenaPanel {
 
   onStart(seed: number, walls: Wall[]) {
     this.state = 'in-game';
+    this.panelOpen = false;
     this.lives = 2;
   }
 
