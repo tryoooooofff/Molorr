@@ -49,9 +49,9 @@ export class ArenaPanel {
   draw(ctx: CanvasRenderingContext2D) {
     if (!this.panelOpen) return;
 
-    // 面板居中
-    this.panelX = (ctx.canvas.width - this.panelW) / 2;
-    this.panelY = (ctx.canvas.height - this.panelH) / 2;
+    // 面板左上角（菜单栏下方）
+    this.panelX = 10;
+    this.panelY = 60;
 
     // 半透明遮罩
     ctx.fillStyle = 'rgba(0,0,0,0.45)';
@@ -228,8 +228,7 @@ export class ArenaPanel {
   private drawInGame(ctx: CanvasRenderingContext2D) {
     // 游戏内 HUD
     text(ctx, 'Arena', 70, 20, 18, '#e74c3c', 'center');
-    const hearts = '♥'.repeat(Math.max(0, this.lives)) + '♡'.repeat(Math.max(0, 2 - this.lives));
-    text(ctx, hearts, 70, 42, 16, '#e74c3c', 'center', false);
+    text(ctx, 'Lives: ' + this.lives, 70, 42, 16, '#e74c3c', 'center', false);
   }
 
   handleMouseMove(mx: number, my: number) {
