@@ -110,13 +110,18 @@ enum C2S : uint8_t {
   C2S_JOIN = 1, C2S_INPUT = 2, C2S_SWAP = 3, C2S_CRAFT = 4,
   C2S_CHANGE_MAP = 5, C2S_RESPAWN = 6, C2S_PING = 7, C2S_ORACLE = 8,
   C2S_TRADE = 9, C2S_SWAP_ROW = 10, C2S_BONUS_STATUS = 11, C2S_CHAT = 12,
-  C2S_AFK_ACK = 13, C2S_TALENT = 14, C2S_SYNC_LEVEL = 15, C2S_LOADOUT = 16
+  C2S_AFK_ACK = 13, C2S_TALENT = 14, C2S_SYNC_LEVEL = 15, C2S_LOADOUT = 16,
+  C2S_ARENA_CREATE = 17, C2S_ARENA_LIST = 18, C2S_ARENA_SEARCH = 19,
+  C2S_ARENA_JOIN = 20, C2S_ARENA_LEAVE = 21, C2S_ARENA_WHEEL = 22,
+  C2S_ARENA_READY = 23, C2S_ARENA_LOADOUT = 24
 };
 enum S2C : uint8_t {
   S2C_WELCOME = 1, S2C_SNAPSHOT = 2, S2C_INVENTORY = 3, S2C_STATS = 4,
   S2C_EVENT = 5, S2C_PONG = 6, S2C_CHAT = 7, S2C_SQUAD_UPDATE = 8,
   S2C_AFK_CHECK = 9, S2C_DEBUG = 10, S2C_TALENT_BONUSES = 11,
-  S2C_SQUAD_MEMBER_STATE = 12, S2C_LOADOUT_DATA = 13
+  S2C_SQUAD_MEMBER_STATE = 12, S2C_LOADOUT_DATA = 13,
+  S2C_ARENA_LOBBY = 14, S2C_ARENA_UPDATE = 15, S2C_ARENA_START = 16,
+  S2C_ARENA_EVENT = 17, S2C_ARENA_RESULT = 18, S2C_ARENA_LIST = 19
 };
 enum EntKind : uint8_t { ENT_PLAYER = 0, ENT_MOB = 1, ENT_PETAL = 2, ENT_DROP = 3, ENT_PROJECTILE = 4 };
 enum Team : uint8_t { TEAM_HOSTILE = 0, TEAM_FRIENDLY = 1, TEAM_SELF = 2 };
@@ -569,11 +574,12 @@ static const std::vector<std::string> MAP_GRID_2 = {
   "1111111111111111111111111111111111111111",
 };
 
-static std::vector<std::vector<std::string>> MAP_GRIDS = {MAP_GRID_0, MAP_GRID_1, MAP_GRID_2};
+static std::vector<std::vector<std::string>> MAP_GRIDS = {MAP_GRID_0, MAP_GRID_1, MAP_GRID_2, {}};
 
 static std::string getBlockAt(int mapId, float x, float y) {
   if (mapId < 0 || mapId >= (int)MAP_GRIDS.size()) return "1";
   const auto& grid = MAP_GRIDS[mapId];
+  if (grid.empty()) return "1";
   const auto& map = MAPS[mapId];
   float tileW = map.width / BLOCK_GRID_COLS;
   float tileH = map.height / BLOCK_GRID_ROWS;
@@ -601,6 +607,7 @@ static std::vector<std::pair<int,int>> findSpawnTiles(int mapId) {
   std::vector<std::pair<int,int>> result;
   if (mapId < 0 || mapId >= (int)MAP_GRIDS.size()) return result;
   const auto& grid = MAP_GRIDS[mapId];
+  if (grid.empty()) return result;
   for (int row = 0; row < BLOCK_GRID_ROWS; row++) {
     for (int col = 0; col < BLOCK_GRID_COLS; col++) {
       if (grid[row][col] == '2') result.push_back({row, col});
@@ -939,6 +946,23 @@ struct Squad {
   int64_t createdAt;
 };
 
+enum class Mode : uint8_t { Pve = 0, Arena = 1 };
+
+struct ArenaRoom {
+  std::string code;
+  int hostId;
+  int mode; // 1 or 3
+  int capacity; // mode * 2
+  std::vector<int> seats; // playerId 按顺序
+  std::map<int, int> seatOfPlayer; // playerId -> seat index
+  std::vector<Cell> wheelCards; // seat index -> Cell
+  std::vector<bool> ready;
+  std::vector<int> teamOfSeat;
+  bool started = false;
+  uint32_t rng;
+  int64_t createdAt;
+};
+
 struct Player {
   uint16_t id = 0;
   std::string name = "flower";
@@ -966,6 +990,16 @@ struct Player {
   int64_t nextOracleAt = 0;
   int64_t nextTradeAt = 0;
   std::string squadCode = "";
+  // Arena 模式
+  int arenaSeat = -1;
+  int arenaTeam = 0;
+  int arenaLives = 0;
+  std::string arenaRoomCode = "";
+  Cell arenaWheelCard{};  // item=255 if empty
+  bool arenaWheelReady = false;
+  Cell arenaLoadout[10]{}; // 锁死配装
+  int64_t arenaLastInputAt = 0;
+  Mode mode = Mode::Pve;
 
   Cell slots[SLOT_COUNT];
   Cell secondary[SECONDARY_SLOT_COUNT];
@@ -1643,6 +1677,7 @@ public:
   uint32_t tickCount = 0;
   std::unordered_map<uint16_t, Player> players;
   std::unordered_map<std::string, Squad> squads;
+  std::unordered_map<std::string, ArenaRoom> arenas;
   int nextMobId = 10000;
   int nextProjId = 20000;
   int nextDropId = 30000;
@@ -1660,15 +1695,17 @@ public:
     std::vector<DormantMob> dormantMobs;
     std::vector<Projectile> projectiles;
   };
-  World worlds[3];
+  std::vector<World> worlds;
 
   // Per-map zone counts
-  std::unordered_map<std::string, int> zoneMobCounts[3];
+  std::vector<std::unordered_map<std::string, int>> zoneMobCounts;
 
   // Client map reference (set externally from main) for event pushing
   std::unordered_map<uint16_t, ClientState*>* clientMap = nullptr;
 
   Simulation() {
+    worlds.resize(MAP_COUNT);
+    zoneMobCounts.resize(MAP_COUNT);
     for (int i = 0; i < MAP_COUNT; i++) {
       playerWallColliders_.push_back(
         std::make_unique<ArrayWallCollider>(MAPS[i].walls, MAPS[i].width, MAPS[i].height, 256));
@@ -1705,6 +1742,23 @@ public:
       // Remove from squad
       if (!p.squadCode.empty()) {
         removePlayerFromSquad(p);
+      }
+      // Remove from arena
+      if (!p.arenaRoomCode.empty()) {
+        auto ait = arenas.find(p.arenaRoomCode);
+        if (ait != arenas.end()) {
+          auto& room = ait->second;
+          if (!room.started) {
+            room.seats.erase(std::remove(room.seats.begin(), room.seats.end(), p.id), room.seats.end());
+            room.seatOfPlayer.erase(p.id);
+            if (room.seats.empty()) arenas.erase(ait);
+          } else {
+            p.arenaLives = 0;
+            p.alive = false;
+            checkArenaEnd(room);
+          }
+        }
+        p.arenaRoomCode = "";
       }
     }
     players.erase(id);
@@ -1979,6 +2033,10 @@ public:
   }
 
   void applyLevel(Player& p) {
+    // Arena 模式天赋不生效
+    if (p.mode == Mode::Arena) {
+      p.talentBonuses = TalentBonuses{};
+    }
     int lvl = levelFromXp(p.xp);
     float maxHp = std::round((110 + lvl * 16 + healthBonusOf(p)) * p.talentBonuses.healthMult);
     if ((int)maxHp != (int)p.maxHp) {
@@ -2578,6 +2636,49 @@ public:
     }
   }
 
+  // ---- Arena death/respawn handler ----
+  void handleArenaPlayerDeath(Player& p) {
+    if (p.mode != Mode::Arena) return;
+    p.hp = 0;
+    p.alive = false;
+    p.arenaLives--;
+    p.statsDirty = true;
+
+    auto it = arenas.find(p.arenaRoomCode);
+    if (it != arenas.end()) {
+      auto& room = it->second;
+      // 推事件
+      for (int otherId : room.seats) {
+        if (clientMap) {
+          for (auto& [csId, cs] : *clientMap) {
+            if (cs->player && cs->player->id == otherId) {
+              Writer ew;
+              ew.u8v(S2C_ARENA_EVENT);
+              ew.u8v(0); // type=life_lost
+              ew.u8v(p.arenaSeat);
+              ew.u16v(p.arenaLives >= 0 ? (uint16_t)p.arenaLives : 0);
+              cs->events.push_back(ew.b);
+              break;
+            }
+          }
+        }
+      }
+
+      if (p.arenaLives <= 0) {
+        // 彻底死亡
+        checkArenaEnd(room);
+      } else {
+        // 复活
+        p.hp = p.maxHp;
+        p.alive = true;
+        float angle = (float)p.arenaSeat / room.capacity * M_PI * 2;
+        p.x = 4000 + cos(angle) * 1500;
+        p.y = 4000 + sin(angle) * 1500;
+        p.statsDirty = true;
+      }
+    }
+  }
+
   // ---- Events ----
   void pushEvent(ClientState& cs, uint8_t kind, float x, float y, int value, uint8_t item = EMPTY_ITEM, uint8_t rarity = 0) {
     Writer w;
@@ -2589,6 +2690,173 @@ public:
     w.u8v(item);
     w.u8v(rarity);
     cs.events.push_back(w.b);
+  }
+
+  // ---- Arena helpers ----
+  std::string generateArenaCode() {
+    static const char chars[] = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    std::string code;
+    for (int i = 0; i < 6; i++) code += chars[rand() % (sizeof(chars) - 1)];
+    auto it = arenas.find(code);
+    if (it != arenas.end()) return generateArenaCode();
+    return code;
+  }
+
+  std::vector<Wall> generateArenaWalls(uint32_t seed) {
+    std::vector<Wall> walls;
+    srand(seed);
+    int count = 30 + rand() % 31;
+    for (int i = 0; i < count; i++) {
+      float x = (float)(rand() % 7000) + 500;
+      float y = (float)(rand() % 7000) + 500;
+      float w = (float)(rand() % 200) + 50;
+      float h = (float)(rand() % 200) + 50;
+      float cx = x + w / 2, cy = y + h / 2;
+      if (sqrt((cx - 4000) * (cx - 4000) + (cy - 4000) * (cy - 4000)) < 800) continue;
+      walls.push_back({x, y, w, h});
+    }
+    return walls;
+  }
+
+  void arenaStart(ArenaRoom& room) {
+    room.started = true;
+    room.rng = (uint32_t)time(nullptr);
+    auto walls = generateArenaWalls(room.rng);
+
+    for (size_t si = 0; si < room.seats.size(); si++) {
+      int pid = room.seats[si];
+      Player* p = get(pid);
+      if (!p) continue;
+      p->mode = Mode::Arena;
+      p->arenaSeat = (int)si;
+      p->arenaTeam = room.teamOfSeat[si];
+      p->arenaLives = 2;
+      p->arenaRoomCode = room.code;
+      p->arenaLastInputAt = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+      // 覆盖配装
+      for (int i = 0; i < 10; i++) {
+        Cell c = p->arenaLoadout[i];
+        if (c.item != 255) {
+          if (i < SLOT_COUNT) p->slots[i] = c;
+          else if (i - SLOT_COUNT < SECONDARY_SLOT_COUNT) p->secondary[i - SLOT_COUNT] = c;
+        }
+      }
+      rebuildPetals(*p);
+
+      // 传到 spawn 点（均匀分布在圆周上）
+      float angle = (float)si / room.capacity * M_PI * 2;
+      p->x = 4000 + cos(angle) * 1500;
+      p->y = 4000 + sin(angle) * 1500;
+      p->hp = p->maxHp;
+      p->alive = true;
+      p->mapId = MAP_COUNT - 1;
+      p->statsDirty = true;
+      p->dirty = true;
+
+      // 发送 ARENA_START 给每个玩家
+      if (clientMap) {
+        for (auto& [csId, cs] : *clientMap) {
+          if (cs->player == p) {
+            Writer w;
+            w.u8v(S2C_ARENA_START);
+            w.u32v(room.rng);
+            w.u16v((uint16_t)walls.size());
+            for (auto& wall : walls) {
+              w.u16v((uint16_t)wall.x);
+              w.u16v((uint16_t)wall.y);
+              w.u16v((uint16_t)wall.w);
+              w.u16v((uint16_t)wall.h);
+            }
+            cs->events.push_back(w.b);
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  void checkArenaEnd(ArenaRoom& room) {
+    int aliveTeam0 = 0, aliveTeam1 = 0;
+    for (size_t i = 0; i < room.seats.size(); i++) {
+      Player* p = get(room.seats[i]);
+      if (p && p->alive && p->arenaLives > 0) {
+        if (room.teamOfSeat[i] == 0) aliveTeam0++;
+        else aliveTeam1++;
+      }
+    }
+
+    if (aliveTeam0 == 0 && aliveTeam1 > 0) arenaFinish(room, 1);
+    else if (aliveTeam1 == 0 && aliveTeam0 > 0) arenaFinish(room, 0);
+  }
+
+  void arenaFinish(ArenaRoom& room, int winnerTeam) {
+    // 收集败方 wheel 卡
+    std::vector<Cell> loserCards;
+    for (size_t i = 0; i < room.seats.size(); i++) {
+      if (room.teamOfSeat[i] != winnerTeam && room.wheelCards.size() > i) {
+        if (room.wheelCards[i].item != 255) loserCards.push_back(room.wheelCards[i]);
+      }
+    }
+
+    for (size_t i = 0; i < room.seats.size(); i++) {
+      int pid = room.seats[i];
+      Player* p = get(pid);
+      if (!p) continue;
+
+      p->mode = Mode::Pve;
+      p->arenaSeat = -1;
+      p->arenaRoomCode = "";
+      p->arenaLives = 0;
+      p->arenaWheelCard = Cell{0, 0, 255};
+      p->arenaWheelReady = false;
+
+      // 归还自己的 wheel 卡
+      if (room.wheelCards.size() > i && room.wheelCards[i].item != 255) {
+        p->bag.push_back(room.wheelCards[i]);
+      }
+
+      std::vector<Cell> wonCards;
+      if (room.teamOfSeat[i] == winnerTeam) {
+        // 胜方：每人随机拿 1 张败方卡
+        if (!loserCards.empty()) {
+          int idx = rand() % loserCards.size();
+          wonCards.push_back(loserCards[idx]);
+          p->bag.push_back(loserCards[idx]);
+          loserCards.erase(loserCards.begin() + idx);
+        }
+      }
+
+      // 推送到玩家事件队列
+      if (clientMap) {
+        for (auto& [csId, cs] : *clientMap) {
+          if (cs->player == p) {
+            Writer w;
+            w.u8v(S2C_ARENA_RESULT);
+            w.u8v((uint8_t)winnerTeam);
+            w.u8v((uint8_t)wonCards.size());
+            for (auto& c : wonCards) {
+              w.u8v(c.item);
+              w.u8v(c.rarity);
+              w.u16v(c.count);
+            }
+            cs->events.push_back(w.b);
+
+            // 传送回主地图
+            p->mapId = 0;
+            p->x = 1600; p->y = 1600;
+            p->hp = p->maxHp;
+            p->alive = true;
+            p->dirty = true;
+            p->statsDirty = true;
+            break;
+          }
+        }
+      }
+    }
+
+    arenas.erase(room.code);
   }
 
   // ---- Main tick ----
@@ -2623,6 +2891,29 @@ public:
 
     // Update projectiles
     for (int m = 0; m < MAP_COUNT; m++) updateProjectiles(m, dt, activePlayers);
+
+    // Arena AFK 检测
+    {
+      int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+      for (auto it = arenas.begin(); it != arenas.end(); ) {
+        auto& room = it->second;
+        if (!room.started) { ++it; continue; }
+        bool changed = false;
+        for (int pid : room.seats) {
+          Player* ap = get(pid);
+          if (ap && ap->alive && now - ap->arenaLastInputAt > 15000) {
+            ap->arenaLives = 0;
+            ap->alive = false;
+            checkArenaEnd(room);
+            changed = true;
+            break;
+          }
+        }
+        if (changed) { it = arenas.begin(); continue; }
+        ++it;
+      }
+    }
 
     // Periodic save: every 30 seconds, save all online players
     persistTimer += dt;
@@ -2684,6 +2975,18 @@ public:
     }
     p.x = clampf(p.x, playerRadius, map.width - playerRadius);
     p.y = clampf(p.y, playerRadius, map.height - playerRadius);
+
+    // Arena 圆形边界
+    if (p.mapId == MAP_COUNT - 1) {
+      float cx = 4000, cy = 4000, R = 4000;
+      float dist = sqrt((p.x - cx) * (p.x - cx) + (p.y - cy) * (p.y - cy));
+      float maxDist = R - playerRadius;
+      if (dist > maxDist) {
+        float angle = atan2(p.y - cy, p.x - cx);
+        p.x = cx + cos(angle) * maxDist;
+        p.y = cy + sin(angle) * maxDist;
+      }
+    }
 
     // Stuck-in-wall safety net
     pushPlayerOutOfWall(p, playerRadius);
@@ -3286,7 +3589,7 @@ public:
               p->hp -= dmg;
               p->hurtCd = 0.1f;
               p->statsDirty = true;
-              if (p->hp <= 0) killPlayer(*p);
+              if (p->hp <= 0) { killPlayer(*p); handleArenaPlayerDeath(*p); }
             }
 
             // Player body-contact damage to mob
@@ -3519,7 +3822,7 @@ public:
             pl->hurtCd = 0.1f;
             pl->statsDirty = true;
             p.hitCd = PROJECTILE_HIT_CD;
-            if (pl->hp <= 0) killPlayer(*pl);
+            if (pl->hp <= 0) { killPlayer(*pl); handleArenaPlayerDeath(*pl); }
             if (!p.isPiercing) { proj.erase(proj.begin() + i); break; }
             p.hp -= 1;
             if (p.hp <= 0) { proj.erase(proj.begin() + i); break; }
@@ -4108,6 +4411,8 @@ static std::vector<MapDef> makeMaps() {
     {6600,7400,200,600},{7200,7400,200,600},{400,7600,600,400},{1200,7600,200,400},
     {3800,7600,200,400},{6400,7600,200,400},{6800,7600,400,400},
   }, {7,8,9,12,14}, 85, 0.22f});
+  // Map 3: Arena（无 mob，无预置墙，由 ARENA_START 动态下发）
+  maps.push_back({3, "Arena", 8000, 8000, {}, {}, 0, 1.0f});
   return maps;
 }
 
@@ -4265,6 +4570,11 @@ int main() {
               cs->lastInDy = p->inDy;
               cs->lastFlags = p->flags;
               sim.markActive(*cs);
+            }
+            // Arena 活跃标记
+            if (p->mode == Mode::Arena) {
+              p->arenaLastInputAt = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
             }
             break;
           }
@@ -4498,6 +4808,262 @@ int main() {
                 Writer lw = sim.loadoutDataWriter(*p);
                 ws->send(lw.view(), uWS::OpCode::BINARY);
               }
+            }
+            break;
+          }
+
+          case C2S_ARENA_CREATE: {
+            uint8_t mode = r.u8v();
+            if (mode != 1 && mode != 3) { mode = 1; }
+            ArenaRoom room;
+            room.code = sim.generateArenaCode();
+            room.hostId = p->id;
+            room.mode = mode;
+            room.capacity = mode * 2;
+            room.seats.push_back(p->id);
+            room.seatOfPlayer[p->id] = 0;
+            room.wheelCards.resize(room.capacity, Cell{0, 0, 255});
+            room.ready.resize(room.capacity, false);
+            room.teamOfSeat.resize(room.capacity, 0);
+            room.createdAt = std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::system_clock::now().time_since_epoch()).count();
+            sim.arenas[room.code] = room;
+
+            p->arenaRoomCode = room.code;
+
+            // 推 ARENA_LOBBY
+            Writer w;
+            w.u8v(S2C_ARENA_LOBBY);
+            w.str(room.code);
+            w.u8v(0); // hostSeat
+            w.u8v(1); // size = 1 (只有 host)
+            w.u8v(mode);
+            w.u8v(1); // seatCount
+            w.u16v(p->id); w.str(p->name); w.u16v(p->level);
+            uint8_t maxRarity = 0;
+            for (auto& c : p->bag) if (c.rarity > maxRarity) maxRarity = c.rarity;
+            w.u8v(maxRarity);
+            w.u8v(0); // team
+            w.u8v(1); // alive
+            w.u8v(2); // lives
+            w.u8v(0); // ready
+            w.u8v(0); // hasWheel
+            ws->send(w.view(), uWS::OpCode::BINARY);
+            break;
+          }
+
+          case C2S_ARENA_LIST: {
+            Writer w;
+            w.u8v(S2C_ARENA_LIST);
+            std::vector<decltype(sim.arenas.begin())> list;
+            for (auto it = sim.arenas.begin(); it != sim.arenas.end(); ++it) {
+              if (!it->second.started && (int)it->second.seats.size() < it->second.capacity)
+                list.push_back(it);
+            }
+            w.u8v((uint8_t)std::min(list.size(), (size_t)20));
+            for (size_t i = 0; i < std::min(list.size(), (size_t)20); i++) {
+              auto& room = list[i]->second;
+              Player* host = sim.get(room.hostId);
+              w.str(room.code);
+              w.str(host ? host->name : "?");
+              w.u8v(room.mode);
+              w.u8v((uint8_t)room.seats.size());
+              w.u8v(room.capacity);
+            }
+            ws->send(w.view(), uWS::OpCode::BINARY);
+            break;
+          }
+
+          case C2S_ARENA_SEARCH: {
+            std::string keyword = r.str();
+            Writer w;
+            w.u8v(S2C_ARENA_LIST);
+            std::vector<decltype(sim.arenas.begin())> list;
+            for (auto it = sim.arenas.begin(); it != sim.arenas.end(); ++it) {
+              if (!it->second.started && (int)it->second.seats.size() < it->second.capacity) {
+                if (keyword.empty() || it->first.find(keyword) == 0) {
+                  list.push_back(it);
+                }
+              }
+            }
+            w.u8v((uint8_t)std::min(list.size(), (size_t)20));
+            for (size_t i = 0; i < std::min(list.size(), (size_t)20); i++) {
+              auto& room = list[i]->second;
+              Player* host = sim.get(room.hostId);
+              w.str(room.code);
+              w.str(host ? host->name : "?");
+              w.u8v(room.mode);
+              w.u8v((uint8_t)room.seats.size());
+              w.u8v(room.capacity);
+            }
+            ws->send(w.view(), uWS::OpCode::BINARY);
+            break;
+          }
+
+          case C2S_ARENA_JOIN: {
+            std::string code = r.str();
+            auto it = sim.arenas.find(code);
+            if (it == sim.arenas.end()) break;
+            auto& room = it->second;
+            if (room.started) break;
+            if ((int)room.seats.size() >= room.capacity) break;
+
+            int seatIdx = (int)room.seats.size();
+            room.seats.push_back(p->id);
+            room.seatOfPlayer[p->id] = seatIdx;
+            room.teamOfSeat[seatIdx] = seatIdx % 2;
+            p->arenaRoomCode = code;
+
+            // 推 ARENA_LOBBY 给新加入者
+            Writer w;
+            w.u8v(S2C_ARENA_LOBBY);
+            w.str(room.code);
+            w.u8v(0); // hostSeat
+            w.u8v((uint8_t)room.seats.size());
+            w.u8v(room.mode);
+            w.u8v((uint8_t)room.seats.size());
+            for (size_t i = 0; i < room.seats.size(); i++) {
+              Player* sp = sim.get(room.seats[i]);
+              if (!sp) continue;
+              w.u16v(sp->id); w.str(sp->name); w.u16v(sp->level);
+              uint8_t mr = 0;
+              for (auto& c : sp->bag) if (c.rarity > mr) mr = c.rarity;
+              w.u8v(mr); w.u8v(room.teamOfSeat[i]); w.u8v(1); w.u8v(2);
+              w.u8v(room.ready[i] ? 1 : 0);
+              w.u8v(room.wheelCards[i].item != 255 ? 1 : 0);
+            }
+            ws->send(w.view(), uWS::OpCode::BINARY);
+
+            // 推 ARENA_UPDATE(join) 给其他成员
+            for (int otherId : room.seats) {
+              if (otherId == p->id) continue;
+              if (sim.clientMap) {
+                for (auto& [csId, cs] : *sim.clientMap) {
+                  if (cs->player && cs->player->id == otherId) {
+                    Writer uw;
+                    uw.u8v(S2C_ARENA_UPDATE);
+                    uw.u8v(0); // type=join
+                    uw.u8v(seatIdx);
+                    uw.u16v(p->id); uw.str(p->name); uw.u16v(p->level);
+                    uint8_t mr = 0;
+                    for (auto& c : p->bag) if (c.rarity > mr) mr = c.rarity;
+                    uw.u8v(mr); uw.u8v(room.teamOfSeat[seatIdx]); uw.u8v(1); uw.u8v(2);
+                    uw.u8v(0); uw.u8v(0);
+                    cs->events.push_back(uw.b);
+                    break;
+                  }
+                }
+              }
+            }
+            break;
+          }
+
+          case C2S_ARENA_LEAVE: {
+            auto it = sim.arenas.find(p->arenaRoomCode);
+            if (it == sim.arenas.end()) break;
+            auto& room = it->second;
+
+            if (!room.started) {
+              auto& seats = room.seats;
+              seats.erase(std::remove(seats.begin(), seats.end(), p->id), seats.end());
+              room.seatOfPlayer.erase(p->id);
+              p->arenaRoomCode = "";
+              if (seats.empty()) { sim.arenas.erase(it); }
+            } else {
+              p->arenaLives = 0;
+              p->alive = false;
+              sim.checkArenaEnd(room);
+            }
+            break;
+          }
+
+          case C2S_ARENA_WHEEL: {
+            auto it = sim.arenas.find(p->arenaRoomCode);
+            if (it == sim.arenas.end()) break;
+            auto& room = it->second;
+            if (room.started) break;
+
+            int seatIdx = room.seatOfPlayer[p->id];
+            uint16_t bagSlot = r.u16v();
+
+            if (bagSlot >= p->bag.size()) break;
+            Cell card = p->bag[bagSlot];
+            if (card.item == 255) break;
+
+            p->bag.erase(p->bag.begin() + bagSlot);
+
+            if ((size_t)seatIdx < room.wheelCards.size())
+              room.wheelCards[seatIdx] = card;
+            p->arenaWheelCard = card;
+
+            // 推 UPDATE 给全员
+            for (int otherId : room.seats) {
+              if (sim.clientMap) {
+                for (auto& [csId, cs] : *sim.clientMap) {
+                  if (cs->player && cs->player->id == otherId) {
+                    Writer uw;
+                    uw.u8v(S2C_ARENA_UPDATE);
+                    uw.u8v(3); // type=wheel
+                    uw.u8v(seatIdx);
+                    uw.u16v(card.item);
+                    uw.u8v(card.rarity);
+                    uw.u16v(card.count);
+                    cs->events.push_back(uw.b);
+                    break;
+                  }
+                }
+              }
+            }
+            p->dirty = true;
+            break;
+          }
+
+          case C2S_ARENA_READY: {
+            uint8_t ready = r.u8v();
+            auto it = sim.arenas.find(p->arenaRoomCode);
+            if (it == sim.arenas.end()) break;
+            auto& room = it->second;
+            if (room.started) break;
+
+            int seatIdx = room.seatOfPlayer[p->id];
+            room.ready[seatIdx] = ready == 1;
+            p->arenaWheelReady = ready == 1;
+
+            // 推 UPDATE 给全员
+            for (int otherId : room.seats) {
+              if (sim.clientMap) {
+                for (auto& [csId, cs] : *sim.clientMap) {
+                  if (cs->player && cs->player->id == otherId) {
+                    Writer uw;
+                    uw.u8v(S2C_ARENA_UPDATE);
+                    uw.u8v(2); // type=ready
+                    uw.u8v(seatIdx);
+                    uw.u8v(ready);
+                    cs->events.push_back(uw.b);
+                    break;
+                  }
+                }
+              }
+            }
+
+            // 检查是否全员 ready 且放了卡
+            bool allReady = true;
+            for (size_t i = 0; i < room.seats.size(); i++) {
+              if (!room.ready[i]) { allReady = false; break; }
+            }
+            for (size_t i = 0; i < room.seats.size(); i++) {
+              if (room.wheelCards[i].item == 255) { allReady = false; break; }
+            }
+            if (allReady) sim.arenaStart(room);
+            break;
+          }
+
+          case C2S_ARENA_LOADOUT: {
+            auto it = sim.arenas.find(p->arenaRoomCode);
+            if (it != sim.arenas.end() && it->second.started) break;
+
+            for (int i = 0; i < 10; i++) {
+              p->arenaLoadout[i] = readCell(r);
             }
             break;
           }

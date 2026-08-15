@@ -47,6 +47,15 @@ export const C2S = {
    * 操作码见 LOADOUT_OP，payload 格式取决于操作码。
    */
   LOADOUT: 16,
+  // ── Arena 模式 ──
+  ARENA_CREATE:   17, // { u8 mode(1|3) }
+  ARENA_LIST:     18, // { }
+  ARENA_SEARCH:   19, // { str<32> keyword }
+  ARENA_JOIN:     20, // { str<32> roomCode }
+  ARENA_LEAVE:    21, // { }
+  ARENA_WHEEL:    22, // { u8 bagSlot(0..4095) }
+  ARENA_READY:    23, // { u8 ready(0|1) }
+  ARENA_LOADOUT:  24, // { u8[10] cells }
 } as const;
 
 /** SWAP_ROW payload meaning "swap the entire row", not a single slot. */
@@ -121,6 +130,13 @@ export const S2C = {
   SQUAD_MEMBER_STATE: 12,
   /** 服务器推送 Loadout 数据（完整列表）。 */
   LOADOUT_DATA: 13,
+  // ── Arena 模式 ──
+  ARENA_LOBBY:  14, // { str code, u8 hostSeat, u8 size, u8 mode, PlayerBrief[seats] }
+  ARENA_UPDATE: 15, // { u8 type, u8 seat, payload }
+  ARENA_START:  16, // { u32 seed, u16 wallCount, Wall[wallCount] }
+  ARENA_EVENT:  17, // { u8 type, u8 seat, u16 payload }
+  ARENA_RESULT: 18, // { u8 winnerTeam, u8 cardCount, Cell[cardCount] }
+  ARENA_LIST:   19, // { u8 count, RoomBrief[count] }
 } as const;
 
 export const ENT = {
