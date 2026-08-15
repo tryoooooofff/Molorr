@@ -347,11 +347,15 @@ export class TalentSystem {
     }
   }
 
-  /** 在游戏开始时调用（客户端进入 game 场景时）。 */
+  /** 在游戏开始时调用（客户端进入 game 场景时）。
+   * 不在此处 syncWithLevel 是因为此时等级尚未从服务端收到（默认 1），
+   * 如果玩家已花费天赋点 > 1，syncWithLevel 会直接回滚所有天赋。
+   * 真正的等级同步在 S2C.STATS 到达时由 handlePacket 触发。 */
   onGameStart(): void {
     if (this._pendingSync) {
-      this.syncWithLevel();
       this._pendingSync = false;
+      // 仅应用已加载的天赋加成，不触发等级同步回滚
+      this.applyToPlayer();
     }
   }
 
