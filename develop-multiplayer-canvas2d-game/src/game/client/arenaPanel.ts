@@ -49,9 +49,9 @@ export class ArenaPanel {
   draw(ctx: CanvasRenderingContext2D) {
     if (!this.panelOpen) return;
 
-    // 面板左上角（菜单栏下方）
-    this.panelX = 10;
-    this.panelY = 60;
+    // 面板居中
+    this.panelX = (ctx.canvas.width - this.panelW) / 2;
+    this.panelY = (ctx.canvas.height - this.panelH) / 2;
 
     // 半透明遮罩
     ctx.fillStyle = 'rgba(0,0,0,0.45)';
@@ -64,7 +64,7 @@ export class ArenaPanel {
     ctx.translate(this.panelX, this.panelY);
 
     // 标题
-    text(ctx, '🏟 Arena', this.panelW / 2, 28, 22, '#ffffff', 'center');
+    text(ctx, 'Arena', this.panelW / 2, 28, 22, '#ffffff', 'center');
 
     if (this.state === 'lobby-list') this.drawLobbyList(ctx);
     else if (this.state === 'in-room') this.drawInRoom(ctx);
@@ -76,7 +76,7 @@ export class ArenaPanel {
   private drawLobbyList(ctx: CanvasRenderingContext2D) {
     // 搜索框
     this.searchFieldRect = { x: 20, y: 55, w: this.panelW - 170, h: 34 };
-    searchField(ctx, this.searchFieldRect, this.searchQuery, this.searchActive, '搜索房间…');
+    searchField(ctx, this.searchFieldRect, this.searchQuery, this.searchActive, 'searching the room…');
 
     // 1v1/3v3 toggle
     this.toggleBtnRect = { x: this.panelW - 130, y: 55, w: 110, h: 34 };
@@ -93,12 +93,12 @@ export class ArenaPanel {
     // 创建房间按钮
     this.createBtnRect = { x: 20, y: 110, w: (this.panelW - 60) / 2, h: 42 };
     const createHovered = this.hoveredBtn === 'create';
-    button(ctx, this.createBtnRect, '创建房间', '#27ae60', createHovered, 16);
+    button(ctx, this.createBtnRect, 'create room', '#27ae60', createHovered, 16);
 
     // 快速加入按钮
     this.quickJoinBtnRect = { x: 40 + (this.panelW - 60) / 2, y: 110, w: (this.panelW - 60) / 2, h: 42 };
     const quickHovered = this.hoveredBtn === 'quick';
-    button(ctx, this.quickJoinBtnRect, '快速加入', '#2980b9', quickHovered, 16);
+    button(ctx, this.quickJoinBtnRect, 'quick join', '#2980b9', quickHovered, 16);
 
     // 房间列表
     const listY = 175;
@@ -197,12 +197,12 @@ export class ArenaPanel {
     // 准备按钮
     this.readyBtnRect = { x: this.panelW / 2 - 65, y: 440, w: 130, h: 42 };
     const readyHovered = this.hoveredBtn === 'ready';
-    button(ctx, this.readyBtnRect, this.ready ? '✓ 取消准备' : '准备', this.ready ? '#e74c3c' : '#27ae60', readyHovered, 16);
+    button(ctx, this.readyBtnRect, this.ready ? 'stop' : 'ready', this.ready ? '#e74c3c' : '#27ae60', readyHovered, 16);
 
     // 离开按钮
     this.leaveBtnRect = { x: this.panelW - 85, y: 12, w: 70, h: 32 };
     const leaveHovered = this.hoveredBtn === 'leave';
-    button(ctx, this.leaveBtnRect, '离开', '#c0392b', leaveHovered, 14);
+    button(ctx, this.leaveBtnRect, 'leave', '#c0392b', leaveHovered, 14);
   }
 
   private drawTeamPanel(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, players: PlayerBrief[], team: number) {
@@ -213,7 +213,7 @@ export class ArenaPanel {
     ctx.lineWidth = 2;
     ctx.strokeStyle = 'rgba(0,0,0,0.25)';
     ctx.stroke();
-    text(ctx, `队伍 ${team + 1}`, x + w / 2, y + 22, 15, '#fff', 'center', false);
+    text(ctx, `team ${team + 1}`, x + w / 2, y + 22, 15, '#fff', 'center', false);
     players.forEach((p, i) => {
       const py = y + 40 + i * 32;
       text(ctx, `${p.name}  Lv.${p.level}`, x + 12, py + 8, 12, '#ddd', 'left', false);
@@ -228,7 +228,8 @@ export class ArenaPanel {
   private drawInGame(ctx: CanvasRenderingContext2D) {
     // 游戏内 HUD
     text(ctx, 'Arena', 70, 20, 18, '#e74c3c', 'center');
-    text(ctx, 'Lives: ' + this.lives, 70, 42, 16, '#e74c3c', 'center', false);
+    const hearts = 'Life'.repeat(Math.max(0, this.lives)) + 'Life'.repeat(Math.max(0, 2 - this.lives));
+    text(ctx, hearts, 70, 42, 16, '#e74c3c', 'center', false);
   }
 
   handleMouseMove(mx: number, my: number) {
