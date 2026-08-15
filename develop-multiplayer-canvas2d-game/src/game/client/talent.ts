@@ -363,11 +363,14 @@ export class TalentSystem {
     if (!this.host) return;
     const max = this.getMaxTalentPointsForLevel();
     const spent = this.getTotalSpent();
-    if (spent > max) this.rollbackToPoints(max);
+    // 不在此处 rollback 天赋等级——服务器玩家等级可能因为 XP 未同步
+    // 而暂时较低（例如刚连接时），rolling back 会丢失已保存的天赋等级。
+    // 天赋等级只应在用户主动点击 Reset 时回滚。
+    // 只调整未使用的天赋点数(talentPoints)使其与玩家等级一致。
     const expected = max;
-    const actual = this.talentPoints + this.getTotalSpent();
+    const actual = this.talentPoints + spent;
     if (actual !== expected) {
-      this.talentPoints = Math.max(0, expected - this.getTotalSpent());
+      this.talentPoints = Math.max(0, expected - spent);
       this.save();
     }
     this.applyToPlayer();
