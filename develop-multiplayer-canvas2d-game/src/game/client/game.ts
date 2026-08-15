@@ -9010,6 +9010,7 @@ private bagLayout() {
     }
     if (this.scene === "menu" && this.mobGallery.visible) this.mobGallery.handleMouseMove(p.x, p.y);
     if (this.settings.panelOpen) this.settings.handleMouseMove(p.x, p.y);
+    if (this.arenaPanel.panelOpen) this.arenaPanel.handleMouseMove(p.x, p.y);
     // 天赋面板：鼠标 hover 节点提示 + 触摸拖动旋转。
     if (this.talent.isOpen) {
       this.talent.handleMouseMove([p.x, p.y]);
