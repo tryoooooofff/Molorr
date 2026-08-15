@@ -1583,6 +1583,58 @@ static Cell readCell(Reader& r) {
 }
 
 // =====================================================================
+// Spatial Grid – 空间网格划分，将 O(n²) 碰撞检测降为 O(n * k)
+// 每个 Entity 只与同格 + 相邻 8 格的 Entity 做碰撞检测
+// =====================================================================
+constexpr float SPATIAL_GRID_CELL_SIZE = 400.f; // 每格 400px（≈1/4 视野半径）
+
+struct SpatialGrid {
+  std::unordered_map<uint64_t, std::vector<int>> cells;
+
+  // 清空网格，准备下一帧重建
+  void clear() { cells.clear(); }
+
+  // 获取 (col, row) 对应的 cell key
+  static uint64_t key(int col, int row) {
+    return ((uint64_t)(uint32_t)col << 32) | (uint32_t)row;
+  }
+
+  // 将 entity index 插入所在格子
+  void insert(int entityIdx, float x, float y, float radius) {
+    int minCol = (int)std::floor((x - radius) / SPATIAL_GRID_CELL_SIZE);
+    int maxCol = (int)std::floor((x + radius) / SPATIAL_GRID_CELL_SIZE);
+    int minRow = (int)std::floor((y - radius) / SPATIAL_GRID_CELL_SIZE);
+    int maxRow = (int)std::floor((y + radius) / SPATIAL_GRID_CELL_SIZE);
+    for (int col = minCol; col <= maxCol; col++) {
+      for (int row = minRow; row <= maxRow; row++) {
+        cells[key(col, row)].push_back(entityIdx);
+      }
+    }
+  }
+
+  // 查询与 (x, y, r) 重叠的格子中的所有 entity index
+  // 返回一个 set 避免重复（一个 entity 可能跨多个格子）
+  std::vector<int> query(float x, float y, float radius) const {
+    int minCol = (int)std::floor((x - radius) / SPATIAL_GRID_CELL_SIZE);
+    int maxCol = (int)std::floor((x + radius) / SPATIAL_GRID_CELL_SIZE);
+    int minRow = (int)std::floor((y - radius) / SPATIAL_GRID_CELL_SIZE);
+    int maxRow = (int)std::floor((y + radius) / SPATIAL_GRID_CELL_SIZE);
+    std::unordered_set<int> seen;
+    std::vector<int> result;
+    for (int col = minCol; col <= maxCol; col++) {
+      for (int row = minRow; row <= maxRow; row++) {
+        auto it = cells.find(key(col, row));
+        if (it == cells.end()) continue;
+        for (int idx : it->second) {
+          if (seen.insert(idx).second) result.push_back(idx);
+        }
+      }
+    }
+    return result;
+  }
+};
+
+// =====================================================================
 // Simulation class
 // =====================================================================
 class Simulation {
@@ -1597,6 +1649,9 @@ public:
   float zoneRefillTimer = 0;
   float persistTimer = 0;
   int mobCollisionSkipFrames = 0;
+
+  // 空间网格：每帧构建一次，用于加速碰撞检测
+  SpatialGrid mobGrid;
 
   // Per-map worlds
   struct World {
@@ -2976,6 +3031,12 @@ public:
       }
     }
 
+    // 构建空间网格：将当前所有 mob 插入网格
+    mobGrid.clear();
+    for (int i = 0; i < (int)mobs.size(); i++) {
+      mobGrid.insert(i, mobs[i].x, mobs[i].y, mobs[i].radius);
+    }
+
     for (int i = (int)mobs.size() - 1; i >= 0; i--) {
       Mob& mob = mobs[i];
       mob.hitCd = std::max(0.f, mob.hitCd - dt);
@@ -3022,8 +3083,10 @@ public:
         mob.thinkTimer = MOB_THINK_INTERVAL + (float)rand() / (float)RAND_MAX * 0.05f;
 
         if (mob.friendly) {
-          for (auto& other : mobs) {
-            if (&other == &mob) continue;
+          auto nearby = mobGrid.query(mob.x, mob.y, 520);
+          for (int oi : nearby) {
+            if (oi == i || oi >= (int)mobs.size()) continue;
+            auto& other = mobs[oi];
             if (!other.friendly && other.hp > 0) {
               float d = std::hypot(other.x - mob.x, other.y - mob.y);
               if (d < 520 && d < best) { best = d; targetStorage = {other.x, other.y, other.id}; target = &targetStorage; }
@@ -3039,8 +3102,10 @@ public:
             float d = std::hypot(p->x - mob.x, p->y - mob.y);
             if (d < 460 && d < best) { best = d; targetStorage = {p->x, p->y, p->id}; target = &targetStorage; }
           }
-          for (auto& other : mobs) {
-            if (&other == &mob) continue;
+          auto nearby = mobGrid.query(mob.x, mob.y, 380);
+          for (int oi : nearby) {
+            if (oi == i || oi >= (int)mobs.size()) continue;
+            auto& other = mobs[oi];
             if (other.friendly && other.hp > 0) {
               float d = std::hypot(other.x - mob.x, other.y - mob.y);
               if (d < 380 && d < best) { best = d; targetStorage = {other.x, other.y, other.id}; target = &targetStorage; }
@@ -3126,15 +3191,17 @@ public:
       }
       mob.pushOutCooldown = std::max(0.f, mob.pushOutCooldown - dt);
 
-      // ---- Mob-to-mob collision ----
+      // ---- Mob-to-mob collision (空间网格加速) ----
       bool isStationary = mob.speed <= 0;
       if (!isStationary) {
         mob.collisionTimer -= dt;
         if (mob.collisionTimer <= 0) {
           float interval = mob.speed <= MOB_COLLISION_SLOW_SPEED ? MOB_COLLISION_SLOW_INTERVAL : MOB_COLLISION_FAST_INTERVAL;
           mob.collisionTimer = interval + (float)(rand() % 20) / 1000.f;
-          for (auto& other : mobs) {
-            if (&other == &mob) continue;
+          auto nearby = mobGrid.query(mob.x, mob.y, mob.radius + 400);
+          for (int otherIdx : nearby) {
+            if (otherIdx == i || otherIdx >= (int)mobs.size()) continue;
+            auto& other = mobs[otherIdx];
             float dx = mob.x - other.x, dy = mob.y - other.y;
             if (dx * dx + dy * dy > viewRadiusSq) continue; // 视野裁剪：跳过过远的生物
             collisionCounter.n++;
@@ -3459,8 +3526,15 @@ public:
           }
         }
       } else {
-        // Hit hostile mobs and friendly mobs (no more invincibility for friendly)
-        for (auto& mob : mobs) {
+        // Hit hostile mobs and friendly mobs — 使用空间网格加速
+        SpatialGrid projMobGrid;
+        for (int mi = 0; mi < (int)mobs.size(); mi++) {
+          projMobGrid.insert(mi, mobs[mi].x, mobs[mi].y, mobs[mi].radius);
+        }
+        auto nearbyMobs = projMobGrid.query(p.x, p.y, p.radius + 400);
+        for (int otherIdx : nearbyMobs) {
+          if (otherIdx >= (int)mobs.size()) continue;
+          auto& mob = mobs[otherIdx];
           if (mob.hp <= 0 || p.hitCd > 0) continue;
           float mdx = mob.x - p.x, mdy = mob.y - p.y;
           if (mdx * mdx + mdy * mdy > projViewRadiusSq) continue; // 视野裁剪
