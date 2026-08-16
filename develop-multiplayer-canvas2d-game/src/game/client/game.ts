@@ -11744,21 +11744,22 @@ private bagLayout() {
     const antBonus = antennaeViewBonus(this.slots);
     this.viewZoom = Math.max(0.35, zoom - antBonus);
 
-    // 地面每帧直接绘制（不缓存）；cache canvas 只缓存墙壁（drawWallsCached），
-    // 每帧 blit 一张 drawImage，重建时先清理上一帧。
-    const groundColor = BIOME_BACKGROUNDS[this.currentBiome]?.ground_color || [30, 174, 99];
-    if (this.currentBiome === "Ocean" || this.currentBiome === "Desert") {
-      this.drawWavesDirect(ctx, { x: this.camX, y: this.camY }, groundColor);
-    } else {
-      this.drawBackgroundPattern(ctx, { x: this.camX, y: this.camY }, groundColor);
-    }
-    if (this.settings.cacheCanvas) {
-      this.drawWallsCached(ctx, { x: this.camX, y: this.camY });
-    }
+    const isArena = this.arenaPanel.state === 'in-game';
 
-    // Arena 战场渲染（在实体渲染之前，让实体显示在深色背景之上）
-    if (this.arenaPanel.state === 'in-game') {
+    if (isArena) {
+      // Arena 模式：独立地图，不叠加在普通地图上
       this.renderArenaBattlefield(ctx);
+    } else {
+      // 正常模式：渲染地图地面和墙壁
+      const groundColor = BIOME_BACKGROUNDS[this.currentBiome]?.ground_color || [30, 174, 99];
+      if (this.currentBiome === "Ocean" || this.currentBiome === "Desert") {
+        this.drawWavesDirect(ctx, { x: this.camX, y: this.camY }, groundColor);
+      } else {
+        this.drawBackgroundPattern(ctx, { x: this.camX, y: this.camY }, groundColor);
+      }
+      if (this.settings.cacheCanvas) {
+        this.drawWallsCached(ctx, { x: this.camX, y: this.camY });
+      }
     }
 
     ctx.save();
@@ -11766,19 +11767,24 @@ private bagLayout() {
     ctx.scale(this.viewZoom, this.viewZoom);
     ctx.translate(-this.camX, -this.camY);
 
-    const viewW = this.w / this.viewZoom;
-    const viewH = this.h / this.viewZoom;
+    if (isArena) {
+      // Arena 世界中渲染网格、墙和边界
+      this.renderArenaWorld(ctx);
+    } else {
+      const viewW = this.w / this.viewZoom;
+      const viewH = this.h / this.viewZoom;
 
-    // out-of-bounds shading
-    ctx.fillStyle = "rgba(0,0,0,0.28)";
-    const ob = 4000;
-    ctx.fillRect(this.camX - viewW, -ob, viewW * 2, ob);
-    ctx.fillRect(this.camX - viewW, this.worldH, viewW * 2, ob);
-    ctx.fillRect(-ob, this.camY - viewH, ob, viewH * 2);
-    ctx.fillRect(this.worldW, this.camY - viewH, ob, viewH * 2);
+      // out-of-bounds shading
+      ctx.fillStyle = "rgba(0,0,0,0.28)";
+      const ob = 4000;
+      ctx.fillRect(this.camX - viewW, -ob, viewW * 2, ob);
+      ctx.fillRect(this.camX - viewW, this.worldH, viewW * 2, ob);
+      ctx.fillRect(-ob, this.camY - viewH, ob, viewH * 2);
+      ctx.fillRect(this.worldW, this.camY - viewH, ob, viewH * 2);
 
-    // walls（缓存开启时由 drawWallsCached blit 墙壁缓存，避免重复绘制）
-    if (!this.settings.cacheCanvas) this.drawWallsFromData(ctx, { x: this.camX, y: this.camY });
+      // walls（缓存开启时由 drawWallsCached blit 墙壁缓存，避免重复绘制）
+      if (!this.settings.cacheCanvas) this.drawWallsFromData(ctx, { x: this.camX, y: this.camY });
+    }
 
     // entities
     const list = [...this.ents.values()].sort((a, b) => a.kind - b.kind || a.y - b.y);
@@ -11812,9 +11818,12 @@ private bagLayout() {
       text(ctx, f.msg, f.x, f.y, 16, f.color);
       ctx.restore();
     }
-    ctx.restore();
+    ctx.restore(); // 恢复世界变换
 
-    if (this.mapFlash > 0) {
+    // 恢复 arena 圆形裁剪
+    if (isArena) ctx.restore();
+
+    if (!isArena && this.mapFlash > 0) {
       ctx.save();
       ctx.globalAlpha = this.mapFlash * 0.8;
       ctx.fillStyle = map.accent;
@@ -11900,69 +11909,71 @@ if (this.drag) {
   }
 
   private renderArenaBattlefield(ctx: CanvasRenderingContext2D) {
-    const R = 4000; // 球形战场半径
-    const cx = this.w / 2; // 屏幕中心
+    // 屏幕空间：深色背景 + 圆形裁剪
+    const cx = this.w / 2;
     const cy = this.h / 2;
+    const radius = Math.min(this.w, this.h) / 2;
 
+    // 先填充整个画布为深色，覆盖任何普通地图残留
+    ctx.fillStyle = '#0a0a1a';
+    ctx.fillRect(0, 0, this.w, this.h);
+
+    // 圆形裁剪 - 整个 arena 内容都在这个圆内
     ctx.save();
-    // 圆形裁剪
     ctx.beginPath();
-    ctx.arc(cx, cy, Math.min(this.w, this.h) / 2, 0, Math.PI * 2);
+    ctx.arc(cx, cy, radius, 0, Math.PI * 2);
     ctx.clip();
 
-    // 背景
+    // 深色背景（仅在圆内可见）
     ctx.fillStyle = '#1a1a2e';
     ctx.fillRect(0, 0, this.w, this.h);
 
-    // 网格地板 - 同心圆
-    const viewZoom = this.viewZoom || 1;
+    // 注意：不 restore 裁剪，保持裁剪作用到后续的 world 渲染
+    // 在 renderGame 中，entities 和 arenaWorld 都在这个裁剪内渲染
+    // 裁剪由 renderGame 末尾的 restore 恢复
+  }
+
+  private renderArenaWorld(ctx: CanvasRenderingContext2D) {
+    const R = 4000; // 球形战场半径
+    const arenaCenterX = 4000; // 战场中心世界坐标
+    const arenaCenterY = 4000;
+
+    // 网格地板 - 同心圆（世界坐标）
     for (let r = 200; r <= R; r += 200) {
       ctx.strokeStyle = r % 800 === 0 ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.05)';
       ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.arc(cx, cy, r * viewZoom, 0, Math.PI * 2);
+      ctx.arc(arenaCenterX, arenaCenterY, r, 0, Math.PI * 2);
       ctx.stroke();
     }
 
-    // 极轴线
+    // 极轴线（世界坐标）
     for (let a = 0; a < 360; a += 30) {
       const rad = a * Math.PI / 180;
       ctx.strokeStyle = 'rgba(255,255,255,0.05)';
       ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.lineTo(cx + Math.cos(rad) * R * viewZoom, cy + Math.sin(rad) * R * viewZoom);
+      ctx.moveTo(arenaCenterX, arenaCenterY);
+      ctx.lineTo(arenaCenterX + Math.cos(rad) * R, arenaCenterY + Math.sin(rad) * R);
       ctx.stroke();
     }
 
-    // 边界圆环
+    // 边界圆环（世界坐标）
     ctx.strokeStyle = '#e74c3c';
     ctx.lineWidth = 3;
     ctx.beginPath();
-    ctx.arc(cx, cy, R * viewZoom, 0, Math.PI * 2);
+    ctx.arc(arenaCenterX, arenaCenterY, R, 0, Math.PI * 2);
     ctx.stroke();
 
-    // 渲染随机墙（使用 this.arenaWalls）
+    // 随机墙（世界坐标）
     if (this.arenaWalls) {
       ctx.fillStyle = '#2c3e50';
       ctx.strokeStyle = '#444';
       ctx.lineWidth = 1;
       for (const wall of this.arenaWalls) {
-        const wx = (wall.x - this.camX) * viewZoom + this.w / 2;
-        const wy = (wall.y - this.camY) * viewZoom + this.h / 2;
-        const ww = wall.w * viewZoom;
-        const wh = wall.h * viewZoom;
-        ctx.fillRect(wx, wy, ww, wh);
-        ctx.strokeRect(wx, wy, ww, wh);
+        ctx.fillRect(wall.x, wall.y, wall.w, wall.h);
+        ctx.strokeRect(wall.x, wall.y, wall.w, wall.h);
       }
     }
-
-    // HUD
-    ctx.fillStyle = '#fff';
-    ctx.font = 'bold 16px Arial';
-    ctx.textAlign = 'left';
-    ctx.fillText(`命数: ${'♥'.repeat(this.arenaPanel.lives)}${'♡'.repeat(2 - this.arenaPanel.lives)}`, 10, 25);
-
-    ctx.restore();
   }
 
 
