@@ -258,7 +258,7 @@ export class ArenaPanel {
       // 检查该卡是否已在 wheel 上（自己的 slot）
       const mySeat = this.currentRoom?.mySeat ?? -1;
       const wheelCard = mySeat >= 0 ? this.wheelCards[mySeat] : null;
-      const dimmed = wheelCard !== null && wheelCard.item === cell.item && wheelCard.rarity === cell.rarity;
+      const dimmed = wheelCard != null && wheelCard.item === cell.item && wheelCard.rarity === cell.rarity;
       drawCard(ctx, rect, cell, { hovered, dim: dimmed ? 0.35 : 1, showName: false });
     }
     ctx.restore();
