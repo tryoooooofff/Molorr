@@ -841,6 +841,20 @@ export const MAPS: MapDef[] = [
       { x: 6800, y: 7600, w: 400, h: 400 },
     ],
   },
+  // 竞技场空白地图（无 mob、无墙壁，纯空白场地）
+  {
+    id: 3,
+    name: "Arena",
+    bg: "#1a1a2e",
+    grid: "#0a0a1a",
+    accent: "#e74c3c",
+    width: 8000,
+    height: 8000,
+    mobs: [],
+    mobCap: 0,
+    rarityBias: 0,
+    walls: [],
+  },
 ];
 
 // =====================================================================
@@ -1081,20 +1095,6 @@ export const MAP_GRIDS: string[][] = [
     '2222222222222222222222222222222222222222',
     '2222222222222222222222222222222222222222',
   ],
-  // 竞技场空白地图（无 mob、无墙壁，纯空白场地）
-  {
-    id: 3,
-    name: "Arena",
-    bg: "#1a1a2e",
-    grid: "#0a0a1a",
-    accent: "#e74c3c",
-    width: 8000,
-    height: 8000,
-    mobs: [],
-    mobCap: 0,
-    rarityBias: 0,
-    walls: [],
-  },
 ];
 
 export const ARENA_MAP_ID = 3;
