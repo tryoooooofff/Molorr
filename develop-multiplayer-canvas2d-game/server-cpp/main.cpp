@@ -2136,7 +2136,6 @@ public:
   }
 
   void rebuildPetals(Player& p) {
-    if (p.menuMode) return;
     for (int i = 0; i < SLOT_COUNT; i++) {
       PetalState* old = &p.petals[i];
       Cell& cell = p.slots[i];
@@ -2883,8 +2882,8 @@ public:
       for (int m = 0; m < MAP_COUNT; m++) refillZoneMobs(m, activePlayers);
     }
 
-    // Update petals
-    for (auto* p : activePlayers) updatePetals(*p, dt);
+    // Update petals (pass activePlayers for PvP damage)
+    for (auto* p : activePlayers) updatePetals(*p, dt, activePlayers);
 
     // Pickup drops
     for (auto* p : activePlayers) pickupDrops(*p, dt);
@@ -3104,7 +3103,7 @@ public:
   }
 
   // ---- Petal update ----
-  void updatePetals(Player& p, float dt) {
+  void updatePetals(Player& p, float dt, std::vector<Player*>& allPlayers) {
     if (!p.alive) return;
     World& world = worlds[p.mapId];
 
@@ -3235,6 +3234,38 @@ public:
             float kb = 90.f / (mob.radius / 20.f);
             mob.vx += ((mob.x - st.x) / d) * kb;
             mob.vy += ((mob.y - st.y) / d) * kb;
+            if (st.hp <= 0) {
+              st.alive = false;
+              st.timer = applyTalentReload(p, def.reload);
+            }
+            break;
+          }
+        }
+      }
+
+      // Petal-to-player collision damage (PvP)
+      if (st.hitCd <= 0 && !isSummon) {
+        float pr = def.radius * (1 + cell.rarity * 0.06f);
+        for (auto* other : allPlayers) {
+          if (other->id == p.id || other->mapId != p.mapId || !other->alive) continue;
+          if (other->hurtCd > 0) continue;
+          collisionCounter.n++;
+          float dx = other->x - st.x, dy = other->y - st.y;
+          float plRadius = PLAYER_RADIUS + soilRadiusBonusOf(*other);
+          float rSum = plRadius + pr;
+          if (dx * dx + dy * dy < rSum * rSum) {
+            float dmg = def.damage * rarityMult(cell.rarity) * p.talentBonuses.petalDmgMult;
+            if (other->shield > 0 && dmg > 0) {
+              float absorbed = std::min(other->shield * 2.f, dmg);
+              other->shield -= absorbed / 2.f;
+              dmg -= absorbed;
+            }
+            other->hp -= dmg;
+            other->hurtCd = 0.1f;
+            other->statsDirty = true;
+            st.hp -= 1;
+            st.hitCd = 0.03f;
+            if (other->hp <= 0) { killPlayer(*other); handleArenaPlayerDeath(*other); }
             if (st.hp <= 0) {
               st.alive = false;
               st.timer = applyTalentReload(p, def.reload);
