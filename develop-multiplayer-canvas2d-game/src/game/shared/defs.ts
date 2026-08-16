@@ -1040,6 +1040,9 @@ export const MAP_GRIDS: string[][] = [
   ],
 ];
 
+// 竞技场空白地图（不显示在地图选择中）
+export const ARENA_MAP_ID = MAPS.length;
+
 /** Number of columns/rows in each block grid. */
 export const BLOCK_GRID_COLS = 40;
 export const BLOCK_GRID_ROWS = 40;
