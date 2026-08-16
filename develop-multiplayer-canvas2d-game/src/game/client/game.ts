@@ -10182,6 +10182,7 @@ private bagLayout() {
     // Biome buttons
     const biomeButtons = this.menuBiomeButtons();
     for (const map of MAPS) {
+      if (!this.BIOME_COLORS[map.name]) continue; // skip arena map
       const r = biomeButtons[map.id];
       if (r && hit(r, mx, my)) {
         this.selectedMap = map.id;
@@ -11319,6 +11320,7 @@ private bagLayout() {
     // Update hover state
     this.menuHoveredButton = null;
     for (const map of MAPS) {
+      if (!this.BIOME_COLORS[map.name]) continue; // skip arena map
       const rect = biomeButtons[map.id];
       if (rect && hit(rect, this.mx, this.my)) {
         this.menuHoveredButton = `biome_${map.id}`;
@@ -11326,6 +11328,7 @@ private bagLayout() {
     }
 
     for (const map of MAPS) {
+      if (!this.BIOME_COLORS[map.name]) continue; // skip arena map
       const rect = biomeButtons[map.id];
       if (!rect) continue;
 
