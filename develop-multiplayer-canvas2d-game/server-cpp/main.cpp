@@ -2867,7 +2867,7 @@ public:
     // Gather active players (not in menu mode)
     std::vector<Player*> activePlayers;
     for (auto& [id, p] : players) {
-      if (!p.menuMode) activePlayers.push_back(&p);
+      if (!p.menuMode || p.mode == Mode::Arena) activePlayers.push_back(&p);
     }
 
     // Update players
@@ -5119,7 +5119,7 @@ int main() {
       ClientState* cs = csIt->second;
 
       // Snapshot (10 Hz to reduce CPU load)
-      if (!p->menuMode && (simPtr->tickCount & 1)) {
+      if ((!p->menuMode || p->mode == Mode::Arena) && (simPtr->tickCount & 1)) {
         Writer snap = simPtr->snapshotFor(*p, simPtr->tickCount, *clientStatesPtr);
         ws->send(snap.view(), uWS::OpCode::BINARY);
       }
