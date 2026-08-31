@@ -5348,11 +5348,11 @@ class ShopSystem {
     const px = W / 2 - this.PW / 2; // 设计坐标
     const py = H / 2 - this.PH / 2;
     this.closeBtn = { x: px + this.PW - 46, y: py + 8, w: 36, h: 36 };
-    const tabW = 148;
-    const tabH = 36;
-    const gap = 8;
-    const tabX = px + 20;
-    const tabY = py + 62;
+    const tabW = 102;
+    const tabH = 34;
+    const gap = 6;
+    const tabX = px + 22;
+    const tabY = py + 54;
     this.tabRects = {
       buy: { x: tabX, y: tabY, w: tabW, h: tabH },
       membership: { x: tabX + tabW + gap, y: tabY, w: tabW, h: tabH },
@@ -5758,18 +5758,18 @@ private darkenColor(color: string, percent: number): string {
     // 主背景(参考 ShopSystem.draw 的青色主题)
     ctx.fillStyle = "#22C1E9";
     ctx.beginPath();
-    roundRect(ctx, px, py, this.PW, this.PH, 12);
+    roundRect(ctx, px, py, this.PW, this.PH, 5);
     ctx.fill();
     ctx.strokeStyle = "#0B7894";
     ctx.lineWidth = 5;
     ctx.beginPath();
-    roundRect(ctx, px, py, this.PW, this.PH, 12);
+    roundRect(ctx, px, py, this.PW, this.PH, 5);
     ctx.stroke();
 
     // 标题 + 星星(金铜色五角星图标 + 数量文本)
-    this.drawStrokedText(ctx, "Shop", px + this.PW / 2, py + 30, 26, "center", "#ffffff");
-    drawStarIcon(ctx, px + this.PW - 118, py + 30, 13);
-    this.drawStrokedText(ctx, this.formatPrice(this.game.stars), px + this.PW - 140, py + 30, 24, "right", "#ffd700");
+    this.drawStrokedText(ctx, "Shop", px + this.PW / 2, py + 32, 28, "center", "#ffffff");
+    drawStarIcon(ctx, px + this.PW - 74, py + 32, 13);
+    this.drawStrokedText(ctx, this.formatPrice(this.game.stars), px + this.PW - 16, py + 32, 24, "right", "#ffd700");
 
     // 关闭按钮(与成就面板同款:红色渐变圆角按钮)
     this.drawStyledButton(
@@ -5793,7 +5793,7 @@ private darkenColor(color: string, percent: number): string {
         tabName === "redeem"
           ? active ? [155, 89, 182] : [108, 52, 131]
           : active ? [255, 215, 0] : [30, 48, 80];
-      this.drawStyledButton(ctx, label, [r.x, r.y, r.w, r.h], base, 15);
+      this.drawStyledButton(ctx, label, [r.x, r.y, r.w, r.h], base, 14);
     }
 
     if (this.currentTab === "buy") this.drawBuyTab(ctx, px, py);
@@ -5857,6 +5857,7 @@ private darkenColor(color: string, percent: number): string {
     ctx.clip();
     ctx.translate(0, -this.scrollOffset);
     this._shopCardRects = [];
+    let hoverTooltip: { item: number; rarity: number } | null = null;
     for (let i = 0; i < filtered.length; i++) {
       const entry = filtered[i];
       const col = i % COLS;
@@ -5872,16 +5873,17 @@ private darkenColor(color: string, percent: number): string {
       const price = this.getDiscountedPrice(entry.item, rarity);
       const cardScreenRect: Rect = { x: gx, y: gy - this.scrollOffset, w: SLOT_W, h: SLOT_H };
       const hovered = this.hitRect(cardScreenRect, this.mouseX, this.mouseY);
+      if (hovered) hoverTooltip = { item: entry.item, rarity };
 
       // 卡片背景
       ctx.fillStyle = "#78B8C9";
       ctx.beginPath();
-      roundRect(ctx, gx, gy, SLOT_W, SLOT_H, 8);
+      roundRect(ctx, gx, gy, SLOT_W, SLOT_H, 5);
       ctx.fill();
       ctx.strokeStyle = isDisc ? "#ffd700" : "#1a3050";
       ctx.lineWidth = isDisc ? 4 : 2;
       ctx.beginPath();
-      roundRect(ctx, gx, gy, SLOT_W, SLOT_H, 8);
+      roundRect(ctx, gx, gy, SLOT_W, SLOT_H, 5);
       ctx.stroke();
 
       // 卡片内容(图标+名称+稀有度行)在卡片矩形内 clip;切换稀有度时旧/新两帧水平滑动
@@ -5931,6 +5933,19 @@ private darkenColor(color: string, percent: number): string {
       });
     }
     ctx.restore();
+
+    // Hover tooltip (rarity-scaled stats) for the card under the cursor.
+    if (hoverTooltip) {
+      TooltipSystem.drawItemTooltip(
+        ctx,
+        { item: hoverTooltip.item, rarity: hoverTooltip.rarity, count: 1 },
+        this.mouseX + 14,
+        this.mouseY - 10,
+        this.PW,
+        this.PH,
+        null, // talent bonuses are rendered by the main UI tooltip; keep this lightweight
+      );
+    }
 
     // 滚动条
     if (maxOff > 0) {
@@ -6160,6 +6175,19 @@ private darkenColor(color: string, percent: number): string {
     const btnX = px + this.PW / 2 - btnW / 2;
     const btnY = boxY + boxH + 30;
     this.drawStyledButton(ctx, "Confirm", [btnX, btnY, btnW, btnH], [100, 146, 158], 16);
+  }
+}
+
+/** localStorage key that permanently dismisses the canvas "Phone tip". */
+const PHONE_TIP_IGNORED_KEY = "petalia.phoneTipIgnored";
+
+/** True once the player chose "Ignore" on the canvas Phone tip. */
+function isCanvasPhoneTipIgnored(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return localStorage.getItem(PHONE_TIP_IGNORED_KEY) === "1";
+  } catch {
+    return false;
   }
 }
 
@@ -6469,6 +6497,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private mobileContractRect: Rect | null = null;
   private mobileJoystickRect: Rect | null = null;
   private mobileFullscreenBtn: Rect | null = null;
+  private mobileTipIgnoreBtn: Rect | null = null;
+  /** Whether the canvas "Phone tip" was permanently dismissed via Ignore. */
+  private phoneTipIgnored = isCanvasPhoneTipIgnored();
   private mobileControlsVisible = false;
   private lastTouchTime = 0;
 
@@ -9117,6 +9148,12 @@ private bagLayout() {
 
     // Mobile controls: spread (Space) / contract (Shift) / joystick
     if (this.isMobile) {
+      if (this.scene === "menu" && this.mobileTipIgnoreBtn && hit(this.mobileTipIgnoreBtn, p.x, p.y)) {
+        this.phoneTipIgnored = true;
+        try { localStorage.setItem(PHONE_TIP_IGNORED_KEY, "1"); } catch { /* ignore */ }
+        this.mobileTipIgnoreBtn = null;
+        return;
+      }
       if (this.scene === "menu" && this.mobileFullscreenBtn && hit(this.mobileFullscreenBtn, p.x, p.y)) {
         this.tryEnterFullscreen();
         return;
@@ -11471,11 +11508,11 @@ private bagLayout() {
 
 
     // Mobile: suggest fullscreen + show current control scheme
-    if (this.isMobile) {
+    if (this.isMobile && !this.phoneTipIgnored) {
       const isFs = typeof document !== "undefined" && !!document.fullscreenElement;
       const topY = 8;
       const tipW = Math.min(360, W * 0.92);
-      const tipH = isFs ? 58 : 84;
+      const tipH = isFs ? 58 : 126;
       const tipX = W / 2 - tipW / 2;
       ctx.save();
       roundRect(ctx, tipX, topY, tipW, tipH, 10);
@@ -11490,15 +11527,25 @@ private bagLayout() {
         const btnW = 180, btnH = 32;
         const btnX = tipX + tipW / 2 - btnW / 2;
         const btnY = topY + 46;
-        const btnRect: Rect = { x: btnX, y: btnY, w: btnW, h: btnH };
-        this.mobileFullscreenBtn = btnRect;
-        button(ctx, btnRect, "FULLSCREEN", "#3fae60", hit(btnRect, this.mx, this.my), 13);
+        const fullBtnRect: Rect = { x: btnX, y: btnY, w: btnW, h: btnH };
+        const ignoreW = tipW - 24, ignoreH = 30;
+        const ignoreX = tipX + 12;
+        const ignoreY = btnY + btnH + 10;
+        const ignoreBtnRect: Rect = { x: ignoreX, y: ignoreY, w: ignoreW, h: ignoreH };
+        this.mobileFullscreenBtn = fullBtnRect;
+        this.mobileTipIgnoreBtn = ignoreBtnRect;
+        button(ctx, fullBtnRect, "FULLSCREEN", "#3fae60", hit(fullBtnRect, this.mx, this.my), 13);
+        button(ctx, ignoreBtnRect, "IGNORE — DON'T SHOW AGAIN", "#4a5563", hit(ignoreBtnRect, this.mx, this.my), 11);
       } else {
         text(ctx, "Mobile: joystick to move | SPACE=Spread SHIFT=Defend", tipX + tipW / 2, topY + 18, 11, "#c9ffd6");
         text(ctx, "Buttons on right also work", tipX + tipW / 2, topY + 36, 10, "rgba(255,255,255,0.65)");
         this.mobileFullscreenBtn = null;
+        this.mobileTipIgnoreBtn = null;
       }
       ctx.restore();
+    } else {
+      this.mobileFullscreenBtn = null;
+      this.mobileTipIgnoreBtn = null;
     }
 
     // Draw last: these floating panels intentionally overlay every main-menu
