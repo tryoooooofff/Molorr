@@ -1,6 +1,94 @@
 // Pure canvas2d drawing kit: every widget in this game is painted here.
-import { ITEMS, MOBS, RARITIES, getSummonCount } from "../shared/defs";
+import { ITEMS, MAPS, MOBS, RARITIES, getSummonCount } from "../shared/defs";
 import type { Cell } from "../shared/sim";
+
+// ============================================
+// Main-menu backdrop
+// ============================================
+
+/** The biomes the main menu can show. The hidden Arena map has no menu palette. */
+export type Biome = "Garden" | "Desert" | "Ocean";
+
+const MENU_BIOMES: Biome[] = ["Garden", "Desert", "Ocean"];
+
+/** Narrows an arbitrary map name to a `Biome`, or `null` for the Arena map. */
+export function asBiome(name: string): Biome | null {
+  return (MENU_BIOMES as string[]).includes(name) ? (name as Biome) : null;
+}
+
+/**
+ * Ground colour per biome, read straight from the map defs (`MapDef.bg`) so the
+ * menu backdrop and the in-world ground can never drift apart.
+ */
+export const BIOME_GROUND: Record<Biome, string> = (() => {
+  const out = {} as Record<Biome, string>;
+  for (const m of MAPS) {
+    const b = asBiome(m.name);
+    if (b) out[b] = m.bg;
+  }
+  return out;
+})();
+
+/** The slate-900 both the menu gradient and the panels fade into. */
+export const MENU_SLATE_900 = "#0f172a";
+
+/** Gradient stop factors: top = 65% of the ground colour, mid = 40% at 55% height. */
+const MENU_TOP_FACTOR = 0.65;
+const MENU_MID_FACTOR = 0.4;
+
+/** Parses `#rgb` / `#rrggbb` into an rgb triple. */
+export function hexToRgb(hex: string): [number, number, number] {
+  const c = hex.replace("#", "");
+  const full = c.length === 3 ? c.split("").map((s) => s + s).join("") : c;
+  const n = parseInt(full, 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+
+/** Multiplies each rgb channel by `f` (0..1). */
+function scaleRgb(rgb: [number, number, number], f: number): string {
+  const c = (v: number) => Math.max(0, Math.min(255, Math.round(v * f)));
+  return `rgb(${c(rgb[0])}, ${c(rgb[1])}, ${c(rgb[2])})`;
+}
+
+/** The ground colour of `biome` as an rgb triple, ready for the menu animation. */
+export function biomeGroundRgb(biome: Biome): [number, number, number] {
+  return hexToRgb(BIOME_GROUND[biome]);
+}
+
+/**
+ * The gradient's mid tone (ground x 40%). Grid lines and floating petals are
+ * tinted from this so they stay legible against both ends of the backdrop.
+ */
+export function menuMidTone(ground: [number, number, number]): [number, number, number] {
+  return [
+    Math.round(ground[0] * MENU_MID_FACTOR),
+    Math.round(ground[1] * MENU_MID_FACTOR),
+    Math.round(ground[2] * MENU_MID_FACTOR),
+  ];
+}
+
+/**
+ * Main-menu backdrop: a vertical gradient derived from the SELECTED biome's
+ * ground palette (top = 65% of the ground colour, mid = 40%, bottom fades to
+ * the shared slate-900), so the menu reads as "the map you picked".
+ *
+ * This game paints everything with canvas2d and has no DOM/CSS, so the gradient
+ * is returned as a `CanvasGradient` for `ctx.fillStyle` rather than as a CSS
+ * `linear-gradient(...)` string. `ground` is an rgb triple rather than a biome
+ * name so the caller can pass the *animated* colour while the menu cross-fades
+ * between biomes; use `biomeGroundRgb(biome)` for the static colour.
+ */
+export function menuBackground(
+  ctx: CanvasRenderingContext2D,
+  height: number,
+  ground: [number, number, number],
+): CanvasGradient {
+  const g = ctx.createLinearGradient(0, 0, 0, height);
+  g.addColorStop(0, scaleRgb(ground, MENU_TOP_FACTOR));
+  g.addColorStop(0.55, scaleRgb(ground, MENU_MID_FACTOR));
+  g.addColorStop(1, MENU_SLATE_900);
+  return g;
+}
 
 // ============================================
 // 根据稀有度获取花瓣数量
@@ -56,6 +144,51 @@ export function getFixedPetalCount(itemId: number): number {
 
 /** Shared UI font stack (kept as a constant so every label/health-bar/tag matches). */
 export const FONT_FAMILY = '"Trebuchet MS", "Segoe UI", sans-serif';
+
+/**
+ * Optional accelerated icon renderer (the sprite-sheet atlas in spriteSheet.ts).
+ *
+ * spriteSheet.ts has to import `drawItemIcon` from here to BAKE the atlas, so
+ * ui.ts must not import it back — that would be a cycle. Instead the sprite
+ * sheet registers itself through this hook at startup, and every icon call site
+ * in this file goes through `iconRenderer()`, which falls back to the vector
+ * renderer whenever the atlas is unavailable.
+ */
+type IconRenderer = (
+  ctx: CanvasRenderingContext2D,
+  itemId: number,
+  x: number,
+  y: number,
+  size: number,
+  spin: number,
+  rarity: number,
+  compact: boolean,
+) => void;
+
+let acceleratedIcon: IconRenderer | null = null;
+
+/** Registers the sprite-sheet renderer. Called once by spriteSheet.ts. */
+export function setIconRenderer(fn: IconRenderer | null) {
+  acceleratedIcon = fn;
+}
+
+/**
+ * Draws an item icon through the sprite atlas when one is registered, else via
+ * the vector renderer. Prefer this over `drawItemIcon` at UI call sites.
+ */
+export function icon(
+  ctx: CanvasRenderingContext2D,
+  itemId: number,
+  x: number,
+  y: number,
+  size: number,
+  spin = 0,
+  rarity = 0,
+  compact = false,
+) {
+  if (acceleratedIcon) acceleratedIcon(ctx, itemId, x, y, size, spin, rarity, compact);
+  else drawItemIcon(ctx, itemId, x, y, size, spin, rarity, compact);
+}
 
 export function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
   const rad = Math.min(r, w / 2, h / 2);
@@ -1411,7 +1544,9 @@ export function drawCard(
   const showName = opts.showName !== false && !!def;
   const iconSize = size * 0.28;
   const iconCy = cy - (showName ? r.h * 0.07 : 0);
-  drawItemIcon(ctx, cell.item, cx, iconCy, iconSize, 0, cell.rarity, cell.item === 2);
+  // Cards are the hottest icon call site (a full bag redraws dozens per frame),
+  // so they go through the sprite atlas.
+  icon(ctx, cell.item, cx, iconCy, iconSize, 0, cell.rarity, cell.item === 2);
 
   // Item name (bottom band) with the reference word-wrap logic.
   if (showName && def) {

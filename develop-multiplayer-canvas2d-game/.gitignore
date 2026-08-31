@@ -9,3 +9,6 @@ out
 # C++ server build artifacts
 uWebSockets/
 server-cpp/petalia-server
+
+# Local game server player saves (runtime artifact)
+data/

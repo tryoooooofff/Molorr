@@ -70,6 +70,10 @@ import {
   FONT_FAMILY,
   healthBar,
   hit,
+  asBiome,
+  biomeGroundRgb,
+  menuBackground,
+  menuMidTone,
   panel,
   Rect,
   roundRect,
@@ -78,6 +82,7 @@ import {
   shade,
   text,
 } from "./ui";
+import { drawItemSprite } from "./spriteSheet";
 import { QuickSlot, QuickSlotHost } from "./quickSlot";
 import { BonusSystem } from "./bonus";
 import { MobGallery } from "./mobGallery";
@@ -8746,12 +8751,27 @@ private bagLayout() {
     }
   }
 
+  /**
+   * Top-left exit button that replaces the old "Menu" HUD button.
+   *
+   * It is a square ✕ pinned to the upper-left corner (the conventional place to
+   * leave a running game) and is kept OUT of `hudButtons()` so it never takes
+   * part in the bag/craft row layout on any screen size.
+   */
+  private exitButtonRect(): Rect {
+    const isMobileLayout = this.isMobile || this.w < 640;
+    const s = isMobileLayout ? 40 : 44;
+    return { x: 14, y: 14, w: s, h: s };
+  }
+
   private hudButtons(): { id: string; rect: Rect; label: string; color: string }[] {
     const isMobileLayout = this.isMobile || this.w < 640;
     const isLandscapePhone = isMobileLayout && this.w > this.h && this.h <= 600;
     const bw = isMobileLayout ? Math.min(100, this.w * 0.22) : Math.min(120, this.w / 8);
     const bh = isMobileLayout ? 44 : 38;
     const invLabel = isMobileLayout ? "Bag" : "Inventory";
+    // NOTE: the old "menu" button is gone from every layout below; leaving the
+    // game is now the top-left ✕ (see exitButtonRect / drawExitButton).
     if (isLandscapePhone) {
       const compactW = Math.min(76, (this.w * 0.42 - 12) / 3);
       const compactH = 34;
@@ -8760,14 +8780,12 @@ private bagLayout() {
       return [
         { id: "bag", rect: { x: 12, y, w: compactW, h: compactH }, label: invLabel, color: "#3d8bd6" },
         { id: "craft", rect: { x: 12 + compactW + gap, y, w: compactW, h: compactH }, label: "Craft", color: "#c9762b" },
-        { id: "menu", rect: { x: 12 + (compactW + gap) * 2, y, w: compactW, h: compactH }, label: "Menu", color: "#8a4d4d" },
       ];
     }
     if (isMobileLayout) {
       return [
         { id: "bag", rect: { x: 16, y: this.hudButtonRowY(0), w: bw, h: bh }, label: invLabel, color: "#3d8bd6" },
         { id: "craft", rect: { x: 16, y: this.hudButtonRowY(1), w: bw, h: bh }, label: "Craft", color: "#c9762b" },
-        { id: "menu", rect: { x: 16, y: this.hudButtonRowY(2), w: bw, h: bh }, label: "Menu", color: "#8a4d4d" },
       ];
     } else {
       return [
@@ -8775,9 +8793,46 @@ private bagLayout() {
         { id: "craft", rect: { x: 16, y: this.hudButtonRowY(1), w: bw, h: bh }, label: "Craft", color: "#c9762b" },
         // Settings is a main-menu-only panel: it is deliberately absent from the
         // in-game HUD (neither the button nor the panel is drawn while playing).
-        { id: "menu", rect: { x: this.w - 108, y: this.hudButtonRowY(1), w: 92, h: bh }, label: "Menu", color: "#8a4d4d" },
       ];
     }
+  }
+
+  /** Paints the top-left exit ✕ using the shared red close-button styling. */
+  private drawExitButton(ctx: CanvasRenderingContext2D) {
+    const r = this.exitButtonRect();
+    const hovered = hit(r, this.mx, this.my);
+    const base: [number, number, number] = [220, 80, 80];
+    const shadeC = (f: number) =>
+      `rgb(${base.map((c) => Math.min(255, Math.max(0, Math.floor(c * f)))).join(",")})`;
+
+    ctx.save();
+    ctx.beginPath();
+    roundRect(ctx, r.x, r.y, r.w, r.h, 9);
+    ctx.fillStyle = shadeC(hovered ? 1.15 : 1);
+    ctx.fill();
+    ctx.save();
+    ctx.beginPath();
+    roundRect(ctx, r.x, r.y, r.w, r.h, 9);
+    ctx.clip();
+    ctx.fillStyle = shadeC(hovered ? 0.98 : 0.85);
+    ctx.fillRect(r.x, r.y, r.w, r.h / 2);
+    ctx.restore();
+    ctx.strokeStyle = shadeC(0.5);
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    roundRect(ctx, r.x, r.y, r.w, r.h, 9);
+    ctx.stroke();
+
+    ctx.font = `${Math.round(r.h * 0.5)}px ${FONT_FAMILY}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = 4;
+    ctx.strokeText("✕", r.x + r.w / 2, r.y + r.h / 2 + 1);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText("✕", r.x + r.w / 2, r.y + r.h / 2 + 1);
+    ctx.restore();
   }
 
 
@@ -9192,6 +9247,9 @@ private bagLayout() {
         }
         // Check if the touch hits any HUD button or Map button first!
         let hitHud = false;
+        // The top-left exit ✕ counts as HUD too, otherwise the joystick
+        // fallback swallows the tap and the button is dead on touch devices.
+        if (hit(this.exitButtonRect(), p.x, p.y)) hitHud = true;
         for (const b of this.hudButtons()) {
           if (hit(b.rect, p.x, p.y)) {
             hitHud = true;
@@ -9427,9 +9485,22 @@ private bagLayout() {
   // ------------------------------------------------------------ menu logic
 
   // Floating petals for menu animation
-  private menuPetals: { x: number; y: number; size: number; speedX: number; speedY: number; rotation: number; rotationSpeed: number; opacity: number }[] = [];
-  private menuBgColor: [number, number, number] = [26, 26, 46];
-  private menuTargetBgColor: [number, number, number] = [26, 26, 46];
+  /**
+   * Floating main-menu petals. These are REAL game petals: `item`/`rarity`
+   * index the shared ITEMS/RARITIES tables and are painted with the same
+   * artwork the bag and the world use, blitted from the sprite atlas.
+   */
+  private menuPetals: { x: number; y: number; size: number; speedX: number; speedY: number; rotation: number; rotationSpeed: number; opacity: number; item: number; rarity: number }[] = [];
+  /** Biome the current menu petals were drawn from; re-rolled when it changes. */
+  private menuPetalsBiome = "";
+  /**
+   * Animated ground colour the menu gradient is built from. Seeded with the
+   * default biome so the first frame already shows the right backdrop; a save
+   * that restores another map is picked up by updateMenuBgColor() and
+   * cross-faded to from here.
+   */
+  private menuBgColor: [number, number, number] = biomeGroundRgb("Garden");
+  private menuTargetBgColor: [number, number, number] = biomeGroundRgb("Garden");
   private menuHoveredButton: string | null = null;
   /** 主菜单瞬态提示（"Coming soon" 等），到期自动消失。 */
   private menuToast: { text: string; until: number } | null = null;
@@ -9482,15 +9553,36 @@ private bagLayout() {
     "Ocean": [0, 105, 148],
   };
 
-  private BIOME_BG_COLORS: Record<string, [number, number, number]> = {
-    "Garden": [36, 80, 36],
-    "Desert": [90, 70, 20],
-    "Ocean": [20, 50, 100],
-  };
+  /**
+   * Petal item ids that actually drop in the given biome, so the menu shows
+   * loot from the map you are about to play. Falls back to every petal if a
+   * biome has no drop table (should not happen for the three real maps).
+   */
+  private menuPetalPool(biomeName: string): number[] {
+    const pool: number[] = [];
+    for (const def of ITEMS) {
+      if (def.kind !== "petal") continue;
+      if (this.itemBiomes(def.id).has(biomeName)) pool.push(def.id);
+    }
+    if (pool.length) return pool;
+    return ITEMS.filter((d) => d.kind === "petal").map((d) => d.id);
+  }
 
+  /**
+   * Rebuilds the floating menu petals from the SELECTED biome's real drop
+   * table. Called on boot and whenever the selected map changes, so the menu
+   * previews the loot of the map you picked.
+   */
   private initMenuPetals() {
+    const selected = MAPS.find((m) => m.id === this.selectedMap);
+    const pool = this.menuPetalPool(selected?.name ?? "Garden");
+    this.menuPetalsBiome = selected?.name ?? "Garden";
     this.menuPetals = [];
     for (let i = 0; i < 20; i++) {
+      // Bias toward low rarities so the menu is not a wall of Eternal petals,
+      // but let the occasional bright one through.
+      const roll = Math.random();
+      const rarity = roll < 0.55 ? (Math.random() * 3) | 0 : roll < 0.9 ? 3 + ((Math.random() * 3) | 0) : 6 + ((Math.random() * 3) | 0);
       this.menuPetals.push({
         x: Math.random() * this.w,
         y: Math.random() * this.h,
@@ -9500,6 +9592,8 @@ private bagLayout() {
         rotation: Math.random() * Math.PI * 2,
         rotationSpeed: (Math.random() - 0.5) * 1.5,
         opacity: 0.35 + Math.random() * 0.4,
+        item: pool[(Math.random() * pool.length) | 0],
+        rarity: Math.min(MAX_RARITY, rarity),
       });
     }
   }
@@ -9520,6 +9614,13 @@ private bagLayout() {
   }
 
   private updateMenuBgColor(dt: number) {
+    // The selected biome is the single source of truth for the backdrop, so a
+    // map restored from a save shows the right gradient on boot — not just one
+    // picked by clicking a biome button.
+    const selected = MAPS.find((m) => m.id === this.selectedMap);
+    const biome = selected ? asBiome(selected.name) : null;
+    if (biome) this.menuTargetBgColor = biomeGroundRgb(biome);
+
     for (let i = 0; i < 3; i++) {
       const diff = this.menuTargetBgColor[i] - this.menuBgColor[i];
       if (Math.abs(diff) > 0.1) {
@@ -9562,19 +9663,27 @@ private bagLayout() {
     ctx.restore();
   }
 
+  /**
+   * Paints one floating menu petal as the REAL item it represents, using the
+   * same artwork as the bag and the world. The sprite atlas turns this into a
+   * single drawImage, so 20 detailed petals cost about as much as the 20 plain
+   * ellipses they replaced.
+   */
   private drawMenuPetal(ctx: CanvasRenderingContext2D, petal: typeof this.menuPetals[0]) {
     ctx.save();
     ctx.globalAlpha = petal.opacity;
-    ctx.translate(petal.x, petal.y);
-    ctx.rotate(petal.rotation);
-
-    // Draw a simple petal shape
-    const s = petal.size / 2;
-    ctx.fillStyle = `rgba(${this.menuBgColor[0] + 40}, ${this.menuBgColor[1] + 40}, ${this.menuBgColor[2] + 40}, 1)`;
-    ctx.beginPath();
-    ctx.ellipse(0, 0, s * 0.3, s * 0.6, 0, 0, Math.PI * 2);
-    ctx.fill();
-
+    // drawItemSprite applies its own translate/rotate, so pass the transform in
+    // rather than pre-applying it here.
+    drawItemSprite(
+      ctx,
+      petal.item,
+      petal.x,
+      petal.y,
+      petal.size * 0.34,
+      petal.rotation,
+      petal.rarity,
+      petal.item === 2,
+    );
     ctx.restore();
   }
 
@@ -10223,8 +10332,8 @@ private bagLayout() {
       const r = biomeButtons[map.id];
       if (r && hit(r, mx, my)) {
         this.selectedMap = map.id;
-        // Update target background color for smooth transition
-        this.menuTargetBgColor = [...this.BIOME_BG_COLORS[map.name]];
+        // The backdrop follows `selectedMap`; updateMenuBgColor() picks up the
+        // new biome next frame and cross-fades the gradient to it.
         return;
       }
     }
@@ -10436,11 +10545,16 @@ private bagLayout() {
       return; // 面板内点击其他区域不穿透
     }
 
+    // Top-left ✕ leaves the game. Tested before the HUD row so it always wins.
+    if (hit(this.exitButtonRect(), mx, my)) {
+      this.gotoMenu();
+      return;
+    }
+
     for (const b of this.hudButtons()) {
       if (!hit(b.rect, mx, my)) continue;
       if (b.id === "bag") this.toggleBag();
       if (b.id === "craft") this.toggleCraft();
-      if (b.id === "menu") this.gotoMenu();
       return;
     }
 
@@ -11212,8 +11326,12 @@ private bagLayout() {
     const W = this.w;
     const H = this.h;
 
-    // Initialize petals if empty
-    if (this.menuPetals.length === 0) this.initMenuPetals();
+    // Initialize petals if empty, and re-roll them when the player picks a
+    // different biome so the loot on screen matches the selected map.
+    const selectedName = MAPS.find((m) => m.id === this.selectedMap)?.name ?? "Garden";
+    if (this.menuPetals.length === 0 || this.menuPetalsBiome !== selectedName) {
+      this.initMenuPetals();
+    }
 
     // Update background color transition
     this.updateMenuBgColor(dt);
@@ -11222,13 +11340,21 @@ private bagLayout() {
     this.updateMenuPetals(dt);
 
     // ─── Background ───
+    // Vertical gradient built from the SELECTED biome's ground colour, so the
+    // menu reads as "the map you picked" (see ui.ts menuBackground).
     const bg = this.menuBgColor;
-    const r = Math.round(bg[0]), g = Math.round(bg[1]), b = Math.round(bg[2]);
-    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    const ground: [number, number, number] = [
+      Math.round(bg[0]),
+      Math.round(bg[1]),
+      Math.round(bg[2]),
+    ];
+    ctx.fillStyle = menuBackground(ctx, H, ground);
     ctx.fillRect(0, 0, W, H);
 
-    // Grid background
-    this.drawMenuGrid(ctx, r, g, b);
+    // Grid background — tinted from the gradient's mid tone so the lines stay
+    // legible against both the lighter top and the slate-900 bottom.
+    const mid = menuMidTone(ground);
+    this.drawMenuGrid(ctx, mid[0], mid[1], mid[2]);
 
     // Floating petals
     for (const petal of this.menuPetals) {
@@ -13217,7 +13343,9 @@ private drawProjectileEnt(e: Ent) {
     // so orbiting petals must pass it through. Without it every petal rendered
     // at rarity 0 and rarity-scaled artwork (Stinger's extra triangles, Light's
     // extra blobs) never appeared in the world, only on the card.
-    drawItemIcon(ctx, e.type, e.x, e.y, e.radius, this.time * 3 + e.id, e.team);
+    // Hottest icon call site in the game (every orbiting petal and floor drop,
+    // every frame), so it goes through the sprite atlas.
+    drawItemSprite(ctx, e.type, e.x, e.y, e.radius, this.time * 3 + e.id, e.team);
   }
 
   /**
@@ -13370,7 +13498,10 @@ private drawProjectileEnt(e: Ent) {
     const avatarSize = 60;
     const VAvatarSize = _s(60);
 const avatarX = _s(20);
-const avatarY = _s(20);
+// Pushed down so the player card clears the top-left exit ✕ (which replaced the
+// old "Menu" HUD button). Everything else in this block is positioned relative
+// to avatarX/avatarY, so this single offset moves the whole card.
+const avatarY = _s(20) + this.exitButtonRect().h + 10;
 
 
 // 头像 - 绘制玩家花朵
@@ -13655,6 +13786,8 @@ if (me) {
 
     // buttons
     for (const b of this.hudButtons()) button(ctx, b.rect, b.label, b.color, hit(b.rect, this.mx, this.my), shortMobile ? 13 : 16);
+    // Leave-the-game control, top-left (replaces the old "Menu" button).
+    this.drawExitButton(ctx);
 
     // minimap
     const mm = shortMobile ? 82 : 132;
