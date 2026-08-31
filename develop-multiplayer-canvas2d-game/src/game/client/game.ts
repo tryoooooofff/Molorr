@@ -7942,8 +7942,14 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       ? Math.min(1, this.stallNoticeAnim + dt * 3)
       : Math.max(0, this.stallNoticeAnim - dt * 5);
 
+    // Entity spring: raise the stiffness so remote flowers, petals and other
+    // serverside entities catch up to their snapshot targets almost
+    // immediately. 16 was visibly soft at 10 Hz snapshots (~100 ms lag looks
+    // like many frames of trailing); 48 snaps in a couple of frames while
+    // still smoothing a little instead of teleporting.
+    const ENTITY_SPRING_STIFFNESS = 48;
     for (const e of this.ents.values()) {
-      const k = Math.min(1, dt * 16);
+      const k = Math.min(1, dt * ENTITY_SPRING_STIFFNESS);
       e.x += (e.tx - e.x) * k;
       e.y += (e.ty - e.y) * k;
       e.hurt = Math.max(0, e.hurt - dt);
