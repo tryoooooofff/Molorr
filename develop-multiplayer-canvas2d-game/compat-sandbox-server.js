@@ -30,124 +30,143 @@ const GAME_HOST = process.env.GAME_HOST || "127.0.0.1";
  */
 const COMPAT_JS = `
 (function () {
-  // Some sandbox/iframe previews disable storage. The game uses localStorage
-  // in several places, so provide an in-memory fallback when it is blocked.
-  (function () {
-    try {
-      var probe = "__petalia_sandbox_probe__";
-      window.localStorage.setItem(probe, "1");
-      window.localStorage.removeItem(probe);
-      return; // real localStorage is usable
-    } catch (e) {
-      var mem = {};
-      var safe = {
-        getItem: function (k) { return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null; },
-        setItem: function (k, v) { mem[String(k)] = String(v); },
-        removeItem: function (k) { delete mem[String(k)]; },
-        clear: function () { mem = {}; },
-        key: function (i) { return Object.keys(mem)[i] || null; },
-        get length () { return Object.keys(mem).length; }
-      };
-      try {
-        Object.defineProperty(window, "localStorage", { configurable: true, get: function () { return safe; } });
-      } catch (e2) {
-        window.localStorage = safe;
-      }
-    }
-  })();
-
-  // Tiny diagnostics overlay. It is injected before the game bundle and only
-  // shows when something goes wrong, so it never disturbs normal gameplay.
-  (function () {
+  try {
+    // ---- Diagnostics: installed first, so any later failure is visible. ----
     var notes = [];
-    function ensure() {
-      if (!document.body) return false;
-      if (document.getElementById("__petalia_diag__")) return true;
-      var el = document.createElement("div");
-      el.id = "__petalia_diag__";
-      el.setAttribute("data-testid", "petalia-diag");
-      el.style.cssText =
-        "position:fixed;left:8px;bottom:8px;z-index:2147483647;max-width:min(680px,90vw);" +
-        "max-height:40vh;overflow:auto;background:rgba(30,40,52,.92);color:#fff;" +
-        "font:12px/1.45 monospace;padding:8px 10px;border-radius:6px;white-space:pre-wrap;";
-      document.body.appendChild(el);
-      render();
-      return true;
-    }
-    function push(text) {
-      notes.push(String(text));
-      if (notes.length > 12) notes.shift();
-      render();
+    var bodyReady = false;
+    var overlay = null;
+    function ensureOverlay() {
+      try {
+        if (!document.body) return false;
+        bodyReady = true;
+        if (overlay) return true;
+        overlay = document.createElement("div");
+        overlay.id = "__petalia_diag__";
+        overlay.setAttribute("data-testid", "petalia-diag");
+        overlay.style.cssText =
+          "position:fixed;left:8px;bottom:8px;z-index:2147483647;" +
+          "max-width:min(680px,90vw);max-height:40vh;overflow:auto;" +
+          "background:rgba(20,28,38,.94);color:#d8e6f2;" +
+          "font:11px/1.45 monospace;padding:8px 10px;border-radius:6px;" +
+          "white-space:pre-wrap;pointer-events:none;";
+        document.body.appendChild(overlay);
+        render();
+        return true;
+      } catch (e) { return false; }
     }
     function render() {
-      var el = document.getElementById("__petalia_diag__");
-      if (el) el.textContent = notes.join("\\n");
+      if (overlay) overlay.textContent = notes.join("\\n");
     }
+    function push(text) {
+      try {
+        notes.push(String(text));
+        if (notes.length > 14) notes.shift();
+        render();
+        ensureOverlay();
+      } catch (e) {}
+    }
+    function clear() { try { notes.length = 0; render(); } catch (e) {} }
+    window.__petaliaDiag = { push: push, clear: clear, notes: notes };
+
     window.addEventListener("error", function (e) {
       push("[error] " + (e && e.message ? e.message : "unknown") +
         (e && e.filename ? " @ " + e.filename + ":" + e.lineno : ""));
-      ensure();
     });
     window.addEventListener("unhandledrejection", function (e) {
       var r = e && e.reason;
       push("[promise] " + (r && r.message ? r.message : String(r)));
-      ensure();
     });
     var origOnError = window.onerror;
     window.onerror = function (msg, src, line, col, err) {
       push("[onerror] " + msg + " @ " + src + ":" + line + ":" + col);
-      ensure();
       if (origOnError) return origOnError.apply(window, arguments);
     };
     document.addEventListener("DOMContentLoaded", function () {
-      ensure(); // create the overlay only so error listeners have a target
+      try { ensureOverlay(); } catch (e) {}
     });
-    window.__petaliaDiag = { push: push, clear: function(){ notes.length=0; render(); } };
-  })();
+    setTimeout(function () { try { ensureOverlay(); } catch (e) {} }, 50);
 
-  var NativeWebSocket = window.WebSocket;
-  if (!NativeWebSocket) return;
-  var GAME_HOSTS = /molorr-server-(?:t34o|sg|hk)\.onrender\.com/i;
-  function rewrite(url) {
+    // ---- localStorage fallback. Never throw in a sandboxed iframe. ----
     try {
-      var u = new URL(String(url), window.location.href);
-      if (GAME_HOSTS.test(u.hostname)) {
-        var proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-        return proto + "//" + window.location.host + "/game";
+      var probe = "__petalia_sandbox_probe__";
+      window.localStorage.setItem(probe, "1");
+      window.localStorage.removeItem(probe);
+    } catch (e) {
+      try {
+        var mem = {};
+        var safe = {
+          getItem: function (k) { return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null; },
+          setItem: function (k, v) { try { mem[String(k)] = String(v); } catch (e2) {} },
+          removeItem: function (k) { try { delete mem[String(k)]; } catch (e2) {} },
+          clear: function () { try { mem = {}; } catch (e2) {} },
+          key: function (i) { return Object.keys(mem)[i] || null; },
+          get length () { try { return Object.keys(mem).length; } catch (e2) { return 0; } }
+        };
+        try {
+          Object.defineProperty(window, "localStorage", { configurable: true, get: function () { return safe; } });
+        } catch (e2) {
+          try { window.localStorage = safe; } catch (e3) {}
+        }
+      } catch (e4) {}
+    }
+
+    // ---- WebSocket shim: rewrite only the suspended Render hosts. ----
+    var NativeWebSocket = window.WebSocket;
+    if (NativeWebSocket && window.URL) {
+      var GAME_HOSTS = /molorr-server-(?:t34o|sg|hk)\.onrender\.com/i;
+      function rewrite(url) {
+        try {
+          var u = new URL(String(url), window.location.href);
+          if (GAME_HOSTS.test(u.hostname)) {
+            var proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+            return proto + "//" + window.location.host + "/game";
+          }
+        } catch (e) {}
+        return url;
       }
-    } catch (e) {}
-    return url;
-  }
-  function SandboxWebSocket(url, protocols) {
-    var target = rewrite(url);
-    var isGameSocket = String(target).indexOf("/game") !== -1;
-    var ws = protocols === undefined
-      ? new NativeWebSocket(target)
-      : new NativeWebSocket(target, protocols);
+      function SandboxWebSocket(url, protocols) {
+        try {
+          var target = rewrite(url);
+          var isGameSocket = String(target).indexOf("/game") !== -1;
+          var ws = protocols === undefined
+            ? new NativeWebSocket(target)
+            : new NativeWebSocket(target, protocols);
+          if (isGameSocket) {
+            push("[game] connecting " + String(target));
+            try {
+              ws.addEventListener("open", function () {
+                push("[game] connected");
+                if (window.console && console.info) console.info("[petalia sandbox] game socket open", target);
+              });
+              ws.addEventListener("error", function () {
+                push("[game] error " + String(target));
+                if (window.console && console.error) console.error("[petalia sandbox] game socket error", target);
+              });
+              ws.addEventListener("close", function (e) {
+                push("[game] close " + (e && e.code) + " " + String(target));
+              });
+            } catch (e) {}
+          }
+          return ws;
+        } catch (e) {
+          try { return new NativeWebSocket(url, protocols); }
+          catch (e2) { throw e; }
+        }
+      }
+      SandboxWebSocket.prototype = NativeWebSocket.prototype;
+      SandboxWebSocket.CONNECTING = NativeWebSocket.CONNECTING;
+      SandboxWebSocket.OPEN = NativeWebSocket.OPEN;
+      SandboxWebSocket.CLOSING = NativeWebSocket.CLOSING;
+      SandboxWebSocket.CLOSED = NativeWebSocket.CLOSED;
+      window.WebSocket = SandboxWebSocket;
+    }
+    push("[compat] active");
+  } catch (e) {
     try {
-      // Only instrument the game socket. HMR and other dev sockets must behave
-      // exactly like the original, so we do not add logging or probes to them.
-      if (!isGameSocket || !window.console) return ws;
-      console.info("[sandbox ws] " + String(url) + " -> " + String(target));
-      ws.addEventListener("open", function () {
-        console.info("[sandbox ws] open " + String(target));
-      });
-      ws.addEventListener("error", function () {
-        console.error("[sandbox ws] error " + String(target));
-        window.__petaliaDiag && window.__petaliaDiag.push("[ws] error " + String(target));
-      });
-      ws.addEventListener("close", function (e) {
-        console.info("[sandbox ws] close code=" + (e && e.code) + " " + String(target));
-      });
-    } catch (e) { /* ignore */ }
-    return ws;
+      if (window.__petaliaDiag && window.__petaliaDiag.push)
+        window.__petaliaDiag.push("[compat] " + (e && e.message));
+    } catch (e2) {}
   }
-  SandboxWebSocket.prototype = NativeWebSocket.prototype;
-  SandboxWebSocket.CONNECTING = NativeWebSocket.CONNECTING;
-  SandboxWebSocket.OPEN = NativeWebSocket.OPEN;
-  SandboxWebSocket.CLOSING = NativeWebSocket.CLOSING;
-  SandboxWebSocket.CLOSED = NativeWebSocket.CLOSED;
-  window.WebSocket = SandboxWebSocket;
 })();
 `;
 
@@ -183,11 +202,38 @@ function injectCompat(body) {
   return body.slice(0, closeIdx) + snippet + body.slice(closeIdx);
 }
 
+function checkTcp(host, port) {
+  return new Promise((resolve) => {
+    const s = net.connect(port, host);
+    const done = (ok) => { try { s.destroy(); } catch (e) {} resolve(ok); };
+    s.on("connect", () => done(true));
+    s.on("error", () => done(false));
+    s.on("timeout", () => done(false));
+    s.setTimeout(1500);
+  });
+}
+
 const server = http.createServer((req, res) => {
   // Serve the injected browser script from the wrapper itself.
   if (req.url === "/compat/sandbox.js") {
     res.writeHead(200, { "content-type": "application/javascript", "cache-control": "no-store" });
     res.end(COMPAT_JS);
+    return;
+  }
+
+  // Sandbox health endpoint (the C++ server has no HTTP /health route).
+  if (req.url === "/health" || req.url === "/debug") {
+    checkTcp(GAME_HOST, GAME_PORT).then((game) => {
+      res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      res.end(JSON.stringify({
+        ok: game,
+        frontend: true,
+        game: game,
+        next: NEXT_HOST + ":" + NEXT_PORT,
+        gameServer: GAME_HOST + ":" + GAME_PORT,
+        gameIsCpp: true,
+      }));
+    });
     return;
   }
 
