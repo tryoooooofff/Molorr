@@ -3203,12 +3203,20 @@ public:
           }
           continue;
         }
-        st.x += (tx - st.x) * std::min(1.f, dt * 14.f);
-        st.y += (ty - st.y) * std::min(1.f, dt * 14.f);
+        if (p.clientPosActive) {
+          st.x = tx; st.y = ty;
+        } else {
+          st.x += (tx - st.x) * std::min(1.f, dt * 14.f);
+          st.y += (ty - st.y) * std::min(1.f, dt * 14.f);
+        }
         if (st.specialTimer <= 0 && missing > 0) { st.absorbTimer = ROSE_ABSORB_TIME; continue; }
       } else {
-        st.x += (tx - st.x) * std::min(1.f, dt * 14.f);
-        st.y += (ty - st.y) * std::min(1.f, dt * 14.f);
+        if (p.clientPosActive) {
+          st.x = tx; st.y = ty;
+        } else {
+          st.x += (tx - st.x) * std::min(1.f, dt * 14.f);
+          st.y += (ty - st.y) * std::min(1.f, dt * 14.f);
+        }
       }
 
       // Heal per sec

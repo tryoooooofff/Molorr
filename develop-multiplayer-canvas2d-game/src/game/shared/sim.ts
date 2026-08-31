@@ -3684,12 +3684,22 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
           }
           continue;
         }
-        st.x += (tx - st.x) * Math.min(1, dt * 14);
-        st.y += (ty - st.y) * Math.min(1, dt * 14);
+        if (p.clientPosActive) {
+          st.x = tx;
+          st.y = ty;
+        } else {
+          st.x += (tx - st.x) * Math.min(1, dt * 14);
+          st.y += (ty - st.y) * Math.min(1, dt * 14);
+        }
         if (st.specialTimer <= 0 && missing > 0) { st.absorbTimer = ROSE_ABSORB_TIME; continue; }
       } else {
-        st.x += (tx - st.x) * Math.min(1, dt * 14);
-        st.y += (ty - st.y) * Math.min(1, dt * 14);
+        if (p.clientPosActive) {
+          st.x = tx;
+          st.y = ty;
+        } else {
+          st.x += (tx - st.x) * Math.min(1, dt * 14);
+          st.y += (ty - st.y) * Math.min(1, dt * 14);
+        }
       }
       if (def.healPerSec && p.hp < p.maxHp) {
         const threshold = def.healPerSecThreshold ?? 1;
