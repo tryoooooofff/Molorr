@@ -120,20 +120,24 @@ const COMPAT_JS = `
   }
   function SandboxWebSocket(url, protocols) {
     var target = rewrite(url);
+    var isGameSocket = String(target).indexOf("/game") !== -1;
     var ws = protocols === undefined
       ? new NativeWebSocket(target)
       : new NativeWebSocket(target, protocols);
     try {
-      if (window.console && console.info) console.info("[sandbox ws] " + String(url) + " -> " + String(target));
+      // Only instrument the game socket. HMR and other dev sockets must behave
+      // exactly like the original, so we do not add logging or probes to them.
+      if (!isGameSocket || !window.console) return ws;
+      console.info("[sandbox ws] " + String(url) + " -> " + String(target));
       ws.addEventListener("open", function () {
-        if (window.console && console.info) console.info("[sandbox ws] open " + String(target));
+        console.info("[sandbox ws] open " + String(target));
       });
       ws.addEventListener("error", function () {
-        if (window.console && console.error) console.error("[sandbox ws] error " + String(target));
+        console.error("[sandbox ws] error " + String(target));
         window.__petaliaDiag && window.__petaliaDiag.push("[ws] error " + String(target));
       });
       ws.addEventListener("close", function (e) {
-        if (window.console && console.info) console.info("[sandbox ws] close code=" + (e && e.code) + " " + String(target));
+        console.info("[sandbox ws] close code=" + (e && e.code) + " " + String(target));
       });
     } catch (e) { /* ignore */ }
     return ws;
@@ -228,23 +232,28 @@ const server = http.createServer((req, res) => {
   req.pipe(proxyReq);
 });
 
-// WebSocket upgrade → raw TCP proxy to the local game server.
+// WebSocket upgrade → raw TCP proxy.
+//  - /game                → local TypeScript game server
+//  - everything else      → internal Next.js dev server (HMR, etc.)
 server.on("upgrade", (req, socket, head) => {
   const url = req.url || "/";
-  console.log(`[compat] ws upgrade ${req.headers.origin || "-"} -> ${url}`);
-  if (url.split("?")[0] !== "/game") {
-    console.log("[compat] ws upgrade rejected: path is not /game");
-    socket.destroy();
-    return;
+  const path = url.split("?")[0];
+  const isGame = path === "/game";
+
+  const targetHost = isGame ? GAME_HOST : NEXT_HOST;
+  const targetPort = isGame ? GAME_PORT : NEXT_PORT;
+  const targetPath = isGame ? "/game" : url;
+  if (!isGame) {
+    console.log(`[compat] ws upgrade ${req.headers.origin || "-"} -> next ${targetPath}`);
   }
 
-  const client = net.connect(GAME_PORT, GAME_HOST, () => {
-    console.log(`[compat] ws upgrade connected to game server :${GAME_PORT}`);
-    const lines = [`GET /game HTTP/1.1`];
+  const client = net.connect(targetPort, targetHost, () => {
+    const lines = [`GET ${targetPath} HTTP/1.1`];
     for (const [key, value] of Object.entries(req.headers)) {
       if (key.toLowerCase() === "host") continue;
       lines.push(`${key}: ${value}`);
     }
+    lines.push(`host: ${targetHost}:${targetPort}`);
     client.write(lines.join("\r\n") + "\r\n\r\n");
     if (head && head.length) client.write(head);
 
