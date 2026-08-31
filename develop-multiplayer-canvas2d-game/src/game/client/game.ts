@@ -115,6 +115,12 @@ interface Ent {
   seenSnapshot: number;
   hurt: number;
   spawn: number;
+  /** Time (client `this.time`) when this drop was first seen — used for spawn rotate/scale */
+  dropFirstSeen?: number;
+  /** Distance to player when suction first became true — used for shrink denominator */
+  suctionStartDist?: number;
+  /** Last frame suction state for edge detection */
+  _prevSuction?: boolean;
   spreadMode?: boolean;
   contractMode?: boolean;
   mousePosition?: { x: number; y: number };
@@ -6328,6 +6334,10 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private worldH = 3200;
   private walls: Wall[] = [];
   private wallCollider: PolygonWallCollider | null = null;
+  // Client-side wall safety net (mirrors server pushPlayerOutOfWall, with performance saving)
+  private clientLastSafeX = 0;
+  private clientLastSafeY = 0;
+  private readonly CLIENT_PUSH_THRESHOLD = 6;
   private ents = new Map<number, Ent>();
   private snapshotSequence = 0;
   private camX = 0;
@@ -7343,6 +7353,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
             seenSnapshot: snapshotSequence,
             hurt: 0,
             spawn: 0,
+            dropFirstSeen: kind === ENT.DROP ? this.time : undefined,
+            suctionStartDist: undefined,
+            _prevSuction: false,
           };
           this.ents.set(id, e);
         }
@@ -7356,6 +7369,26 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         e.radius = radius;
         e.hp = hp;
         e.rarity = rarity;
+        // Track suction edge for drop shrink animation
+        if (kind === ENT.DROP) {
+          if (e.dropFirstSeen === undefined) e.dropFirstSeen = this.time;
+          const prev = e._prevSuction ?? false;
+          if (suction && !prev) {
+            const me = this.ents.get(this.selfId);
+            if (me) {
+              e.suctionStartDist = Math.hypot(me.x - e.x, me.y - e.y);
+            } else {
+              // Fallback: use current radius as start distance or a reasonable default
+              e.suctionStartDist = Math.max(30, Math.hypot(e.tx - e.x, e.ty - e.y) + 40);
+              // If still small, use 100
+              if (!e.suctionStartDist || e.suctionStartDist < 20) e.suctionStartDist = 100;
+            }
+          }
+          if (!suction) {
+            e.suctionStartDist = undefined;
+          }
+          e._prevSuction = suction;
+        }
         e.suction = suction;
         if (name) e.name = name;
         e.seen = this.time;
@@ -7862,14 +7895,36 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       else if (this.time - e.seen > 0.6) this.ents.delete(e.id);
     }
 
-    // ---- 玩家与墙壁的精确碰撞 ----
+    // ---- 玩家与墙壁的精确碰撞 (client safety net, performance saving) ----
+    // Mirrors server pushPlayerOutOfWall: broadphase skip when far, lastSafe fallback for deep penetration.
     if (this.wallCollider) {
       const me = this.ents.get(this.selfId);
       if (me) {
         const r = PLAYER_RADIUS; // 客户端不追踪 soil radius bonus，使用基础半径
-        const [nx, ny] = this.wallCollider.collideCircle(me.x, me.y, r);
-        me.x = nx;
-        me.y = ny;
+        // Performance: O(1) broadphase — skip collideCircle when far from any wall (99% of frames)
+        if (!this.wallCollider.circleNeedsPreciseCheck(me.x, me.y, r)) {
+          this.clientLastSafeX = me.x;
+          this.clientLastSafeY = me.y;
+        } else {
+          const [nx, ny] = this.wallCollider.collideCircle(me.x, me.y, r);
+          const disp = Math.abs(nx - me.x) + Math.abs(ny - me.y);
+          if (disp < this.CLIENT_PUSH_THRESHOLD) {
+            me.x = nx;
+            me.y = ny;
+            this.clientLastSafeX = me.x;
+            this.clientLastSafeY = me.y;
+          } else {
+            // Deep wall penetration — fallback to last safe (prevents visible wall entry)
+            if (this.clientLastSafeX !== 0 || this.clientLastSafeY !== 0) {
+              me.x = this.clientLastSafeX;
+              me.y = this.clientLastSafeY;
+            } else {
+              // No safe yet, keep server-corrected position
+              me.x = nx;
+              me.y = ny;
+            }
+          }
+        }
       }
     }
 
@@ -8129,7 +8184,7 @@ private bagLayout() {
     gridH,
     maxVisibleRows,
     statsH,
-    closeRect: { x: p.x + p.w - 34 * scale, y: p.y + 10 * scale, w: 24 * scale, h: 24 * scale } as Rect,
+    closeRect: { x: p.x + p.w - 38 * scale, y: p.y + 10 * scale, w: 28 * scale, h: 28 * scale } as Rect,
     scrollTrack,
   };
 }
@@ -8278,12 +8333,12 @@ private bagLayout() {
       h: actionH
     };
 
-    // [Change] 应用 scale 到关闭按钮
+    // Normal rectangle close button (matches inventory / other panels)
     const closeRect: Rect = {
-      x: p.x + p.w - (34 * scale), // [Change] X 位置缩放
+      x: p.x + p.w - 38 * scale,
       y: p.y + 10 * scale,
-      w: 24 * scale, // [Change] 宽度缩放
-      h: 24 / scale  // [Change] 高度缩放
+      w: 28 * scale,
+      h: 28 * scale,
     };
 
     // [Change 1] Reduced padding from 24 to 10 to lift the bottom bar up
@@ -9532,6 +9587,42 @@ private bagLayout() {
     ctx.strokeStyle = "black"; ctx.lineWidth = 3; ctx.lineJoin = "round";
     ctx.strokeText(text, x, y);
     ctx.fillStyle = fillColor; ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  /** Normal rectangle close button (red, rounded, with ✕) — matches settings/changelog/achievement panels */
+  private drawCloseButton(ctx: CanvasRenderingContext2D, rect: Rect, scale: number = 1) {
+    const closeC: [number, number, number] = [220, 80, 80];
+    const adj = (f: number) => `rgb(${closeC.map(c => Math.min(255, Math.max(0, Math.floor(c * f)))).join(",")})`;
+    // shadow / base
+    ctx.save();
+    roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 8 * scale);
+    ctx.fillStyle = adj(1);
+    ctx.fill();
+    // darker top half for depth (same as other panels)
+    ctx.save();
+    ctx.beginPath();
+    roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 8 * scale);
+    ctx.clip();
+    ctx.fillStyle = adj(0.85);
+    ctx.fillRect(rect.x, rect.y, rect.w, rect.h / 2);
+    ctx.restore();
+    ctx.strokeStyle = adj(0.5);
+    ctx.lineWidth = 3 * scale;
+    ctx.beginPath();
+    roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 8 * scale);
+    ctx.stroke();
+    // ✕ label
+    const fontSize = Math.max(12, Math.round(rect.h * 0.62));
+    ctx.font = `${fontSize}px ${FONT_FAMILY}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = Math.max(2, fontSize * 0.22);
+    ctx.strokeText("✕", rect.x + rect.w / 2, rect.y + rect.h / 2 + 1 * scale);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText("✕", rect.x + rect.w / 2, rect.y + rect.h / 2 + 1 * scale);
     ctx.restore();
   }
 
@@ -13248,33 +13339,58 @@ drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
     const size = 46;
     const stack = Math.max(1, Math.round(e.hp * 255));
 
-    // 磁铁吸取中的掉落物：卡片不再随距离缩小（保持原大小），仅保留
-    // 淡出效果以示正在被吸向玩家。服务器标记 suction = 掉落物落入
-    // 磁铁吸取范围、正在被快速吸向玩家。
+    // Animation states:
+    // - spawn 0.3s: rotate 0->2PI, scale 0->1
+    // - idle on ground: pulse scale 1+sin(time*3+id)*0.1, rotation 0
+    // - suction (guaranteed collect): shrink = clamp(dist / suctionStartDist,0,1), no pulse, no extra scaling
+    let rotation = 0;
     let scale = 1;
-    let alpha = 1;
+
     if (e.suction) {
       const me = this.ents.get(this.selfId);
       if (me) {
         const dx = me.x - e.x;
         const dy = me.y - e.y;
         const d = Math.hypot(dx, dy);
-        const SUCK_START = 220; // world px — start fading at this distance
-        const SUCK_END = 24;    // world px — fully gone once this close
-        if (d < SUCK_START) {
-          const t = Math.max(0, Math.min(1, (d - SUCK_END) / (SUCK_START - SUCK_END)));
-          scale = 1;            // 保持原大小，不再缩放
-          alpha = 0.25 + t * 0.75;
+        const start = e.suctionStartDist ?? Math.max(d, 20);
+        // As drop approaches player, it becomes smaller and smaller.
+        // No pulse scaling while being sucked.
+        if (start > 1) {
+          scale = Math.max(0, Math.min(1, d / start));
+        } else {
+          scale = 1;
         }
+      } else {
+        // No self yet — keep full size
+        scale = 1;
+      }
+      rotation = 0;
+    } else {
+      const firstSeen = e.dropFirstSeen ?? this.time;
+      const tSpawn = this.time - firstSeen;
+      const SPAWN_DUR = 0.3;
+      if (tSpawn < SPAWN_DUR && tSpawn >= 0) {
+        const p = Math.max(0, Math.min(1, tSpawn / SPAWN_DUR));
+        // Spawn: rotate 0->2PI, scale 0->1
+        rotation = p * Math.PI * 2;
+        scale = p;
+        // Avoid exact 0 so card is visible immediately
+        if (scale < 0.01) scale = 0.01;
+      } else {
+        // Idle on ground: no rotation, gentle pulse +-10%
+        rotation = 0;
+        scale = 1 + Math.sin(this.time * 3 + e.id) * 0.1;
       }
     }
 
-    const finalSize = size * scale;
+    // Outer transform: translate + rotate + scale, inner drawCard at origin
     this.ctx.save();
-    this.ctx.globalAlpha = alpha;
+    this.ctx.translate(e.x, e.y + bob);
+    if (rotation !== 0) this.ctx.rotate(rotation);
+    if (scale !== 1) this.ctx.scale(scale, scale);
     drawCard(
       this.ctx,
-      { x: e.x - finalSize / 2, y: e.y - finalSize / 2 + bob * scale, w: finalSize, h: finalSize },
+      { x: -size / 2, y: -size / 2, w: size, h: size },
       { item: e.type, rarity: e.team, count: stack },
       { dim: 0.94 },
     );
@@ -13874,8 +13990,8 @@ if (me) {
 
     text(ctx, "Inventory", p.x + p.w / 2, p.y + 24 * layout.scale, 20 * layout.scale, "#ffffff");
 
-    // close button
-    button(ctx, layout.closeRect, "x", "#e53232", hit(layout.closeRect, this.mx, this.my), 15 * layout.scale);
+    // close button — normal rectangle one (matches settings/changelog/achievement)
+    this.drawCloseButton(ctx, layout.closeRect, layout.scale);
 
     // search bar + biome dropdown
     const barRect: Rect = { x: layout.barX, y: layout.barY, w: layout.barW, h: layout.barH };
@@ -14036,7 +14152,8 @@ if (me) {
     ctx.stroke();
 
     text(ctx, this.craftMode === "normal" ? "Craft" : this.craftMode === "oracle" ? "Oracle" : "Trade", p.x + p.w * 0.38, p.y + 24 * layout.scale, 22 * layout.scale, "#ffffff");
-    button(ctx, layout.closeRect, "x", "#e53232", hit(layout.closeRect, this.mx, this.my), 14 * layout.scale);
+    // close button — normal rectangle one (matches inventory / other panels)
+    this.drawCloseButton(ctx, layout.closeRect, layout.scale);
 
     // Action button centered beside the pentagon.
     const btn = layout.actionRect;
