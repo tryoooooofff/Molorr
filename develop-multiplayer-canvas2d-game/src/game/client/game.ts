@@ -102,6 +102,9 @@ interface Ent {
   y: number;
   tx: number;
   ty: number;
+  /** Server-reported target position (before local self-petal prediction). */
+  serverTx?: number;
+  serverTy?: number;
   angle: number;
   radius: number;
   hp: number;
@@ -6284,6 +6287,16 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private localAuthActive = false;
   private clientVx = 0;
   private clientVy = 0;
+  /**
+   * Last server-reported position of the self player. Even though the client
+   * owns the visible position, this is retained so self petals can be shifted
+   * forward by the difference (local prediction) instead of waiting for the
+   * SNAPSHOT round-trip to catch up.
+   */
+  private serverSelfX = 0;
+  private serverSelfY = 0;
+  /** Maps a petal entity id to the player that owns it (from snapshot order). */
+  private petalOwners = new Map<number, number>();
 
   // ---- Debug overlay (Settings → Debug Info) ----
   /** Smoothed frames-per-second, recomputed once a second from real (unclamped) frame deltas. */
@@ -7298,6 +7311,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       }
       this.wallCollider = new PolygonWallCollider(this.walls, this.worldW, this.worldH, 256);
       this.ents.clear();
+      this.petalOwners.clear();
       this.roseParticles.length = 0;
       this.mapFlash = 1;
       // A new world starts from the server's next snapshot. Until that sync
@@ -7316,6 +7330,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       this.snapshotStalled = false;
       const snapshotSequence = ++this.snapshotSequence;
       const count = r.u16();
+      let currentPlayerId = 0;
       for (let i = 0; i < count; i++) {
         const kind = r.u8();
         const id = r.u16();
@@ -7334,7 +7349,14 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         }
         const hp = r.u8() / 255;
         let name = "";
-        if (kind === ENT.PLAYER) name = r.str();
+        if (kind === ENT.PLAYER) {
+          name = r.str();
+          currentPlayerId = id;
+          if (id === this.selfId) {
+            this.serverSelfX = x;
+            this.serverSelfY = y;
+          }
+        }
 
         // ─── 读取 rarity ───
         let rarity = 0;
@@ -7378,6 +7400,11 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         e.kind = kind;
         e.type = etype;
         e.team = team;
+        if (kind === ENT.PETAL) {
+          this.petalOwners.set(id, currentPlayerId);
+          e.serverTx = x;
+          e.serverTy = y;
+        }
         // Once the local sim is authoritative, never let a networked snapshot
         // move the local player back — the browser's calculated position is
         // sent on the next INPUT packet and the server mirrors it for petals.
@@ -7971,6 +7998,10 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       }
     }
 
+    // Predict self petals ahead of the snapshot stream so they visibly track
+    // the client-authoritative player position without a ~100ms server round-trip.
+    this.predictOwnPetals();
+
     // ---- 检测视野内最近的 Ultra+ 生物（Ultra=6, Super=7, Omega=8, Eternal=9） ----
     {
       let nearest: Ent | null = null;
@@ -8132,6 +8163,33 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       if (def.speed) speedBonus += def.speed * (1 + cell.rarity * 0.12);
     }
     return (190 + this.level * 0.8) * (1 + speedBonus / 100) * (this.talentBonuses?.speedMult ?? 1);
+  }
+
+  /**
+   * Remove the snapshot round-trip lag from self-owned petals.
+   *
+   * The server already places petals exactly around the client-reported
+   * position, but that result only reaches the browser through a ~100 ms
+   * snapshot stream (the C++ server sends snapshots every other tick). The
+   * local player's visible position is already ahead of that server state, so
+   * we shift the visible petal ring by the same delta. This keeps the flower's
+   * petals visually locked to the client-authoritative position.
+   */
+  private predictOwnPetals() {
+    if (!this.localAuthActive || this.scene !== "game") return;
+    const me = this.ents.get(this.selfId);
+    if (!me || !this.alive) return;
+    const dx = me.x - this.serverSelfX;
+    const dy = me.y - this.serverSelfY;
+    for (const e of this.ents.values()) {
+      if (e.kind !== ENT.PETAL) continue;
+      if (e.serverTx === undefined || e.serverTy === undefined) continue;
+      if (this.petalOwners.get(e.id) !== this.selfId) continue;
+      e.tx = e.serverTx + dx;
+      e.ty = e.serverTy + dy;
+      e.x = e.tx;
+      e.y = e.ty;
+    }
   }
 
   /**
