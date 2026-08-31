@@ -8129,7 +8129,7 @@ private bagLayout() {
     gridH,
     maxVisibleRows,
     statsH,
-    closeRect: { x: p.x + p.w - 34 * scale, y: p.y + 10 * scale, w: 24 * scale, h: 24 * scale } as Rect,
+    closeRect: { x: p.x + p.w - 38 * scale, y: p.y + 10 * scale, w: 28 * scale, h: 28 * scale } as Rect,
     scrollTrack,
   };
 }
@@ -8278,12 +8278,12 @@ private bagLayout() {
       h: actionH
     };
 
-    // [Change] 应用 scale 到关闭按钮
+    // Normal rectangle close button (matches inventory / other panels)
     const closeRect: Rect = {
-      x: p.x + p.w - (34 * scale), // [Change] X 位置缩放
+      x: p.x + p.w - 38 * scale,
       y: p.y + 10 * scale,
-      w: 24 * scale, // [Change] 宽度缩放
-      h: 24 / scale  // [Change] 高度缩放
+      w: 28 * scale,
+      h: 28 * scale,
     };
 
     // [Change 1] Reduced padding from 24 to 10 to lift the bottom bar up
@@ -9532,6 +9532,42 @@ private bagLayout() {
     ctx.strokeStyle = "black"; ctx.lineWidth = 3; ctx.lineJoin = "round";
     ctx.strokeText(text, x, y);
     ctx.fillStyle = fillColor; ctx.fillText(text, x, y);
+    ctx.restore();
+  }
+
+  /** Normal rectangle close button (red, rounded, with ✕) — matches settings/changelog/achievement panels */
+  private drawCloseButton(ctx: CanvasRenderingContext2D, rect: Rect, scale: number = 1) {
+    const closeC: [number, number, number] = [220, 80, 80];
+    const adj = (f: number) => `rgb(${closeC.map(c => Math.min(255, Math.max(0, Math.floor(c * f)))).join(",")})`;
+    // shadow / base
+    ctx.save();
+    roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 8 * scale);
+    ctx.fillStyle = adj(1);
+    ctx.fill();
+    // darker top half for depth (same as other panels)
+    ctx.save();
+    ctx.beginPath();
+    roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 8 * scale);
+    ctx.clip();
+    ctx.fillStyle = adj(0.85);
+    ctx.fillRect(rect.x, rect.y, rect.w, rect.h / 2);
+    ctx.restore();
+    ctx.strokeStyle = adj(0.5);
+    ctx.lineWidth = 3 * scale;
+    ctx.beginPath();
+    roundRect(ctx, rect.x, rect.y, rect.w, rect.h, 8 * scale);
+    ctx.stroke();
+    // ✕ label
+    const fontSize = Math.max(12, Math.round(rect.h * 0.62));
+    ctx.font = `${fontSize}px ${FONT_FAMILY}`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = Math.max(2, fontSize * 0.22);
+    ctx.strokeText("✕", rect.x + rect.w / 2, rect.y + rect.h / 2 + 1 * scale);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText("✕", rect.x + rect.w / 2, rect.y + rect.h / 2 + 1 * scale);
     ctx.restore();
   }
 
@@ -13874,8 +13910,8 @@ if (me) {
 
     text(ctx, "Inventory", p.x + p.w / 2, p.y + 24 * layout.scale, 20 * layout.scale, "#ffffff");
 
-    // close button
-    button(ctx, layout.closeRect, "x", "#e53232", hit(layout.closeRect, this.mx, this.my), 15 * layout.scale);
+    // close button — normal rectangle one (matches settings/changelog/achievement)
+    this.drawCloseButton(ctx, layout.closeRect, layout.scale);
 
     // search bar + biome dropdown
     const barRect: Rect = { x: layout.barX, y: layout.barY, w: layout.barW, h: layout.barH };
@@ -14036,7 +14072,8 @@ if (me) {
     ctx.stroke();
 
     text(ctx, this.craftMode === "normal" ? "Craft" : this.craftMode === "oracle" ? "Oracle" : "Trade", p.x + p.w * 0.38, p.y + 24 * layout.scale, 22 * layout.scale, "#ffffff");
-    button(ctx, layout.closeRect, "x", "#e53232", hit(layout.closeRect, this.mx, this.my), 14 * layout.scale);
+    // close button — normal rectangle one (matches inventory / other panels)
+    this.drawCloseButton(ctx, layout.closeRect, layout.scale);
 
     // Action button centered beside the pentagon.
     const btn = layout.actionRect;
