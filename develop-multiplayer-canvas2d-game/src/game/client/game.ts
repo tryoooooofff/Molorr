@@ -6163,6 +6163,19 @@ private darkenColor(color: string, percent: number): string {
   }
 }
 
+/** localStorage key that permanently dismisses the canvas "Phone tip". */
+const PHONE_TIP_IGNORED_KEY = "petalia.phoneTipIgnored";
+
+/** True once the player chose "Ignore" on the canvas Phone tip. */
+function isCanvasPhoneTipIgnored(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return localStorage.getItem(PHONE_TIP_IGNORED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export class GameClient {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -6469,6 +6482,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private mobileContractRect: Rect | null = null;
   private mobileJoystickRect: Rect | null = null;
   private mobileFullscreenBtn: Rect | null = null;
+  private mobileTipIgnoreBtn: Rect | null = null;
+  /** Whether the canvas "Phone tip" was permanently dismissed via Ignore. */
+  private phoneTipIgnored = isCanvasPhoneTipIgnored();
   private mobileControlsVisible = false;
   private lastTouchTime = 0;
 
@@ -9117,6 +9133,12 @@ private bagLayout() {
 
     // Mobile controls: spread (Space) / contract (Shift) / joystick
     if (this.isMobile) {
+      if (this.scene === "menu" && this.mobileTipIgnoreBtn && hit(this.mobileTipIgnoreBtn, p.x, p.y)) {
+        this.phoneTipIgnored = true;
+        try { localStorage.setItem(PHONE_TIP_IGNORED_KEY, "1"); } catch { /* ignore */ }
+        this.mobileTipIgnoreBtn = null;
+        return;
+      }
       if (this.scene === "menu" && this.mobileFullscreenBtn && hit(this.mobileFullscreenBtn, p.x, p.y)) {
         this.tryEnterFullscreen();
         return;
@@ -11471,11 +11493,11 @@ private bagLayout() {
 
 
     // Mobile: suggest fullscreen + show current control scheme
-    if (this.isMobile) {
+    if (this.isMobile && !this.phoneTipIgnored) {
       const isFs = typeof document !== "undefined" && !!document.fullscreenElement;
       const topY = 8;
       const tipW = Math.min(360, W * 0.92);
-      const tipH = isFs ? 58 : 84;
+      const tipH = isFs ? 58 : 126;
       const tipX = W / 2 - tipW / 2;
       ctx.save();
       roundRect(ctx, tipX, topY, tipW, tipH, 10);
@@ -11490,15 +11512,25 @@ private bagLayout() {
         const btnW = 180, btnH = 32;
         const btnX = tipX + tipW / 2 - btnW / 2;
         const btnY = topY + 46;
-        const btnRect: Rect = { x: btnX, y: btnY, w: btnW, h: btnH };
-        this.mobileFullscreenBtn = btnRect;
-        button(ctx, btnRect, "FULLSCREEN", "#3fae60", hit(btnRect, this.mx, this.my), 13);
+        const fullBtnRect: Rect = { x: btnX, y: btnY, w: btnW, h: btnH };
+        const ignoreW = tipW - 24, ignoreH = 30;
+        const ignoreX = tipX + 12;
+        const ignoreY = btnY + btnH + 10;
+        const ignoreBtnRect: Rect = { x: ignoreX, y: ignoreY, w: ignoreW, h: ignoreH };
+        this.mobileFullscreenBtn = fullBtnRect;
+        this.mobileTipIgnoreBtn = ignoreBtnRect;
+        button(ctx, fullBtnRect, "FULLSCREEN", "#3fae60", hit(fullBtnRect, this.mx, this.my), 13);
+        button(ctx, ignoreBtnRect, "IGNORE — DON'T SHOW AGAIN", "#4a5563", hit(ignoreBtnRect, this.mx, this.my), 11);
       } else {
         text(ctx, "Mobile: joystick to move | SPACE=Spread SHIFT=Defend", tipX + tipW / 2, topY + 18, 11, "#c9ffd6");
         text(ctx, "Buttons on right also work", tipX + tipW / 2, topY + 36, 10, "rgba(255,255,255,0.65)");
         this.mobileFullscreenBtn = null;
+        this.mobileTipIgnoreBtn = null;
       }
       ctx.restore();
+    } else {
+      this.mobileFullscreenBtn = null;
+      this.mobileTipIgnoreBtn = null;
     }
 
     // Draw last: these floating panels intentionally overlay every main-menu
