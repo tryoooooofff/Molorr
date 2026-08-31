@@ -2339,59 +2339,70 @@ const drawSoldierAnt = () => {
   ctx.restore();
 };
   const drawLadybug = () => {
-    const scaledSize = radius * 2;
-    const DEEP_RED = friendly ? "#B8860B" : "#8B0000";
-    const DARK_RED = friendly ? "#DAA520" : "#A52A2A";
+    // The supplied reference draws a red crescent ladybug: a black underbody
+    // topped by a 283° red shell whose notch is cut back through the centre,
+    // then clipped black spots. It is adapted to this game's local space so it
+    // scales with `radius`, preserves the friendly/gold palette, and uses a
+    // stable per-mob seed instead of Math.random() so the spots do not flicker
+    // while the mob is moving every frame.
+    const R = radius;
     const BLACK = "#000000";
-    const BODY_OUTER_RADIUS = scaledSize * 0.5;
-    const BODY_INNER_RADIUS = scaledSize * 0.44;
-    const spots = [
-      { xRatio: -0.36, yRatio: -0.28, radiusRatio: 0.18 },
-      { xRatio: 0.34, yRatio: -0.20, radiusRatio: 0.16 },
-      { xRatio: -0.22, yRatio: 0.20, radiusRatio: 0.15 },
-      { xRatio: 0.30, yRatio: 0.28, radiusRatio: 0.19 },
-      { xRatio: 0.02, yRatio: 0.00, radiusRatio: 0.13 },
-    ];
+    const OUTLINE = friendly ? "#B8860B" : "#AF0000";
+    const SHELL = friendly ? "#DAA520" : "#DA3232";
+
     ctx.save();
     ctx.translate(x, y);
     ctx.rotate(angle + Math.PI / 2);
+
+    // 起始角度与终止角度（跨度 11/7 π，即约 283°）
+    const startAngle = 0;
+    const endAngle = startAngle + (11 / 7) * Math.PI;
+
+    // 计算两个端点的绝对坐标
+    const startX = R * Math.cos(startAngle);
+    const startY = R * Math.sin(startAngle);
+    const endX = R * Math.cos(endAngle);
+    const endY = R * Math.sin(endAngle);
+
+    // Black underbody outline.
     ctx.beginPath();
-    ctx.arc(0, 0, BODY_OUTER_RADIUS, 0, Math.PI * 2);
-    ctx.fillStyle = DEEP_RED;
-    ctx.fill();
-    ctx.beginPath();
-    ctx.arc(0, 0, BODY_INNER_RADIUS, 0, Math.PI * 2);
-    ctx.fillStyle = DARK_RED;
-    ctx.fill();
+    ctx.arc(0, 0, R, 0, Math.PI * 2);
     ctx.fillStyle = BLACK;
-    for (const spot of spots) {
+    ctx.fill();
+
+    // Red crescent shell, with the notch cut from the arc back through the centre.
+    ctx.beginPath();
+    ctx.arc(0, 0, R, startAngle, endAngle);
+    ctx.quadraticCurveTo(0, 0, startX, startY);
+    ctx.closePath();
+    ctx.strokeStyle = OUTLINE;
+    ctx.lineWidth = Math.max(1, R * (50 / 120));
+    ctx.lineJoin = "round";
+    ctx.stroke();
+    ctx.fillStyle = SHELL;
+    ctx.fill();
+    ctx.clip();
+
+    // 5–8 random-looking but stable black spots, clipped to the shell.
+    let seed = (id >>> 0) || 1;
+    const random = () => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 0x100000000;
+    };
+    const spotCount = 5 + Math.floor(random() * 4);
+    ctx.fillStyle = BLACK;
+    for (let i = 0; i < spotCount; i++) {
+      const r = random() * R;
+      const spotAngle = random() * Math.PI * 2;
+      const spotX = r * Math.cos(spotAngle);
+      const spotY = r * Math.sin(spotAngle);
+      const spotRadius = (10 + random() * 25) * (R / 120);
       ctx.beginPath();
-      ctx.arc(BODY_INNER_RADIUS * spot.xRatio, BODY_INNER_RADIUS * spot.yRatio, BODY_INNER_RADIUS * spot.radiusRatio, 0, Math.PI * 2);
+      ctx.arc(spotX, spotY, spotRadius, 0, Math.PI * 2);
       ctx.fill();
     }
-    const ellipseY = -BODY_INNER_RADIUS;
-    const ellipseRx = BODY_INNER_RADIUS * 0.5;
-    const ellipseRy = BODY_INNER_RADIUS * 0.3;
-    ctx.save();
-    ctx.beginPath();
-    ctx.ellipse(0, ellipseY, ellipseRx, ellipseRy, 0, 0, Math.PI * 2);
-    ctx.clip();
-    ctx.beginPath();
-    ctx.ellipse(0, ellipseY, ellipseRx + 1, ellipseRy + 1, 0, 0, Math.PI * 2);
-    ctx.fillStyle = BLACK;
-    ctx.fill();
-    ctx.restore();
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(0, -5 * (scaledSize / 90), BODY_INNER_RADIUS, 0, Math.PI * 2);
-    ctx.clip();
-    ctx.beginPath();
-    ctx.ellipse(0, ellipseY, ellipseRx, ellipseRy, 0, 0, Math.PI * 2);
-    ctx.strokeStyle = DEEP_RED;
-    ctx.lineWidth = Math.max(1, 5 * (scaledSize / 90));
-    ctx.stroke();
-    ctx.restore();
-    ctx.restore();
+
+    ctx.restore(); // 恢复之前的状态，解除裁剪
   };
 
   const drawScorpion = () => {

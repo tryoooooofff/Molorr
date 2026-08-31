@@ -287,6 +287,8 @@ export class Player {
   inDx = 0;
   inDy = 0;
   flags = 0;
+  /** True once a modern client sends its calculated position in C2S.INPUT. */
+  clientPosActive = false;
   baseAngle = 0;
   orbit = 62;
   nextOracleAt = 0;
@@ -2176,6 +2178,16 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
         p.inDx = r.i8() / 100;
         p.inDy = r.i8() / 100;
         p.flags = r.u8();
+        // The newest client sends its calculated player position (i16 x, i16 y)
+        // after the direction/flags. That position is the most accurate one the
+        // server will ever see, so it replaces the server-integrated position
+        // and becomes the centre used for petal placement every tick.
+        if (r.remaining >= 4) {
+          const map = MAPS[p.mapId];
+          p.clientPosActive = true;
+          p.x = clamp(r.i16(), 0, map.width);
+          p.y = clamp(r.i16(), 0, map.height);
+        }
         if (p.inDx !== c.lastInDx || p.inDy !== c.lastInDy || p.flags !== c.lastFlags) {
           c.lastInDx = p.inDx;
           c.lastInDy = p.inDy;
@@ -2906,6 +2918,11 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
   // --------------------------------------------------------------- spawning
   private spawnPlayer(p: Player) {
     const map = MAPS[p.mapId];
+    // A freshly spawned player starts from the server position; the next
+    // modern INPUT packet will takeover with the client-calculated spot.
+    p.clientPosActive = false;
+    p.vx = 0;
+    p.vy = 0;
     // 出生点校验与玩家碰撞一致：凹凸多边形精确碰撞器
     const collider = this.playerWallColliders[p.mapId];
     const spawnR = PLAYER_RADIUS + this.soilRadiusBonusOf(p);
@@ -3447,37 +3464,46 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
     const ny = mag > 1 ? p.inDy / mag : p.inDy;
     p.vx += (nx * speed - p.vx) * Math.min(1, dt * 9);
     p.vy += (ny * speed - p.vy) * Math.min(1, dt * 9);
-    p.x += p.vx * dt;
-    p.y += p.vy * dt;
-    p.x = clamp(p.x, 0, map.width);
-    p.y = clamp(p.y, 0, map.height);
-    // ---- 玩家间碰撞：互相推开，不允许两个玩家重叠 ----
-    // Optimized but visually identical: only check when within actual collision range.
-    // Previous used full view radius (1300px) for every pair; now prefilter by sum radii.
-    const pRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(p);
-    for (const o of players) {
-      if (o === p || o.mapId !== p.mapId || !o.alive) continue;
-      const oRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(o);
-      const minDist = pRadius + oRadius;
-      const dx = p.x - o.x;
-      const dy = p.y - o.y;
-      // Performance: skip when far — threshold is exactly minDist + small buffer, so no colliding pair is missed
-      const checkDist = minDist + 10;
-      if (dx * dx + dy * dy > checkDist * checkDist) continue;
-      this.collisionCounter.n++;
-      const d = Math.hypot(dx, dy);
-      if (d < minDist && d > 0.001) {
-        const push = (minDist - d) * 0.5;
-        p.x += (dx / d) * push;
-        p.y += (dy / d) * push;
+    if (p.clientPosActive) {
+      // Client-authoritative position: never re-simulate the movement here.
+      // The client is the most accurate source for its own location; the
+      // server mirrors it so petals and the rest of the world use that spot.
+      // Only keep it inside the map bounds the server knows about.
+      p.x = clamp(p.x, 0, map.width);
+      p.y = clamp(p.y, 0, map.height);
+    } else {
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.x = clamp(p.x, 0, map.width);
+      p.y = clamp(p.y, 0, map.height);
+      // ---- 玩家间碰撞：互相推开，不允许两个玩家重叠 ----
+      // Optimized but visually identical: only check when within actual collision range.
+      // Previous used full view radius (1300px) for every pair; now prefilter by sum radii.
+      const pRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(p);
+      for (const o of players) {
+        if (o === p || o.mapId !== p.mapId || !o.alive) continue;
+        const oRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(o);
+        const minDist = pRadius + oRadius;
+        const dx = p.x - o.x;
+        const dy = p.y - o.y;
+        // Performance: skip when far — threshold is exactly minDist + small buffer, so no colliding pair is missed
+        const checkDist = minDist + 10;
+        if (dx * dx + dy * dy > checkDist * checkDist) continue;
+        this.collisionCounter.n++;
+        const d = Math.hypot(dx, dy);
+        if (d < minDist && d > 0.001) {
+          const push = (minDist - d) * 0.5;
+          p.x += (dx / d) * push;
+          p.y += (dy / d) * push;
+        }
       }
+      p.x = clamp(p.x, pRadius, map.width - pRadius);
+      p.y = clamp(p.y, pRadius, map.height - pRadius);
+      // Resolve wall penetration straight after integrating the new position, so
+      // every later reader (petals, pickups, snapshots) sees a corrected p.x/p.y.
+      // Without this the player walks clean through every wall.
+      this.pushPlayerOutOfWall(p);
     }
-    p.x = clamp(p.x, pRadius, map.width - pRadius);
-    p.y = clamp(p.y, pRadius, map.height - pRadius);
-    // Resolve wall penetration straight after integrating the new position, so
-    // every later reader (petals, pickups, snapshots) sees a corrected p.x/p.y.
-    // Without this the player walks clean through every wall.
-    this.pushPlayerOutOfWall(p);
     p.hurtCd = Math.max(0, p.hurtCd - dt);
     const attack = (p.flags & 1) !== 0;
     const defend = (p.flags & 2) !== 0;
@@ -3658,12 +3684,22 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
           }
           continue;
         }
-        st.x += (tx - st.x) * Math.min(1, dt * 14);
-        st.y += (ty - st.y) * Math.min(1, dt * 14);
+        if (p.clientPosActive) {
+          st.x = tx;
+          st.y = ty;
+        } else {
+          st.x += (tx - st.x) * Math.min(1, dt * 14);
+          st.y += (ty - st.y) * Math.min(1, dt * 14);
+        }
         if (st.specialTimer <= 0 && missing > 0) { st.absorbTimer = ROSE_ABSORB_TIME; continue; }
       } else {
-        st.x += (tx - st.x) * Math.min(1, dt * 14);
-        st.y += (ty - st.y) * Math.min(1, dt * 14);
+        if (p.clientPosActive) {
+          st.x = tx;
+          st.y = ty;
+        } else {
+          st.x += (tx - st.x) * Math.min(1, dt * 14);
+          st.y += (ty - st.y) * Math.min(1, dt * 14);
+        }
       }
       if (def.healPerSec && p.hp < p.maxHp) {
         const threshold = def.healPerSecThreshold ?? 1;

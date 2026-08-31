@@ -975,6 +975,8 @@ struct Player {
   bool menuMode = false;
   float inDx = 0, inDy = 0;
   uint8_t flags = 0;
+  /** True once a modern client sends its calculated position in C2S_INPUT. */
+  bool clientPosActive = false;
   float baseAngle = 0, orbit = 62;
   float hurtCd = 0;
   float shield = 0;
@@ -2195,6 +2197,11 @@ public:
   // ---- Spawn player ----
   void spawnPlayer(Player& p) {
     const MapDef& map = MAPS[p.mapId];
+    // A freshly spawned player starts from the server position; the next
+    // modern INPUT packet will takeover with the client-calculated spot.
+    p.clientPosActive = false;
+    p.vx = 0;
+    p.vy = 0;
     auto* collider = playerWallColliders_[p.mapId].get();
     float spawnR = PLAYER_RADIUS + soilRadiusBonusOf(p);
     auto spawnTiles = findSpawnTiles(p.mapId);
@@ -2951,46 +2958,54 @@ public:
     p.vx += (nx * speed - p.vx) * std::min(1.f, dt * 9.f);
     p.vy += (ny * speed - p.vy) * std::min(1.f, dt * 9.f);
 
-    // Wall collision
-    float playerRadius = PLAYER_RADIUS + soilRadiusBonusOf(p);
-    auto [newX, newY] = collider->moveCircle(p.x, p.y, p.vx * dt, p.vy * dt, playerRadius, &collisionCounter);
-    p.x = clampf(newX, playerRadius, map.width - playerRadius);
-    p.y = clampf(newY, playerRadius, map.height - playerRadius);
+    if (p.clientPosActive) {
+      // Client-authoritative position: never re-simulate here. The client is
+      // the most accurate source for its own location; the server mirrors it
+      // so petals and the rest of the world use that spot.
+      p.x = clampf(p.x, 0.f, (float)map.width);
+      p.y = clampf(p.y, 0.f, (float)map.height);
+    } else {
+      // Wall collision
+      float playerRadius = PLAYER_RADIUS + soilRadiusBonusOf(p);
+      auto [newX, newY] = collider->moveCircle(p.x, p.y, p.vx * dt, p.vy * dt, playerRadius, &collisionCounter);
+      p.x = clampf(newX, playerRadius, map.width - playerRadius);
+      p.y = clampf(newY, playerRadius, map.height - playerRadius);
 
-    // Player-to-player push - optimized but visually identical: check only within sum radii
-    for (auto* o : allPlayers) {
-      if (o == &p || o->mapId != p.mapId || !o->alive) continue;
-      float oRadius = PLAYER_RADIUS + soilRadiusBonusOf(*o);
-      float minDist = playerRadius + oRadius;
-      float checkDist = minDist + 10.f;
-      float dx = p.x - o->x;
-      float dy = p.y - o->y;
-      if (dx * dx + dy * dy > checkDist * checkDist) continue;
-      collisionCounter.n++;
-      float d = std::hypot(dx, dy);
-      if (d < minDist && d > 0.001f) {
-        float push = (minDist - d) * 0.5f;
-        p.x += (dx / d) * push;
-        p.y += (dy / d) * push;
+      // Player-to-player push - optimized but visually identical: check only within sum radii
+      for (auto* o : allPlayers) {
+        if (o == &p || o->mapId != p.mapId || !o->alive) continue;
+        float oRadius = PLAYER_RADIUS + soilRadiusBonusOf(*o);
+        float minDist = playerRadius + oRadius;
+        float checkDist = minDist + 10.f;
+        float dx = p.x - o->x;
+        float dy = p.y - o->y;
+        if (dx * dx + dy * dy > checkDist * checkDist) continue;
+        collisionCounter.n++;
+        float d = std::hypot(dx, dy);
+        if (d < minDist && d > 0.001f) {
+          float push = (minDist - d) * 0.5f;
+          p.x += (dx / d) * push;
+          p.y += (dy / d) * push;
+        }
       }
-    }
-    p.x = clampf(p.x, playerRadius, map.width - playerRadius);
-    p.y = clampf(p.y, playerRadius, map.height - playerRadius);
+      p.x = clampf(p.x, playerRadius, map.width - playerRadius);
+      p.y = clampf(p.y, playerRadius, map.height - playerRadius);
 
-    // Arena 圆形边界
-    if (p.mapId == MAP_COUNT - 1) {
-      float cx = 4000, cy = 4000, R = 4000;
-      float dist = sqrt((p.x - cx) * (p.x - cx) + (p.y - cy) * (p.y - cy));
-      float maxDist = R - playerRadius;
-      if (dist > maxDist) {
-        float angle = atan2(p.y - cy, p.x - cx);
-        p.x = cx + cos(angle) * maxDist;
-        p.y = cy + sin(angle) * maxDist;
+      // Arena 圆形边界
+      if (p.mapId == MAP_COUNT - 1) {
+        float cx = 4000, cy = 4000, R = 4000;
+        float dist = sqrt((p.x - cx) * (p.x - cx) + (p.y - cy) * (p.y - cy));
+        float maxDist = R - playerRadius;
+        if (dist > maxDist) {
+          float angle = atan2(p.y - cy, p.x - cx);
+          p.x = cx + cos(angle) * maxDist;
+          p.y = cy + sin(angle) * maxDist;
+        }
       }
-    }
 
-    // Stuck-in-wall safety net
-    pushPlayerOutOfWall(p, playerRadius);
+      // Stuck-in-wall safety net
+      pushPlayerOutOfWall(p, playerRadius);
+    }
 
     p.hurtCd = std::max(0.f, p.hurtCd - dt);
     bool attack = (p.flags & 1) != 0;
@@ -3188,12 +3203,20 @@ public:
           }
           continue;
         }
-        st.x += (tx - st.x) * std::min(1.f, dt * 14.f);
-        st.y += (ty - st.y) * std::min(1.f, dt * 14.f);
+        if (p.clientPosActive) {
+          st.x = tx; st.y = ty;
+        } else {
+          st.x += (tx - st.x) * std::min(1.f, dt * 14.f);
+          st.y += (ty - st.y) * std::min(1.f, dt * 14.f);
+        }
         if (st.specialTimer <= 0 && missing > 0) { st.absorbTimer = ROSE_ABSORB_TIME; continue; }
       } else {
-        st.x += (tx - st.x) * std::min(1.f, dt * 14.f);
-        st.y += (ty - st.y) * std::min(1.f, dt * 14.f);
+        if (p.clientPosActive) {
+          st.x = tx; st.y = ty;
+        } else {
+          st.x += (tx - st.x) * std::min(1.f, dt * 14.f);
+          st.y += (ty - st.y) * std::min(1.f, dt * 14.f);
+        }
       }
 
       // Heal per sec
@@ -4611,6 +4634,16 @@ int main() {
             p->inDx = r.i8v() / 100.f;
             p->inDy = r.i8v() / 100.f;
             p->flags = r.u8v();
+            // Newest client sends its calculated player position (i16 x, i16 y)
+            // after direction/flags. That position is the most accurate one the
+            // server can see, so it replaces the server-integrated location and
+            // becomes the centre used for petal placement every tick.
+            if (r.remaining() >= 4) {
+              const MapDef& map = MAPS[p->mapId];
+              p->clientPosActive = true;
+              p->x = clampf((float)r.i16v(), 0.f, (float)map.width);
+              p->y = clampf((float)r.i16v(), 0.f, (float)map.height);
+            }
             if (p->inDx != cs->lastInDx || p->inDy != cs->lastInDy || p->flags != cs->lastFlags) {
               cs->lastInDx = p->inDx;
               cs->lastInDy = p->inDy;

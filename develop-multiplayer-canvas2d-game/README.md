@@ -149,7 +149,7 @@ All packets are raw binary, big-endian, first byte = packet id.
 | id | name | payload |
 | -- | ---- | ------- |
 | 1 | JOIN | `str name`, `u8 mapId`, `u32 xp`, 8×cell, `u8 bagCount`, n×cell |
-| 2 | INPUT | `i8 dx*100`, `i8 dy*100`, `u8 flags` (1=attack, 2=defend) |
+| 2 | INPUT | `i8 dx*100`, `i8 dy*100`, `u8 flags` (1=attack, 2=defend), optional `i16 x`, `i16 y` (client-computed player position; becomes the authoritative petal centre) |
 | 3 | SWAP | `u8 from`, `u8 to` (0..7 = petal slots, 8+ = bag) |
 | 4 | CRAFT | `u8 itemId`, `u8 rarity`, `u16 count` (normal craft always sends `5`) |
 | 5 | CHANGE_MAP | `u8 mapId` |
