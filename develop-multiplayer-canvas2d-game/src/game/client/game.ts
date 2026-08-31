@@ -7640,13 +7640,8 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         this.floaters.push({ x, y, msg: `+${value} XP`, color: "#ffe65d", life: 1.3, vy: -34 });
         break;
       case EVT.LOOT:
-        this.floaters.push({
-          x, y,
-          msg: `${RARITIES[rarity].name} ${ITEMS[item]?.name ?? "?"}`,
-          color: RARITIES[rarity].color,
-          life: 1.6,
-          vy: -22,
-        });
+        // 收集卡片时不再显示卡片名称飘字（去掉 floaters.push）。
+        // 仍保留成就进度与死亡面板的掉落统计。
         this.achievements.onItemObtained(RARITIES[rarity]?.name);
         // Track drops for the death panel
         if (!this.currentRunDrops) this.currentRunDrops = [];
@@ -9847,15 +9842,13 @@ private bagLayout() {
   }
 
   /**
-   * 左侧栏按钮（参考 MainMenu._drawLeftBtnIcon）：图标居左 + 快捷键标签靠右。
+   * 左侧栏按钮（参考 MainMenu._drawLeftBtnIcon）：图标居中，无快捷键标签。
    */
   private _drawLeftBtnIcon(ctx: CanvasRenderingContext2D, key: string, rect: { x: number; y: number; w: number; h: number }) {
     const x = rect.x, y = rect.y, w = rect.w, h = rect.h;
-    const cx = x + w * 0.35; // icon positioned left side
+    const cx = x + w / 2; // icon centered（不再需要为右侧标签留位）
     const cy = y + h / 2;
     const s  = h * 0.45;
-    const labelX = x + w - 15;
-    const labelY = y + h / 2;
 
     ctx.save();
     ctx.strokeStyle = 'white';
@@ -9899,9 +9892,12 @@ private bagLayout() {
         const lctx = layer.getContext('2d');
         if (!lctx) break;
         const gap = s * 0.05;
+        // fillStyle 必须放在 save/restore 之外：restore 会把当前笔触还原成
+        // 进入 save 前的值（黑色），导致原子本体用黑色填充、在深色按钮上
+        // 完全不可见。保持白色，离屏层上才会画出白色原子。
+        lctx.fillStyle = '#FFFFFF';
         const drawAtomWithGap = (atomX: number, atomY: number, atomRadius: number) => {
           lctx.save();
-          lctx.fillStyle = '#FFFFFF';
           lctx.globalCompositeOperation = 'destination-out';
           lctx.beginPath();
           lctx.arc(atomX - cx + pad, atomY - cy + pad, atomRadius + gap, 0, Math.PI * 2);
@@ -9919,20 +9915,6 @@ private bagLayout() {
         break;
       }
     }
-
-    // Draw label text (keyboard shortcut hint)
-    let label = '';
-    if (key === 'inventory') label = '[I]';
-    else if (key === 'crafting') label = '[C]';
-
-    ctx.font = `bold ${Math.floor(h * 0.34)}px ${FONT_FAMILY}`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.strokeStyle = 'black';
-    ctx.lineWidth = 2;
-    ctx.strokeText(label, labelX, labelY);
-    ctx.fillStyle = 'white';
-    ctx.fillText(label, labelX, labelY);
 
     ctx.restore();
   }
@@ -9981,8 +9963,8 @@ private bagLayout() {
    * Rects for the main-menu actions — 排版参考 MainMenu：
    *  - 顶部栏：Account / Shop / Hunting Quest / Talent / Mob Gallery /
    *    Achievement / Settings / Changelog（圆角正方形图标）
-   *  - 左侧栏：Inventory / Crafting / Bonus（宽按钮：图标居左 + 快捷键标签）
-   * 手机端：顶部栏两行四列（网格上方），左侧栏一行三个（底部）。
+   *  - 左侧栏：Inventory / Crafting（矩形按钮，图标居中，无快捷键标签）
+   * 手机端：顶部栏一行放左上角，左侧栏同样固定在屏幕左侧垂直居中。
    */
   private menuActionRects() {
     const W = this.w;
@@ -10000,30 +9982,17 @@ private bagLayout() {
     });
 
     // 侧栏（已删除 Multiplayer / Bonus，Bonus 改为常驻面板）：
-    // Inventory / Crafting，宽按钮布局以容纳"图标居左 + 快捷键标签靠右"。
+    // Inventory / Crafting —— 手机/桌面都固定在屏幕左侧垂直居中，
+    // 简洁矩形按钮（图标居中，无 [I]/[C] 快捷键标签）。
     const leftOrder = ['left_inventory', 'left_craft'];
-    if (isMobileLayout) {
-      // Phone: one compact row of two at the bottom.
-      const BTN_W = Math.min(104, (W - 16) / 2);
-      const BTN_H = 42;
-      const GAP = 6;
-      const totalW = BTN_W * 2 + GAP;
-      const startX = (W - totalW) / 2;
-      const y = H - BTN_H - 12;
-      leftOrder.forEach((key, i) => {
-        buttons[key] = { x: startX + i * (BTN_W + GAP), y, w: BTN_W, h: BTN_H };
-      });
-    } else {
-      // Desktop: left sidebar (reference MainMenu layout).
-      const LEFT_X = 14;
-      const LEFT_W = 118;
-      const LEFT_H = 46;
-      const LEFT_GAP = 10;
-      const leftMidY = H / 2 - (LEFT_H * leftOrder.length + LEFT_GAP * (leftOrder.length - 1)) / 2;
-      leftOrder.forEach((key, i) => {
-        buttons[key] = { x: LEFT_X, y: leftMidY + i * (LEFT_H + LEFT_GAP), w: LEFT_W, h: LEFT_H };
-      });
-    }
+    const LEFT_X = isMobileLayout ? 10 : 14;
+    const LEFT_W = isMobileLayout ? Math.min(104, (W - 16) / 2) : 118;
+    const LEFT_H = isMobileLayout ? 42 : 46;
+    const LEFT_GAP = isMobileLayout ? 8 : 10;
+    const leftMidY = H / 2 - (LEFT_H * leftOrder.length + LEFT_GAP * (leftOrder.length - 1)) / 2;
+    leftOrder.forEach((key, i) => {
+      buttons[key] = { x: LEFT_X, y: leftMidY + i * (LEFT_H + LEFT_GAP), w: LEFT_W, h: LEFT_H };
+    });
 
     return buttons;
   }
@@ -11408,7 +11377,11 @@ private bagLayout() {
     const isMobileLayout = this.isMobile || W < 640;
     const titleSize = isMobileLayout ? Math.max(26, Math.min(44, W * 0.12)) : Math.max(28, Math.min(60, W * 0.07));
     const bob = Math.sin(t * 1.6) * 6;
-    const titleY = isMobileLayout ? Math.max(35, this.h * 0.08) : Math.max(60, this.h * 0.12);
+    // Title 永远位于顶部按钮组（upstairs button group）正下方：以顶部栏
+    // 按钮的底边为基准下移，保证任何屏幕尺寸下都不会与顶部栏重叠。
+    const topBarFirstBtn = this.menuActionRects().top_account;
+    const topBarBottom = topBarFirstBtn ? topBarFirstBtn.y + topBarFirstBtn.h : (isMobileLayout ? 42 : 54);
+    const titleY = topBarBottom + Math.ceil(titleSize * 0.9) + 12;
 
     ctx.font = `bold ${titleSize}px ${FONT_FAMILY}`;
     ctx.textAlign = 'center';
@@ -11571,7 +11544,7 @@ private bagLayout() {
       const isHov = hit(rect, this.mx, this.my);
       const color = isHov ? leftBtnHoverColors[key] : leftBtnColors[key];
       drawBtn(rect, color);
-      // 侧栏：宽按钮，图标居左 + 快捷键标签靠右（MainMenu._drawLeftBtnIcon）
+      // 侧栏：矩形按钮，图标居中（无 [I]/[C] 快捷键标签）
       this._drawLeftBtnIcon(ctx, key.replace('left_', ''), rect);
     }
 
@@ -13275,9 +13248,9 @@ drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
     const size = 46;
     const stack = Math.max(1, Math.round(e.hp * 255));
 
-    // 只有"确定被玩家吸"（服务器标记 suction，即掉落物落入磁铁吸取范围、
-    // 正在被快速吸向玩家）的掉落物才会缩小淡出；玩家靠近但未被吸取时
-    // 保持原大小、完全不透明。
+    // 磁铁吸取中的掉落物：卡片不再随距离缩小（保持原大小），仅保留
+    // 淡出效果以示正在被吸向玩家。服务器标记 suction = 掉落物落入
+    // 磁铁吸取范围、正在被快速吸向玩家。
     let scale = 1;
     let alpha = 1;
     if (e.suction) {
@@ -13286,11 +13259,11 @@ drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
         const dx = me.x - e.x;
         const dy = me.y - e.y;
         const d = Math.hypot(dx, dy);
-        const SUCK_START = 220; // world px — start shrinking at this distance
+        const SUCK_START = 220; // world px — start fading at this distance
         const SUCK_END = 24;    // world px — fully gone once this close
         if (d < SUCK_START) {
           const t = Math.max(0, Math.min(1, (d - SUCK_END) / (SUCK_START - SUCK_END)));
-          scale = 0.2 + t * 0.8;   // 0.2x near the player → 1.0x at SUCK_START
+          scale = 1;            // 保持原大小，不再缩放
           alpha = 0.25 + t * 0.75;
         }
       }

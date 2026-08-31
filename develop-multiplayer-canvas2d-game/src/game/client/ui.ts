@@ -1623,7 +1623,7 @@ export function drawCard(
                             cell.count >= 1000 ? (cell.count / 1000).toFixed(1) + 'K' :
                             cell.count);
 
-    const fontSize = Math.max(14, Math.floor(18 * size / 70));
+    const fontSize = Math.max(7, Math.round(18 * size / 70));
     ctx.font = `900 ${fontSize}px "Trebuchet MS", "Segoe UI", sans-serif`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
@@ -1631,7 +1631,7 @@ export function drawCard(
     ctx.translate(r.x + r.w - 10, r.y + 5);
     ctx.rotate(0.3);
     ctx.strokeStyle = "black";
-    ctx.lineWidth = 4;
+    ctx.lineWidth = Math.max(2, Math.round(fontSize * 0.24));
     ctx.lineJoin = "round";
     ctx.strokeText(countStr, 0, 0);
     ctx.fillStyle = "white";

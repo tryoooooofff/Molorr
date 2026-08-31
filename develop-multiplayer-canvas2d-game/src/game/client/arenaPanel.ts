@@ -2,7 +2,7 @@ import { C2S, Writer } from "../shared/protocol";
 import type { Cell } from "../shared/sim";
 import type { Wall } from "../shared/defs";
 import { EMPTY_ITEM } from "../shared/defs";
-import { panel, button, searchField, text, roundRect, drawCard, type Rect, hit, FONT_FAMILY } from "./ui";
+import { panel, searchField, text, roundRect, drawCard, type Rect, hit, FONT_FAMILY } from "./ui";
 
 // 接口定义
 export interface PlayerBrief {
@@ -77,8 +77,8 @@ export class ArenaPanel {
     // dimming it, and the arena panel used to be the one exception — it
     // darkened the whole game behind it. Keeping it undimmed makes it match.
 
-    // 使用现有 panel 风格（深色背景 + 黑色描边）
-    panel(ctx, { x: this.panelX, y: this.panelY, w: this.panelW, h: this.panelH });
+    // 不透明面板：完全实心的深色背景 + 黑色描边（不再使用默认的半透明填充）
+    panel(ctx, { x: this.panelX, y: this.panelY, w: this.panelW, h: this.panelH }, "#1c242e");
 
     ctx.save();
     ctx.translate(this.panelX, this.panelY);
@@ -145,32 +145,80 @@ export class ArenaPanel {
     ctx.restore();
   }
 
+  /**
+   * 用户按钮风格（与主菜单/账号面板的 _drawStyledButton 一致）：
+   * 圆角矩形 + 基础色填充 + 上半部加深 + 彩色描边 + 白字黑边。
+   * hover 时整体提亮。
+   */
+  private styledButton(
+    ctx: CanvasRenderingContext2D,
+    r: Rect,
+    label: string,
+    baseColor: [number, number, number],
+    hovered: boolean,
+    fontSize = 16,
+  ) {
+    const adj = (rgb: number[], f: number) =>
+      rgb.map((c) => Math.min(255, Math.max(0, Math.floor(c * f))));
+    const base = hovered ? adj(baseColor, 1.15) : baseColor;
+    const dark = `rgb(${adj(base, 0.82).join(',')})`;
+    const light = `rgb(${base.join(',')})`;
+    const stroke = `rgb(${adj(baseColor, 0.5).join(',')})`;
+    const { x, y, w, h } = r;
+
+    ctx.save();
+    roundRect(ctx, x, y, w, h, 5);
+    ctx.fillStyle = light;
+    ctx.fill();
+    ctx.save();
+    roundRect(ctx, x, y, w, h, 5);
+    ctx.clip();
+    ctx.fillStyle = dark;
+    ctx.fillRect(x, y, w, h / 2);
+    ctx.restore();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = stroke;
+    roundRect(ctx, x, y, w, h, 10);
+    ctx.stroke();
+    if (label) {
+      ctx.font = `${fontSize}px ${FONT_FAMILY}`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.lineJoin = 'round';
+      ctx.strokeStyle = 'black';
+      ctx.lineWidth = 4;
+      ctx.strokeText(label, x + w / 2, y + h / 2);
+      ctx.fillStyle = 'white';
+      ctx.fillText(label, x + w / 2, y + h / 2);
+    }
+    ctx.restore();
+  }
+
   private drawLobbyList(ctx: CanvasRenderingContext2D) {
     // 搜索框
     this.searchFieldRect = { x: 20, y: 55, w: this.panelW - 170, h: 34 };
     searchField(ctx, this.searchFieldRect, this.searchQuery, this.searchActive, 'searching the room…');
 
-    // 1v1/3v3 toggle
+    // 1v1/3v3 toggle（用户按钮风格）
     this.toggleBtnRect = { x: this.panelW - 130, y: 55, w: 110, h: 34 };
-    ctx.save();
-    roundRect(ctx, this.toggleBtnRect.x, this.toggleBtnRect.y, this.toggleBtnRect.w, this.toggleBtnRect.h, 5);
-    ctx.fillStyle = this.toggle1v1 ? '#e74c3c' : '#555';
-    ctx.fill();
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-    ctx.stroke();
-    text(ctx, this.toggle1v1 ? '1v1' : '3v3', this.toggleBtnRect.x + this.toggleBtnRect.w / 2, this.toggleBtnRect.y + this.toggleBtnRect.h / 2, 14, '#ffffff', 'center', false);
-    ctx.restore();
+    this.styledButton(
+      ctx,
+      this.toggleBtnRect,
+      this.toggle1v1 ? '1v1' : '3v3',
+      this.toggle1v1 ? [231, 76, 60] : [85, 85, 85],
+      this.hoveredBtn === 'toggle',
+      14,
+    );
 
     // 创建房间按钮
     this.createBtnRect = { x: 20, y: 110, w: (this.panelW - 60) / 2, h: 42 };
     const createHovered = this.hoveredBtn === 'create';
-    button(ctx, this.createBtnRect, 'create room', '#27ae60', createHovered, 16);
+    this.styledButton(ctx, this.createBtnRect, 'create room', [39, 174, 96], createHovered, 16);
 
     // 快速加入按钮
     this.quickJoinBtnRect = { x: 40 + (this.panelW - 60) / 2, y: 110, w: (this.panelW - 60) / 2, h: 42 };
     const quickHovered = this.hoveredBtn === 'quick';
-    button(ctx, this.quickJoinBtnRect, 'quick join', '#2980b9', quickHovered, 16);
+    this.styledButton(ctx, this.quickJoinBtnRect, 'quick join', [41, 128, 185], quickHovered, 16);
 
     // 房间列表
     const listY = 175;
@@ -260,16 +308,23 @@ export class ArenaPanel {
       drawCard(ctx, cardRect, this.loadout[i], { hovered, empty: '', showName: false });
     }
 
-    // 准备按钮
+    // 准备按钮（用户按钮风格）
     this.readyBtnRect = { x: this.panelW / 2 - 65, y: 440, w: 130, h: 42 };
     const readyHovered = this.hoveredBtn === 'ready';
-    button(ctx, this.readyBtnRect, this.ready ? 'stop' : 'ready', this.ready ? '#e74c3c' : '#27ae60', readyHovered, 16);
+    this.styledButton(
+      ctx,
+      this.readyBtnRect,
+      this.ready ? 'stop' : 'ready',
+      this.ready ? [231, 76, 60] : [39, 174, 96],
+      readyHovered,
+      16,
+    );
 
     // 离开按钮 — sits to the LEFT of the ✕ (which occupies panelW-42 .. panelW-12)
     // so the two no longer overlap. "leave" exits the room; "✕" just hides the panel.
     this.leaveBtnRect = { x: this.panelW - 130, y: 12, w: 70, h: 32 };
     const leaveHovered = this.hoveredBtn === 'leave';
-    button(ctx, this.leaveBtnRect, 'leave', '#c0392b', leaveHovered, 14);
+    this.styledButton(ctx, this.leaveBtnRect, 'leave', [192, 57, 43], leaveHovered, 14);
 
     // ─── 背包网格 ───
     this.drawBagGrid(ctx);
@@ -362,6 +417,7 @@ export class ArenaPanel {
     if (this.state === 'lobby-list') {
       if (hit(this.createBtnRect, px, py)) this.hoveredBtn = 'create';
       else if (hit(this.quickJoinBtnRect, px, py)) this.hoveredBtn = 'quick';
+      else if (hit(this.toggleBtnRect, px, py)) this.hoveredBtn = 'toggle';
     } else if (this.state === 'in-room') {
       if (hit(this.readyBtnRect, px, py)) this.hoveredBtn = 'ready';
       else if (hit(this.leaveBtnRect, px, py)) this.hoveredBtn = 'leave';

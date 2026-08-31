@@ -1089,6 +1089,70 @@ export interface CollisionCounter {
 }
 
 // =====================================================================
+// SpatialGrid（从 server-cpp/main.cpp SpatialGrid 移植）
+// constexpr float SPATIAL_GRID_CELL_SIZE = 400.f; —— 每格 400px（≈1/4 视野半径）
+//  - insert(i, x, y, radius)：把对象登记到其圆形覆盖的所有格子（min/max 行列）
+//  - query(x, y, radius)：收集查询圆覆盖格子内的候选，用 Set 去重后返回
+// 与 C++ 版本（unordered_map<uint64_t, vector<int>> + (col<<32)|row 键）
+// 一一对应；这里直接存对象引用而非下标。
+// =====================================================================
+const SPATIAL_GRID_CELL_SIZE = 400;
+
+class SpatialGrid<T> {
+  private cells = new Map<number, T[]>();
+
+  clear() {
+    this.cells.clear();
+  }
+
+  /** 键编码：(col << 32) | row 的 JS 安全等价 —— 偏移后打包为单个数字。 */
+  private key(col: number, row: number): number {
+    return (col + 32768) * 65536 + (row + 32768);
+  }
+
+  insert(obj: T, x: number, y: number, radius: number): void {
+    const minCol = Math.floor((x - radius) / SPATIAL_GRID_CELL_SIZE);
+    const maxCol = Math.floor((x + radius) / SPATIAL_GRID_CELL_SIZE);
+    const minRow = Math.floor((y - radius) / SPATIAL_GRID_CELL_SIZE);
+    const maxRow = Math.floor((y + radius) / SPATIAL_GRID_CELL_SIZE);
+    for (let row = minRow; row <= maxRow; row++) {
+      for (let col = minCol; col <= maxCol; col++) {
+        const k = this.key(col, row);
+        let bucket = this.cells.get(k);
+        if (!bucket) {
+          bucket = [];
+          this.cells.set(k, bucket);
+        }
+        bucket.push(obj);
+      }
+    }
+  }
+
+  /** 查询圆（x, y, radius）覆盖的格子中的候选对象，自动去重。 */
+  query(x: number, y: number, radius: number): T[] {
+    const out: T[] = [];
+    const seen = new Set<T>();
+    const minCol = Math.floor((x - radius) / SPATIAL_GRID_CELL_SIZE);
+    const maxCol = Math.floor((x + radius) / SPATIAL_GRID_CELL_SIZE);
+    const minRow = Math.floor((y - radius) / SPATIAL_GRID_CELL_SIZE);
+    const maxRow = Math.floor((y + radius) / SPATIAL_GRID_CELL_SIZE);
+    for (let row = minRow; row <= maxRow; row++) {
+      for (let col = minCol; col <= maxCol; col++) {
+        const bucket = this.cells.get(this.key(col, row));
+        if (!bucket) continue;
+        for (const obj of bucket) {
+          if (!seen.has(obj)) {
+            seen.add(obj);
+            out.push(obj);
+          }
+        }
+      }
+    }
+    return out;
+  }
+}
+
+// =====================================================================
 // Polygon-based Wall Collider with BVH (O(log n) queries)
 // 多边形噪声墙壁 + 层次包围盒碰撞系统
 // —— 用于【玩家】精确碰撞（与客户端渲染的凹凸视觉墙一致）
@@ -3320,9 +3384,13 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
   }
 
   // ------------------------------------------------------------------ tick
-  // 碰撞逻辑已迁移到 C++ 服务器，此处不再执行碰撞检测
+  // 碰撞逻辑（墙壁/玩家间/生物间/生物-玩家/花瓣/弹射物）在本文件中执行。
   tick(dt: number) {
     this.tickCount++;
+    // 与 server-cpp/main.cpp:2864 一致：每 tick 开始时清零碰撞计数，
+    // 让客户端调试浮层显示的 collision:N 反映“上一 tick 的碰撞检测次数”，
+    // 而不是自服务器启动以来的累计值。
+    this.collisionCounter.n = 0;
     this.updateAfk(dt);
     const players: Player[] = [];
     // 主页面(菜单)模式的玩家不参与世界模拟:不移动、不生成花瓣、不拾取
@@ -3336,7 +3404,7 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
       this.zoneRefillTimer = 0;
       for (let m = 0; m < MAPS.length; m++) this.refillZoneMobs(m, players);
     }
-    for (const p of players) this.updatePetals(p, dt);
+    for (const p of players) this.updatePetals(p, dt, players);
     for (const p of players) this.pickupDrops(p, dt);
     // 弹射物系统：生物与花瓣共用的远程攻击更新
     for (let m = 0; m < MAPS.length; m++) this.updateProjectiles(m, dt, players);
@@ -3355,7 +3423,6 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
     }
   }
 
-  // 碰撞逻辑已迁移到 C++ 服务器，此处仅做基础移动，不做碰撞检测
   private updatePlayer(p: Player, dt: number, players: Player[]) {
     if (!p.alive) return;
     const map = MAPS[p.mapId];
@@ -3379,6 +3446,28 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
     p.y += p.vy * dt;
     p.x = clamp(p.x, 0, map.width);
     p.y = clamp(p.y, 0, map.height);
+    // ---- 玩家间碰撞：互相推开，不允许两个玩家重叠 ----
+    // 从 server-cpp/main.cpp（updatePlayer 的 player-to-player push）移植。
+    const pRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(p);
+    const ppViewRadius = 1300 / this.viewScale;
+    const ppViewRadiusSq = ppViewRadius * ppViewRadius;
+    for (const o of players) {
+      if (o === p || o.mapId !== p.mapId || !o.alive) continue;
+      const dx = p.x - o.x;
+      const dy = p.y - o.y;
+      if (dx * dx + dy * dy > ppViewRadiusSq) continue; // 视野裁剪
+      this.collisionCounter.n++;
+      const d = Math.hypot(dx, dy);
+      const oRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(o);
+      const minDist = pRadius + oRadius;
+      if (d < minDist && d > 0.001) {
+        const push = (minDist - d) * 0.5;
+        p.x += (dx / d) * push;
+        p.y += (dy / d) * push;
+      }
+    }
+    p.x = clamp(p.x, pRadius, map.width - pRadius);
+    p.y = clamp(p.y, pRadius, map.height - pRadius);
     // Resolve wall penetration straight after integrating the new position, so
     // every later reader (petals, pickups, snapshots) sees a corrected p.x/p.y.
     // Without this the player walks clean through every wall.
@@ -3463,7 +3552,7 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
     }
   }
 
-  private updatePetals(p: Player, dt: number) {
+  private updatePetals(p: Player, dt: number, players: Player[]) {
     if (!p.alive) return;
     const world = this.worlds[p.mapId];
 
@@ -3581,7 +3670,73 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
         const maxShield = p.maxHp;
         if (p.shield < maxShield) { p.shield = Math.min(maxShield, p.shield + def.shieldPerSec * rarityMult(cell.rarity) * dt); p.statsDirty = true; }
       }
-      // 花瓣碰撞/伤害逻辑已迁移到 C++ 服务器
+      // ---- 花瓣-生物碰撞伤害 ----
+      // 从 server-cpp/main.cpp 移植：花瓣撞到敌对生物时对其造成伤害、
+      // 击退，并让花瓣自身承受生物一半伤害；自己的宠物不受伤害。
+      if (st.hitCd <= 0 && !isSummon) {
+        const pr = def.radius * (1 + cell.rarity * 0.06);
+        for (const mob of world.mobs) {
+          if (mob.friendly && mob.ownerId === p.id) continue; // 不伤害自己的宠物
+          if (mob.hp <= 0) continue;
+          this.collisionCounter.n++;
+          const dx = mob.x - st.x, dy = mob.y - st.y;
+          const rSum = mob.radius + pr;
+          if (dx * dx + dy * dy < rSum * rSum) {
+            const d = Math.hypot(dx, dy);
+            if (d < 0.001) continue;
+            const dmg = def.damage * rarityMult(cell.rarity) * p.talentBonuses.petalDmgMult;
+            mob.hp -= dmg;
+            mob.lastHitBy = p.id;
+            mob.addDamage(p.id, dmg);
+            mob.targetId = p.id;
+            st.hp -= mob.damage * 0.5;
+            st.hitCd = 0.03;
+            // 击退
+            const kb = 90 / (mob.radius / 20);
+            mob.vx += ((mob.x - st.x) / d) * kb;
+            mob.vy += ((mob.y - st.y) / d) * kb;
+            if (st.hp <= 0) {
+              st.alive = false;
+              st.timer = this.applyTalentReload(p, def.reload);
+            }
+            break;
+          }
+        }
+      }
+
+      // ---- 花瓣-玩家碰撞伤害（PvP）----
+      // 从 server-cpp/main.cpp 移植：花瓣撞到其他玩家时造成伤害
+      // （护盾先吸收），花瓣自身扣 1 点耐久。
+      if (st.hitCd <= 0 && !isSummon) {
+        const pr = def.radius * (1 + cell.rarity * 0.06);
+        for (const other of players) {
+          if (other === p || other.mapId !== p.mapId || !other.alive) continue;
+          if (other.hurtCd > 0) continue;
+          this.collisionCounter.n++;
+          const dx = other.x - st.x, dy = other.y - st.y;
+          const plRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(other);
+          const rSum = plRadius + pr;
+          if (dx * dx + dy * dy < rSum * rSum) {
+            let dmg = def.damage * rarityMult(cell.rarity) * p.talentBonuses.petalDmgMult;
+            if (other.shield > 0 && dmg > 0) {
+              const absorbed = Math.min(other.shield * 2, dmg);
+              other.shield -= absorbed / 2;
+              dmg -= absorbed;
+            }
+            other.hp -= dmg;
+            other.hurtCd = 0.1;
+            other.statsDirty = true;
+            st.hp -= 1;
+            st.hitCd = 0.03;
+            if (other.hp <= 0) this.killPlayer(other);
+            if (st.hp <= 0) {
+              st.alive = false;
+              st.timer = this.applyTalentReload(p, def.reload);
+            }
+            break;
+          }
+        }
+      }
     }
   }
 /**
@@ -3727,7 +3882,7 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
   const map = MAPS[mapId];
   const world = this.worlds[mapId];
   const here = players.filter((p) => p.mapId === mapId && p.alive);
-  // 碰撞逻辑（墙壁/生物间/生物-玩家）已迁移到 C++ 服务器
+  // 碰撞逻辑（墙壁/生物间/生物-玩家）在下方生物更新循环中执行。
 
   // ===== ✅ 视野裁剪范围 =====
   // VIEW_RADIUS 需要除以 viewScale，以匹配客户端相机缩放后的实际可见范围。
@@ -3739,28 +3894,13 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
     .filter((p) => p.mapId === mapId)
     .map((p) => p.alive ? { x: p.x, y: p.y } : { x: p.deathX, y: p.deathY });
 
-  // ===== 空间网格 =====
-  const MOB_CELL_SIZE = 250;
-  const mobGrid = new Map<string, Mob[]>();
-  const getKey = (x: number, y: number) => `${Math.floor(x / MOB_CELL_SIZE)},${Math.floor(y / MOB_CELL_SIZE)}`;
-
+  // ===== 空间网格（从 server-cpp/main.cpp SpatialGrid 移植）=====
+  // C++：每 tick mobGrid.clear() 后把所有 mob 按 400px 格子登记，
+  // 生物间碰撞用 mobGrid.query(mob.x, mob.y, mob.radius + 400) 取候选。
+  const mobGrid = new SpatialGrid<Mob>();
   for (const mob of world.mobs) {
-    const k = getKey(mob.x, mob.y);
-    if (!mobGrid.has(k)) mobGrid.set(k, []);
-    mobGrid.get(k)!.push(mob);
+    mobGrid.insert(mob, mob.x, mob.y, mob.radius);
   }
-
-  const getNearby = (x: number, y: number) => {
-    const cx = Math.floor(x / MOB_CELL_SIZE), cy = Math.floor(y / MOB_CELL_SIZE);
-    const r: Mob[] = [];
-    for (let dx = -1; dx <= 1; dx++) {
-      for (let dy = -1; dy <= 1; dy++) {
-        const c = mobGrid.get(`${cx + dx},${cy + dy}`);
-        if (c) r.push(...c);
-      }
-    }
-    return r;
-  };
 
   // ===== 休眠系统：将不在任何玩家视野内的生物移入休眠池 =====
   const toDormant: DormantMob[] = [];
@@ -3883,7 +4023,7 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
       mob.y += mob.vy * dt;
       mob.x = clamp(mob.x, mob.radius, map.width - mob.radius);
       mob.y = clamp(mob.y, mob.radius, map.height - mob.radius);
-      // ---- 墙壁碰撞已迁移到 C++ 服务器 ----
+      // ---- 非活跃区域生物不做完整碰撞，仅做基础维护 ----
       // 死亡检查（非活跃区域生物仍需要清理）
       if (mob.hp <= 0) {
         if (!mob.friendly) { this.decZoneCount(mapId, this.zoneAt(mapId, mob.x, mob.y)); }
@@ -3986,7 +4126,134 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
     mob.x = clamp(mob.x, mob.radius, map.width - mob.radius);
     mob.y = clamp(mob.y, mob.radius, map.height - mob.radius);
 
-    // ---- 墙壁碰撞已迁移到 C++ 服务器 ----
+    // ---- 墙壁碰撞（生物）----
+    // 从 server-cpp/main.cpp 移植：先做圆-AABB 碰撞，位移过大时启用
+    // 8 方向弹出 + 区块重刷的 pushOutOfWall（带 0.8s 冷却防抖）。
+    const wallCollider = this.wallColliders[mapId];
+    if (wallCollider) {
+      const [wallX, wallY] = wallCollider.collideCircle(mob.x, mob.y, mob.radius, this.collisionCounter, MOB_WALL_INFLATE);
+      if (Math.abs(wallX - mob.x) >= PUSH_OUT_THRESHOLD || Math.abs(wallY - mob.y) >= PUSH_OUT_THRESHOLD) {
+        if (mob.pushOutCooldown <= 0) {
+          mob.pushOutCooldown = 0.8;
+          this.pushOutOfWall(mob, mapId);
+        }
+      } else {
+        mob.x = wallX;
+        mob.y = wallY;
+      }
+      mob.pushOutCooldown = Math.max(0, mob.pushOutCooldown - dt);
+    }
+
+    // ---- 生物间碰撞（互相推开 + 接触伤害）----
+    // 从 server-cpp/main.cpp 移植：静止生物不参与；慢速生物 10Hz、
+    // 快速生物每帧一次；空间网格取候选，视野裁剪后按 minDist 推开，
+    // 并依阵营结算接触伤害（同主人宠物不互伤）。
+    const isStationary = mob.speed <= 0;
+    if (!isStationary) {
+      mob.collisionTimer -= dt;
+      if (mob.collisionTimer <= 0) {
+        const interval = mob.speed <= MOB_COLLISION_SLOW_SPEED ? MOB_COLLISION_SLOW_INTERVAL : 1 / 60;
+        mob.collisionTimer = interval + Math.random() * 0.02;
+        // C++ 语义：查询半径 = mob.radius + 400（main.cpp:3535）
+        const nearby = mobGrid.query(mob.x, mob.y, mob.radius + 400);
+        for (const other of nearby) {
+          if (other === mob || other.hp <= 0) continue;
+          const dx = mob.x - other.x, dy = mob.y - other.y;
+          if (dx * dx + dy * dy > VIEW_RADIUS_SQ) continue; // 视野裁剪
+          this.collisionCounter.n++;
+          const d = Math.hypot(dx, dy);
+          const minDist = mob.radius + other.radius;
+          if (d < minDist && d > 0.001) {
+            const push = (minDist - d) * 0.4;
+            mob.x += (dx / d) * push;
+            mob.y += (dy / d) * push;
+            if (mob.hitCd <= 0) {
+              const sameOwner = mob.friendly && other.friendly && mob.ownerId !== 0 && mob.ownerId === other.ownerId;
+              if (!sameOwner) {
+                if (mob.friendly && other.friendly) {
+                  // 不同玩家的友方生物：互相伤害
+                  if (mob.spawnProtection <= 0) {
+                    const dmg = other.damage * 0.6;
+                    mob.hp -= dmg;
+                    mob.lastHitBy = other.ownerId;
+                    mob.addDamage(other.ownerId, dmg);
+                  }
+                  if (other.spawnProtection <= 0) {
+                    const dmg = mob.damage * 0.6;
+                    other.hp -= dmg;
+                    other.lastHitBy = mob.ownerId;
+                    other.addDamage(mob.ownerId, dmg);
+                  }
+                } else if (mob.friendly || other.friendly) {
+                  // 至少一个是友方：双方互相伤害
+                  const nonFriendly = mob.friendly ? other : mob;
+                  const friendly = mob.friendly ? mob : other;
+                  if (friendly.spawnProtection <= 0) {
+                    const dmg = nonFriendly.damage * 0.6;
+                    friendly.hp -= dmg;
+                    friendly.lastHitBy = nonFriendly.ownerId;
+                    friendly.addDamage(nonFriendly.ownerId, dmg);
+                  }
+                  if (nonFriendly.spawnProtection <= 0 && friendly.damage > 0) {
+                    const dmg = friendly.damage * 0.6;
+                    nonFriendly.hp -= dmg;
+                    nonFriendly.lastHitBy = friendly.ownerId;
+                    nonFriendly.addDamage(friendly.ownerId, dmg);
+                  }
+                }
+              }
+              mob.hitCd = 0.1;
+              other.hitCd = 0.1;
+            }
+          }
+        }
+      }
+    }
+
+    // ---- 生物-玩家碰撞（推开 + 伤害 + 身体伤害反伤）----
+    // 从 server-cpp/main.cpp 移植：敌对生物撞到玩家时把玩家推开，
+    // 每 0.1s 结算一次 mob.damage（护盾先吸收），同时玩家身体接触
+    // 对生物造成 bodyDamage 反伤。
+    if (!mob.friendly) {
+      for (const pl of here) {
+        const dx = pl.x - mob.x, dy = pl.y - mob.y;
+        if (dx * dx + dy * dy > VIEW_RADIUS_SQ) continue; // 视野裁剪
+        this.collisionCounter.n++;
+        const d = Math.hypot(dx, dy);
+        const pRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(pl);
+        if (d < mob.radius + pRadius) {
+          const push = (mob.radius + pRadius - d) * 0.5;
+          const ux = (pl.x - mob.x) / (d > 0.001 ? d : 1);
+          const uy = (pl.y - mob.y) / (d > 0.001 ? d : 1);
+          pl.x += ux * push;
+          pl.y += uy * push;
+          mob.x -= ux * push * 0.4;
+          mob.y -= uy * push * 0.4;
+
+          if (pl.hurtCd <= 0) {
+            let dmg = mob.damage;
+            if (pl.shield > 0 && dmg > 0) {
+              const absorbed = Math.min(pl.shield * 2, dmg);
+              pl.shield -= absorbed / 2;
+              dmg -= absorbed;
+            }
+            pl.hp -= dmg;
+            pl.hurtCd = 0.1;
+            pl.statsDirty = true;
+            if (pl.hp <= 0) this.killPlayer(pl);
+          }
+
+          // 玩家身体接触伤害 → 生物
+          if (mob.hitCd <= 0 && mob.hp > 0 && pl.bodyDamage > 0) {
+            const bodyDmg = Math.max(1, pl.bodyDamage * pl.talentBonuses.bodyDamageMult);
+            mob.hp -= bodyDmg;
+            mob.lastHitBy = pl.id;
+            mob.addDamage(pl.id, bodyDmg);
+            mob.hitCd = 0.1;
+          }
+        }
+      }
+    }
 
     // ---- Hornet 远程攻击：朝玩家发射导弹（身体已通过 mob.angle 转向目标）----
     // Hornet（type 16）有目标玩家且在射程内时，每隔 HORNET_MISSILE_INTERVAL 秒
@@ -4059,8 +4326,6 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
       }
     }
 
-    // ---- 生物间碰撞 / 生物攻击玩家 已迁移到 C++ 服务器 ----
-
     // ---- Spawner 逻辑 ----
     if (!mob.friendly) {
       const mobDef = MOBS[mob.type];
@@ -4072,7 +4337,7 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
             for (const spawnId of mobDef.spawner.spawnMobs(mob.rarity)) {
               const spawnDef = MOBS[spawnId];
               if (!spawnDef) continue;
-              // 碰撞已迁移到 C++ 服务器，生成位置不做墙壁碰撞检测
+              // 生成位置先用随机角度/距离撒点，随后由墙壁碰撞兜底修正。
               const angle = Math.random() * Math.PI * 2;
               const dist = mob.radius + spawnDef.radius + 12 + Math.random() * 28;
               const sx = clamp(mob.x + Math.cos(angle) * dist, spawnDef.radius + 4, map.width - spawnDef.radius - 4);
@@ -4363,11 +4628,24 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
    *     - TEAM.FRIENDLY：命中敌对生物。
    *  6. 命中冷却递减。
    */
-  // 弹射物碰撞逻辑已迁移到 C++ 服务器
   private updateProjectiles(mapId: number, dt: number, players: Player[]) {
     const world = this.worlds[mapId];
     const map = MAPS[mapId];
     const proj = world.projectiles;
+    const projViewRadius = 1300 / this.viewScale;
+    const projViewRadiusSq = projViewRadius * projViewRadius;
+
+    // ---- 弹射物 vs 生物：空间网格加速（从 server-cpp/main.cpp projMobGrid 移植）----
+    // C++ 在每个友方弹射物的命中分支里新建 projMobGrid 并登记全部 mob；
+    // 这里等价但更省：本 tick 存在友方弹射物时每地图只建一次网格，
+    // 命中查询半径与 C++ 一致 = p.radius + 400（main.cpp:3868）。
+    let projMobGrid: SpatialGrid<Mob> | null = null;
+    if (proj.some((q) => q.team !== TEAM.HOSTILE)) {
+      projMobGrid = new SpatialGrid<Mob>();
+      for (const mob of world.mobs) {
+        projMobGrid.insert(mob, mob.x, mob.y, mob.radius);
+      }
+    }
 
     for (let i = proj.length - 1; i >= 0; i--) {
       const p = proj[i];
@@ -4377,6 +4655,7 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
         proj.splice(i, 1);
         continue;
       }
+      p.hitCd = Math.max(0, p.hitCd - dt);
 
       // ---- 位置积分 + 距离累计 ----
       const prevX = p.x;
@@ -4389,10 +4668,73 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
         continue;
       }
 
+      // ---- 墙壁碰撞（非穿透型撞墙销毁）----
+      // 从 server-cpp/main.cpp 移植。
+      if (!p.isPiercing) {
+        const collider = this.wallColliders[mapId];
+        if (collider) {
+          const [cx, cy] = collider.collideCircle(p.x, p.y, p.radius, this.collisionCounter);
+          if (Math.abs(cx - p.x) > 0.5 || Math.abs(cy - p.y) > 0.5) {
+            proj.splice(i, 1);
+            continue;
+          }
+          p.x = cx;
+          p.y = cy;
+        }
+      }
+
       // ---- 边界检查 ----
       if (p.x < p.radius || p.x > map.width - p.radius || p.y < p.radius || p.y > map.height - p.radius) {
         proj.splice(i, 1);
         continue;
+      }
+
+      // ---- 命中判定 ----
+      // 从 server-cpp/main.cpp 移植：HOSTILE 弹射物命中玩家（护盾先吸收），
+      // FRIENDLY 弹射物命中生物；穿透弹不销毁，每次命中扣 1 点（或生物伤害一半）自身 hp。
+      if (p.team === TEAM.HOSTILE) {
+        for (const pl of players) {
+          if (pl.mapId !== mapId || !pl.alive || p.hitCd > 0) continue;
+          const pdx = pl.x - p.x, pdy = pl.y - p.y;
+          if (pdx * pdx + pdy * pdy > projViewRadiusSq) continue; // 视野裁剪
+          const d = Math.hypot(pdx, pdy);
+          const plRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(pl);
+          if (d < plRadius + p.radius && pl.hurtCd <= 0) {
+            let dmg = p.damage;
+            if (pl.shield > 0 && dmg > 0) {
+              const absorbed = Math.min(pl.shield * 2, dmg);
+              pl.shield -= absorbed / 2;
+              dmg -= absorbed;
+            }
+            pl.hp -= dmg;
+            pl.hurtCd = 0.1;
+            pl.statsDirty = true;
+            p.hitCd = PROJECTILE_HIT_CD;
+            if (pl.hp <= 0) this.killPlayer(pl);
+            if (!p.isPiercing) { proj.splice(i, 1); break; }
+            p.hp -= 1;
+            if (p.hp <= 0) { proj.splice(i, 1); break; }
+          }
+        }
+      } else {
+        // FRIENDLY：命中生物（含友方宠物，与 C++ 行为一致）
+        // 候选来自空间网格查询（C++ projMobGrid.query(p.x, p.y, p.radius + 400)）
+        const nearbyMobs = projMobGrid ? projMobGrid.query(p.x, p.y, p.radius + 400) : world.mobs;
+        for (const mob of nearbyMobs) {
+          if (mob.hp <= 0 || p.hitCd > 0) continue;
+          const mdx = mob.x - p.x, mdy = mob.y - p.y;
+          if (mdx * mdx + mdy * mdy > projViewRadiusSq) continue; // 视野裁剪
+          const d = Math.hypot(mdx, mdy);
+          if (d < mob.radius + p.radius) {
+            mob.hp -= p.damage;
+            mob.lastHitBy = p.ownerId;
+            mob.addDamage(p.ownerId, p.damage);
+            p.hitCd = PROJECTILE_HIT_CD;
+            if (!p.isPiercing) { proj.splice(i, 1); break; }
+            p.hp -= mob.damage * 0.5;
+            if (p.hp <= 0) { proj.splice(i, 1); break; }
+          }
+        }
       }
     }
   }
