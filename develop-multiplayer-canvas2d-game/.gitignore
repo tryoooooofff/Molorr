@@ -12,3 +12,7 @@ server-cpp/petalia-server
 
 # Local game server player saves (runtime artifact)
 data/
+
+# C++ server binary spawned by entry.js (repo root) and its runtime saves
+petalia-server
+saves/
