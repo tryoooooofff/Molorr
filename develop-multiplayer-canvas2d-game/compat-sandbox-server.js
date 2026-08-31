@@ -30,9 +30,85 @@ const GAME_HOST = process.env.GAME_HOST || "127.0.0.1";
  */
 const COMPAT_JS = `
 (function () {
+  // Some sandbox/iframe previews disable storage. The game uses localStorage
+  // in several places, so provide an in-memory fallback when it is blocked.
+  (function () {
+    try {
+      var probe = "__petalia_sandbox_probe__";
+      window.localStorage.setItem(probe, "1");
+      window.localStorage.removeItem(probe);
+      return; // real localStorage is usable
+    } catch (e) {
+      var mem = {};
+      var safe = {
+        getItem: function (k) { return Object.prototype.hasOwnProperty.call(mem, k) ? mem[k] : null; },
+        setItem: function (k, v) { mem[String(k)] = String(v); },
+        removeItem: function (k) { delete mem[String(k)]; },
+        clear: function () { mem = {}; },
+        key: function (i) { return Object.keys(mem)[i] || null; },
+        get length () { return Object.keys(mem).length; }
+      };
+      try {
+        Object.defineProperty(window, "localStorage", { configurable: true, get: function () { return safe; } });
+      } catch (e2) {
+        window.localStorage = safe;
+      }
+    }
+  })();
+
+  // Tiny diagnostics overlay. It is injected before the game bundle and only
+  // shows when something goes wrong, so it never disturbs normal gameplay.
+  (function () {
+    var notes = [];
+    function ensure() {
+      if (!document.body) return false;
+      if (document.getElementById("__petalia_diag__")) return true;
+      var el = document.createElement("div");
+      el.id = "__petalia_diag__";
+      el.setAttribute("data-testid", "petalia-diag");
+      el.style.cssText =
+        "position:fixed;left:8px;bottom:8px;z-index:2147483647;max-width:min(680px,90vw);" +
+        "max-height:40vh;overflow:auto;background:rgba(30,40,52,.92);color:#fff;" +
+        "font:12px/1.45 monospace;padding:8px 10px;border-radius:6px;white-space:pre-wrap;";
+      document.body.appendChild(el);
+      render();
+      return true;
+    }
+    function push(text) {
+      notes.push(String(text));
+      if (notes.length > 12) notes.shift();
+      render();
+    }
+    function render() {
+      var el = document.getElementById("__petalia_diag__");
+      if (el) el.textContent = notes.join("\\n");
+    }
+    window.addEventListener("error", function (e) {
+      push("[error] " + (e && e.message ? e.message : "unknown") +
+        (e && e.filename ? " @ " + e.filename + ":" + e.lineno : ""));
+      ensure();
+    });
+    window.addEventListener("unhandledrejection", function (e) {
+      var r = e && e.reason;
+      push("[promise] " + (r && r.message ? r.message : String(r)));
+      ensure();
+    });
+    var origOnError = window.onerror;
+    window.onerror = function (msg, src, line, col, err) {
+      push("[onerror] " + msg + " @ " + src + ":" + line + ":" + col);
+      ensure();
+      if (origOnError) return origOnError.apply(window, arguments);
+    };
+    document.addEventListener("DOMContentLoaded", function () {
+      ensure();
+      push("[compat] booted");
+    });
+    window.__petaliaDiag = { push: push, clear: function(){ notes.length=0; render(); } };
+  })();
+
   var NativeWebSocket = window.WebSocket;
   if (!NativeWebSocket) return;
-  var GAME_HOSTS = /molorr-server-(?:t34o|sg|hk)\\.onrender\\.com/i;
+  var GAME_HOSTS = /molorr-server-(?:t34o|sg|hk)\.onrender\.com/i;
   function rewrite(url) {
     try {
       var u = new URL(String(url), window.location.href);
@@ -44,9 +120,27 @@ const COMPAT_JS = `
     return url;
   }
   function SandboxWebSocket(url, protocols) {
-    var args = protocols === undefined ? [rewrite(url)] : [rewrite(url), protocols];
-    var self = Reflect.construct(NativeWebSocket, args, SandboxWebSocket);
-    return self;
+    var target = rewrite(url);
+    var ws = protocols === undefined
+      ? new NativeWebSocket(target)
+      : new NativeWebSocket(target, protocols);
+    try {
+      window.__petaliaDiag && window.__petaliaDiag.push(
+        "[ws] url=" + String(url) + " -> " + String(target)
+      );
+      ws.addEventListener("open", function () {
+        window.__petaliaDiag && window.__petaliaDiag.push("[ws] open " + String(target));
+      });
+      ws.addEventListener("error", function () {
+        window.__petaliaDiag && window.__petaliaDiag.push("[ws] error " + String(target));
+      });
+      ws.addEventListener("close", function (e) {
+        window.__petaliaDiag && window.__petaliaDiag.push(
+          "[ws] close code=" + (e && e.code) + " " + String(target)
+        );
+      });
+    } catch (e) { /* ignore */ }
+    return ws;
   }
   SandboxWebSocket.prototype = NativeWebSocket.prototype;
   SandboxWebSocket.CONNECTING = NativeWebSocket.CONNECTING;
@@ -141,12 +235,15 @@ const server = http.createServer((req, res) => {
 // WebSocket upgrade → raw TCP proxy to the local game server.
 server.on("upgrade", (req, socket, head) => {
   const url = req.url || "/";
+  console.log(`[compat] ws upgrade ${req.headers.origin || "-"} -> ${url}`);
   if (url.split("?")[0] !== "/game") {
+    console.log("[compat] ws upgrade rejected: path is not /game");
     socket.destroy();
     return;
   }
 
   const client = net.connect(GAME_PORT, GAME_HOST, () => {
+    console.log(`[compat] ws upgrade connected to game server :${GAME_PORT}`);
     const lines = [`GET /game HTTP/1.1`];
     for (const [key, value] of Object.entries(req.headers)) {
       if (key.toLowerCase() === "host") continue;
