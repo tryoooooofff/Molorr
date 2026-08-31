@@ -12,11 +12,24 @@ function detectMobile() {
   );
 }
 
+/** localStorage key used to permanently dismiss the mobile Phone tip. */
+const PHONE_TIP_IGNORED_KEY = "petalia.phoneTipIgnored";
+
+/** True once the player chose "Ignore" before; the tip should never show again. */
+function isPhoneTipIgnored() {
+  if (typeof window === "undefined") return false;
+  try {
+    return localStorage.getItem(PHONE_TIP_IGNORED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
 export default function GameCanvas() {
   const ref = useRef<HTMLCanvasElement | null>(null);
   const [isMobile, setIsMobile] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [showPrompt, setShowPrompt] = useState(true);
+  const [showPrompt, setShowPrompt] = useState(() => !isPhoneTipIgnored());
 
   useEffect(() => {
     const check = () => {
@@ -32,6 +45,16 @@ export default function GameCanvas() {
       document.removeEventListener("fullscreenchange", onFsChange);
     };
   }, []);
+
+  /** Permanently hide the Phone tip once the player clicks "Ignore". */
+  const ignorePhoneTip = () => {
+    try {
+      localStorage.setItem(PHONE_TIP_IGNORED_KEY, "1");
+    } catch {
+      /* ignore */
+    }
+    setShowPrompt(false);
+  };
 
   useEffect(() => {
     const canvas = ref.current;
@@ -128,7 +151,7 @@ export default function GameCanvas() {
               ENTER FULLSCREEN
             </button>
             <button
-              onClick={() => setShowPrompt(false)}
+              onClick={ignorePhoneTip}
               style={{
                 width: "100%",
                 height: 40,
@@ -139,11 +162,28 @@ export default function GameCanvas() {
                 fontSize: 14,
                 fontWeight: 700,
                 cursor: "pointer",
+                marginBottom: 8,
+              }}
+            >
+              Ignore — don't show again
+            </button>
+            <button
+              onClick={() => setShowPrompt(false)}
+              style={{
+                width: "100%",
+                height: 36,
+                borderRadius: 10,
+                border: "none",
+                background: "transparent",
+                color: "rgba(255,255,255,0.55)",
+                fontSize: 13,
+                fontWeight: 700,
+                cursor: "pointer",
               }}
             >
               Continue without fullscreen
             </button>
-            <div style={{ marginTop: 12, fontSize: 12, opacity: 0.55 }}>
+            <div style={{ marginTop: 8, fontSize: 12, opacity: 0.55 }}>
               You can always enter fullscreen later from the browser menu or by rotating your phone to landscape.
             </div>
           </div>
