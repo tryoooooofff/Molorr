@@ -3379,6 +3379,10 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
     p.y += p.vy * dt;
     p.x = clamp(p.x, 0, map.width);
     p.y = clamp(p.y, 0, map.height);
+    // Resolve wall penetration straight after integrating the new position, so
+    // every later reader (petals, pickups, snapshots) sees a corrected p.x/p.y.
+    // Without this the player walks clean through every wall.
+    this.pushPlayerOutOfWall(p);
     p.hurtCd = Math.max(0, p.hurtCd - dt);
     const attack = (p.flags & 1) !== 0;
     const defend = (p.flags & 2) !== 0;

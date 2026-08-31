@@ -2,7 +2,7 @@ import { C2S, Writer } from "../shared/protocol";
 import type { Cell } from "../shared/sim";
 import type { Wall } from "../shared/defs";
 import { EMPTY_ITEM } from "../shared/defs";
-import { panel, button, searchField, text, roundRect, drawCard, type Rect, hit } from "./ui";
+import { panel, button, searchField, text, roundRect, drawCard, type Rect, hit, FONT_FAMILY } from "./ui";
 
 // 接口定义
 export interface PlayerBrief {
@@ -37,6 +37,8 @@ export class ArenaPanel {
   roomListRects: Rect[] = [];
   readyBtnRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
   leaveBtnRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
+  /** Top-right ✕. Panel-local coordinates, like every other rect here. */
+  closeBtnRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
   wheelCenterX = 0; wheelCenterY = 0; wheelRadius = 100;
 
   // 背包网格
@@ -70,9 +72,10 @@ export class ArenaPanel {
     this.panelX = 10;
     this.panelY = 60;
 
-    // 半透明遮罩
-    ctx.fillStyle = 'rgba(0,0,0,0.45)';
-    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    // NOTE: deliberately no full-screen scrim here. Every other panel (bag,
+    // craft, gallery, changelog…) draws straight over the scene without
+    // dimming it, and the arena panel used to be the one exception — it
+    // darkened the whole game behind it. Keeping it undimmed makes it match.
 
     // 使用现有 panel 风格（深色背景 + 黑色描边）
     panel(ctx, { x: this.panelX, y: this.panelY, w: this.panelW, h: this.panelH });
@@ -83,10 +86,62 @@ export class ArenaPanel {
     // 标题
     text(ctx, 'Arena', this.panelW / 2, 28, 22, '#ffffff', 'center');
 
+    // 关闭按钮（与成就/更新日志面板同款：右上角红色 ✕）
+    this.drawCloseButton(ctx);
+
     if (this.state === 'lobby-list') this.drawLobbyList(ctx);
     else if (this.state === 'in-room') this.drawInRoom(ctx);
     else if (this.state === 'in-game') this.drawInGame(ctx);
 
+    ctx.restore();
+  }
+
+  /**
+   * Standard red ✕ in the panel's top-right corner, matching the achievements
+   * and changelog panels. Coordinates are panel-local (the caller has already
+   * translated to panelX/panelY), and `closeBtnRect` is stored in the same
+   * space so `handleClick` can test it before anything else.
+   */
+  private drawCloseButton(ctx: CanvasRenderingContext2D) {
+    const size = 30;
+    const r: Rect = { x: this.panelW - size - 12, y: 12, w: size, h: size };
+    this.closeBtnRect = r;
+
+    const base: [number, number, number] = [220, 80, 80];
+    const shadeC = (f: number) =>
+      `rgb(${base.map((c) => Math.min(255, Math.max(0, Math.floor(c * f)))).join(',')})`;
+    const hovered = this.hoveredBtn === 'close';
+
+    ctx.save();
+    // Body
+    ctx.beginPath();
+    roundRect(ctx, r.x, r.y, r.w, r.h, 8);
+    ctx.fillStyle = shadeC(hovered ? 1.15 : 1);
+    ctx.fill();
+    // Darker top half, same as drawStyledButton elsewhere
+    ctx.save();
+    ctx.beginPath();
+    roundRect(ctx, r.x, r.y, r.w, r.h, 8);
+    ctx.clip();
+    ctx.fillStyle = shadeC(hovered ? 0.98 : 0.85);
+    ctx.fillRect(r.x, r.y, r.w, r.h / 2);
+    ctx.restore();
+    // Outline
+    ctx.strokeStyle = shadeC(0.5);
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    roundRect(ctx, r.x, r.y, r.w, r.h, 8);
+    ctx.stroke();
+    // Glyph
+    ctx.font = `18px ${FONT_FAMILY}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = '#000000';
+    ctx.lineWidth = 4;
+    ctx.strokeText('✕', r.x + r.w / 2, r.y + r.h / 2 + 1);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('✕', r.x + r.w / 2, r.y + r.h / 2 + 1);
     ctx.restore();
   }
 
@@ -210,8 +265,9 @@ export class ArenaPanel {
     const readyHovered = this.hoveredBtn === 'ready';
     button(ctx, this.readyBtnRect, this.ready ? 'stop' : 'ready', this.ready ? '#e74c3c' : '#27ae60', readyHovered, 16);
 
-    // 离开按钮
-    this.leaveBtnRect = { x: this.panelW - 85, y: 12, w: 70, h: 32 };
+    // 离开按钮 — sits to the LEFT of the ✕ (which occupies panelW-42 .. panelW-12)
+    // so the two no longer overlap. "leave" exits the room; "✕" just hides the panel.
+    this.leaveBtnRect = { x: this.panelW - 130, y: 12, w: 70, h: 32 };
     const leaveHovered = this.hoveredBtn === 'leave';
     button(ctx, this.leaveBtnRect, 'leave', '#c0392b', leaveHovered, 14);
 
@@ -298,6 +354,11 @@ export class ArenaPanel {
     this.hoveredBagSlot = -1;
     this.hoveredLoadoutSlot = -1;
     if (px < 0 || px > this.panelW || py < 0 || py > this.panelH) return;
+    // ✕ is drawn in every state, so hover-test it before the per-state controls.
+    if (hit(this.closeBtnRect, px, py)) {
+      this.hoveredBtn = 'close';
+      return;
+    }
     if (this.state === 'lobby-list') {
       if (hit(this.createBtnRect, px, py)) this.hoveredBtn = 'create';
       else if (hit(this.quickJoinBtnRect, px, py)) this.hoveredBtn = 'quick';
@@ -319,6 +380,13 @@ export class ArenaPanel {
     const px = mx - this.panelX;
     const py = my - this.panelY;
     if (px < 0 || px > this.panelW || py < 0 || py > this.panelH) return null;
+
+    // ✕ closes the panel from any state, and is tested first so it can never be
+    // shadowed by a state-specific control underneath it.
+    if (hit(this.closeBtnRect, px, py)) {
+      this.close();
+      return 'arena_close';
+    }
 
     if (this.state === 'lobby-list') {
       if (hit(this.createBtnRect, px, py)) {
