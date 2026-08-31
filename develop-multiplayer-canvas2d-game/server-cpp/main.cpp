@@ -2957,17 +2957,17 @@ public:
     p.x = clampf(newX, playerRadius, map.width - playerRadius);
     p.y = clampf(newY, playerRadius, map.height - playerRadius);
 
-    // Player-to-player push - optimized: only 120px matters
-    float ppViewRadiusSq = 120.f * 120.f;
+    // Player-to-player push - optimized but visually identical: check only within sum radii
     for (auto* o : allPlayers) {
       if (o == &p || o->mapId != p.mapId || !o->alive) continue;
-      float dx = p.x - o->x;
-      float dy = p.y - o->y;
-      if (dx * dx + dy * dy > ppViewRadiusSq) continue;
-      collisionCounter.n++;
-      float d = std::hypot(dx, dy);
       float oRadius = PLAYER_RADIUS + soilRadiusBonusOf(*o);
       float minDist = playerRadius + oRadius;
+      float checkDist = minDist + 10.f;
+      float dx = p.x - o->x;
+      float dy = p.y - o->y;
+      if (dx * dx + dy * dy > checkDist * checkDist) continue;
+      collisionCounter.n++;
+      float d = std::hypot(dx, dy);
       if (d < minDist && d > 0.001f) {
         float push = (minDist - d) * 0.5f;
         p.x += (dx / d) * push;
@@ -3213,15 +3213,16 @@ public:
         }
       }
 
-      // Petal-to-mob collision damage - optimized with prefilter
+      // Petal-to-mob collision damage - optimized but visually identical
+      // Pre-filter by player->mob distance <= orbit + mob.radius + pr + 50
       if (st.hitCd <= 0 && !isSummon) {
         float pr = def.radius * (1 + cell.rarity * 0.06f);
-        const float PETAL_PREFILTER_SQ = 260.f * 260.f;
         for (auto& mob : world.mobs) {
           if (mob.friendly && mob.ownerId == p.id) continue;
           if (mob.hp <= 0) continue;
           float mdx = mob.x - p.x, mdy = mob.y - p.y;
-          if (mdx * mdx + mdy * mdy > PETAL_PREFILTER_SQ) continue;
+          float preFilterDist = p.orbit + mob.radius + pr + 50.f;
+          if (mdx * mdx + mdy * mdy > preFilterDist * preFilterDist) continue;
           collisionCounter.n++;
           float dx = mob.x - st.x, dy = mob.y - st.y;
           float rSum = mob.radius + pr;
@@ -3370,10 +3371,12 @@ public:
       }
     }
 
-    // 构建空间网格：将当前所有 mob 插入网格
+    // 构建空间网格 + 计算最大半径（用于无损优化）
     mobGrid.clear();
+    float maxMobRadius = 60.f;
     for (int i = 0; i < (int)mobs.size(); i++) {
       mobGrid.insert(i, mobs[i].x, mobs[i].y, mobs[i].radius);
+      if (mobs[i].radius > maxMobRadius) maxMobRadius = mobs[i].radius;
     }
 
     for (int i = (int)mobs.size() - 1; i >= 0; i--) {
@@ -3534,22 +3537,24 @@ public:
       mob.pushOutCooldown = std::max(0.f, mob.pushOutCooldown - dt);
 
       // ---- Mob-to-mob collision (空间网格加速) ----
-      // Optimized: query radius 400 -> 80, reduces candidates 10x
+      // Optimized but visually identical: query radius = mob.radius + maxMobRadius + 10
+      // Guarantees any colliding pair is found, but reduces candidates 10x for typical worlds.
       bool isStationary = mob.speed <= 0;
       if (!isStationary) {
         mob.collisionTimer -= dt;
         if (mob.collisionTimer <= 0) {
           float interval = mob.speed <= MOB_COLLISION_SLOW_SPEED ? MOB_COLLISION_SLOW_INTERVAL : MOB_COLLISION_FAST_INTERVAL;
           mob.collisionTimer = interval + (float)(rand() % 20) / 1000.f;
-          auto nearby = mobGrid.query(mob.x, mob.y, mob.radius + 80);
+          auto nearby = mobGrid.query(mob.x, mob.y, mob.radius + maxMobRadius + 10.f);
           for (int otherIdx : nearby) {
             if (otherIdx == i || otherIdx >= (int)mobs.size()) continue;
             auto& other = mobs[otherIdx];
+            float minDist = mob.radius + other.radius;
+            float checkDist = minDist + 10.f;
             float dx = mob.x - other.x, dy = mob.y - other.y;
-            if (dx * dx + dy * dy > viewRadiusSq) continue; // 视野裁剪：跳过过远的生物
+            if (dx * dx + dy * dy > checkDist * checkDist) continue;
             collisionCounter.n++;
             float d = std::hypot(dx, dy);
-            float minDist = mob.radius + other.radius;
             if (d < minDist && d > 0.001f) {
               float push = (minDist - d) * 0.4f;
               mob.x += (dx / d) * push;
@@ -3602,17 +3607,18 @@ public:
         }
       }
 
-      // ---- Mob-to-player collision ---- optimized 150px
+      // ---- Mob-to-player collision ---- optimized but visually identical
       if (!mob.friendly) {
-        const float MOB_PLAYER_SQ = 150.f * 150.f;
         for (auto* p : here) {
+          float pRadius = PLAYER_RADIUS + soilRadiusBonusOf(*p);
+          float minDist = mob.radius + pRadius;
+          float checkDist = minDist + 20.f;
           float dx = p->x - mob.x, dy = p->y - mob.y;
-          if (dx * dx + dy * dy > MOB_PLAYER_SQ) continue;
+          if (dx * dx + dy * dy > checkDist * checkDist) continue;
           collisionCounter.n++;
           float d = std::hypot(dx, dy);
-          float pRadius = PLAYER_RADIUS + soilRadiusBonusOf(*p);
-          if (d < mob.radius + pRadius) {
-            float push = (mob.radius + pRadius - d) * 0.5f;
+          if (d < minDist) {
+            float push = (minDist - d) * 0.5f;
             float ux = (p->x - mob.x) / (d > 0.001f ? d : 1);
             float uy = (p->y - mob.y) / (d > 0.001f ? d : 1);
             p->x += ux * push;

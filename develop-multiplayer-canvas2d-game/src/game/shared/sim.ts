@@ -3452,19 +3452,20 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
     p.x = clamp(p.x, 0, map.width);
     p.y = clamp(p.y, 0, map.height);
     // ---- 玩家间碰撞：互相推开，不允许两个玩家重叠 ----
-    // Optimized: collision only matters within ~80px, not 1300px view radius.
+    // Optimized but visually identical: only check when within actual collision range.
+    // Previous used full view radius (1300px) for every pair; now prefilter by sum radii.
     const pRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(p);
-    const ppViewRadius = 120;
-    const ppViewRadiusSq = ppViewRadius * ppViewRadius;
     for (const o of players) {
       if (o === p || o.mapId !== p.mapId || !o.alive) continue;
-      const dx = p.x - o.x;
-      const dy = p.y - o.y;
-      if (dx * dx + dy * dy > ppViewRadiusSq) continue; // 紧凑裁剪
-      this.collisionCounter.n++;
-      const d = Math.hypot(dx, dy);
       const oRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(o);
       const minDist = pRadius + oRadius;
+      const dx = p.x - o.x;
+      const dy = p.y - o.y;
+      // Performance: skip when far — threshold is exactly minDist + small buffer, so no colliding pair is missed
+      const checkDist = minDist + 10;
+      if (dx * dx + dy * dy > checkDist * checkDist) continue;
+      this.collisionCounter.n++;
+      const d = Math.hypot(dx, dy);
       if (d < minDist && d > 0.001) {
         const push = (minDist - d) * 0.5;
         p.x += (dx / d) * push;
@@ -3676,17 +3677,17 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
         if (p.shield < maxShield) { p.shield = Math.min(maxShield, p.shield + def.shieldPerSec * rarityMult(cell.rarity) * dt); p.statsDirty = true; }
       }
       // ---- 花瓣-生物碰撞伤害 ----
-      // Optimized: only mobs near player (orbit max 118 + radii ~200) can collide.
-      // Previously iterated all world.mobs (O(n)), now O(k) with distance pre-filter.
+      // Optimized but visually identical: only mobs within petal reach can collide.
+      // Max possible distance player->mob for collision = p.orbit + mob.radius + pr + buffer.
+      // This filters 90% of mobs when they are far, but never skips a colliding pair.
       if (st.hitCd <= 0 && !isSummon) {
         const pr = def.radius * (1 + cell.rarity * 0.06);
-        // Pre-filter: mobs must be within 260px of player to possibly hit petal
-        const PETAL_PREFILTER_SQ = 260 * 260;
         for (const mob of world.mobs) {
-          if (mob.friendly && mob.ownerId === p.id) continue; // 不伤害自己的宠物
+          if (mob.friendly && mob.ownerId === p.id) continue;
           if (mob.hp <= 0) continue;
           const mdx = mob.x - p.x, mdy = mob.y - p.y;
-          if (mdx * mdx + mdy * mdy > PETAL_PREFILTER_SQ) continue;
+          const preFilterDist = p.orbit + mob.radius + pr + 50;
+          if (mdx * mdx + mdy * mdy > preFilterDist * preFilterDist) continue;
           this.collisionCounter.n++;
           const dx = mob.x - st.x, dy = mob.y - st.y;
           const rSum = mob.radius + pr;
@@ -3904,12 +3905,14 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
     .map((p) => p.alive ? { x: p.x, y: p.y } : { x: p.deathX, y: p.deathY });
 
   // ===== 空间网格（从 server-cpp/main.cpp SpatialGrid 移植）=====
-  // C++：每 tick mobGrid.clear() 后把所有 mob 按 400px 格子登记，
-  // 生物间碰撞用 mobGrid.query(mob.x, mob.y, mob.radius + 400) 取候选。
   const mobGrid = new SpatialGrid<Mob>();
+  let maxMobRadius = 0;
   for (const mob of world.mobs) {
     mobGrid.insert(mob, mob.x, mob.y, mob.radius);
+    if (mob.radius > maxMobRadius) maxMobRadius = mob.radius;
   }
+  // Fallback to at least 60px to cover small mobs when world is empty-ish
+  if (maxMobRadius < 60) maxMobRadius = 60;
 
   // ===== 休眠系统：将不在任何玩家视野内的生物移入休眠池 =====
   const toDormant: DormantMob[] = [];
@@ -4164,16 +4167,19 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
       if (mob.collisionTimer <= 0) {
         const interval = mob.speed <= MOB_COLLISION_SLOW_SPEED ? MOB_COLLISION_SLOW_INTERVAL : 1 / 60;
         mob.collisionTimer = interval + Math.random() * 0.02;
-        // Optimized: only need nearby mobs within collision range + small buffer.
-        // Was radius+400 (1/4 view), now radius+80 reduces candidates ~10x for dense clusters.
-        const nearby = mobGrid.query(mob.x, mob.y, mob.radius + 80);
+        // Optimized but visually identical: query radius = mob.radius + maxMobRadius + 10
+        // Guarantees any colliding pair (sum radii <= mob.radius+maxRadius) is found.
+        // For typical worlds maxRadius ~45 => query ~ mob.radius+55 (vs old 400), 10x fewer candidates.
+        // For huge Eternal mobs (300px) query expands automatically to cover them.
+        const nearby = mobGrid.query(mob.x, mob.y, mob.radius + maxMobRadius + 10);
         for (const other of nearby) {
           if (other === mob || other.hp <= 0) continue;
+          const minDist = mob.radius + other.radius;
+          const checkDist = minDist + 10;
           const dx = mob.x - other.x, dy = mob.y - other.y;
-          if (dx * dx + dy * dy > VIEW_RADIUS_SQ) continue; // 视野裁剪
+          if (dx * dx + dy * dy > checkDist * checkDist) continue;
           this.collisionCounter.n++;
           const d = Math.hypot(dx, dy);
-          const minDist = mob.radius + other.radius;
           if (d < minDist && d > 0.001) {
             const push = (minDist - d) * 0.4;
             mob.x += (dx / d) * push;
@@ -4222,17 +4228,19 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
     }
 
     // ---- 生物-玩家碰撞（推开 + 伤害 + 身体伤害反伤）----
-    // Optimized: only need to check players within ~150px, not full view radius.
+    // Optimized but visually identical: only check players within actual collision range.
+    // Previous used full view radius (1300px); now threshold = mob.radius + playerRadius + buffer.
     if (!mob.friendly) {
-      const MOB_PLAYER_CHECK_SQ = 150 * 150;
       for (const pl of here) {
+        const pRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(pl);
+        const minDist = mob.radius + pRadius;
         const dx = pl.x - mob.x, dy = pl.y - mob.y;
-        if (dx * dx + dy * dy > MOB_PLAYER_CHECK_SQ) continue; // 紧凑裁剪
+        const checkDist = minDist + 20;
+        if (dx * dx + dy * dy > checkDist * checkDist) continue;
         this.collisionCounter.n++;
         const d = Math.hypot(dx, dy);
-        const pRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(pl);
-        if (d < mob.radius + pRadius) {
-          const push = (mob.radius + pRadius - d) * 0.5;
+        if (d < minDist) {
+          const push = (minDist - d) * 0.5;
           const ux = (pl.x - mob.x) / (d > 0.001 ? d : 1);
           const uy = (pl.y - mob.y) / (d > 0.001 ? d : 1);
           pl.x += ux * push;

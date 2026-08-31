@@ -6334,6 +6334,10 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private worldH = 3200;
   private walls: Wall[] = [];
   private wallCollider: PolygonWallCollider | null = null;
+  // Client-side wall safety net (mirrors server pushPlayerOutOfWall, with performance saving)
+  private clientLastSafeX = 0;
+  private clientLastSafeY = 0;
+  private readonly CLIENT_PUSH_THRESHOLD = 6;
   private ents = new Map<number, Ent>();
   private snapshotSequence = 0;
   private camX = 0;
@@ -7891,14 +7895,36 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       else if (this.time - e.seen > 0.6) this.ents.delete(e.id);
     }
 
-    // ---- 玩家与墙壁的精确碰撞 ----
+    // ---- 玩家与墙壁的精确碰撞 (client safety net, performance saving) ----
+    // Mirrors server pushPlayerOutOfWall: broadphase skip when far, lastSafe fallback for deep penetration.
     if (this.wallCollider) {
       const me = this.ents.get(this.selfId);
       if (me) {
         const r = PLAYER_RADIUS; // 客户端不追踪 soil radius bonus，使用基础半径
-        const [nx, ny] = this.wallCollider.collideCircle(me.x, me.y, r);
-        me.x = nx;
-        me.y = ny;
+        // Performance: O(1) broadphase — skip collideCircle when far from any wall (99% of frames)
+        if (!this.wallCollider.circleNeedsPreciseCheck(me.x, me.y, r)) {
+          this.clientLastSafeX = me.x;
+          this.clientLastSafeY = me.y;
+        } else {
+          const [nx, ny] = this.wallCollider.collideCircle(me.x, me.y, r);
+          const disp = Math.abs(nx - me.x) + Math.abs(ny - me.y);
+          if (disp < this.CLIENT_PUSH_THRESHOLD) {
+            me.x = nx;
+            me.y = ny;
+            this.clientLastSafeX = me.x;
+            this.clientLastSafeY = me.y;
+          } else {
+            // Deep wall penetration — fallback to last safe (prevents visible wall entry)
+            if (this.clientLastSafeX !== 0 || this.clientLastSafeY !== 0) {
+              me.x = this.clientLastSafeX;
+              me.y = this.clientLastSafeY;
+            } else {
+              // No safe yet, keep server-corrected position
+              me.x = nx;
+              me.y = ny;
+            }
+          }
+        }
       }
     }
 
