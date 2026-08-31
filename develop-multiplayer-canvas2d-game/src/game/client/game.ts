@@ -5348,11 +5348,11 @@ class ShopSystem {
     const px = W / 2 - this.PW / 2; // 设计坐标
     const py = H / 2 - this.PH / 2;
     this.closeBtn = { x: px + this.PW - 46, y: py + 8, w: 36, h: 36 };
-    const tabW = 148;
-    const tabH = 36;
-    const gap = 8;
-    const tabX = px + 20;
-    const tabY = py + 62;
+    const tabW = 102;
+    const tabH = 34;
+    const gap = 6;
+    const tabX = px + 22;
+    const tabY = py + 54;
     this.tabRects = {
       buy: { x: tabX, y: tabY, w: tabW, h: tabH },
       membership: { x: tabX + tabW + gap, y: tabY, w: tabW, h: tabH },
@@ -5758,18 +5758,18 @@ private darkenColor(color: string, percent: number): string {
     // 主背景(参考 ShopSystem.draw 的青色主题)
     ctx.fillStyle = "#22C1E9";
     ctx.beginPath();
-    roundRect(ctx, px, py, this.PW, this.PH, 12);
+    roundRect(ctx, px, py, this.PW, this.PH, 5);
     ctx.fill();
     ctx.strokeStyle = "#0B7894";
     ctx.lineWidth = 5;
     ctx.beginPath();
-    roundRect(ctx, px, py, this.PW, this.PH, 12);
+    roundRect(ctx, px, py, this.PW, this.PH, 5);
     ctx.stroke();
 
     // 标题 + 星星(金铜色五角星图标 + 数量文本)
-    this.drawStrokedText(ctx, "Shop", px + this.PW / 2, py + 30, 26, "center", "#ffffff");
-    drawStarIcon(ctx, px + this.PW - 118, py + 30, 13);
-    this.drawStrokedText(ctx, this.formatPrice(this.game.stars), px + this.PW - 140, py + 30, 24, "right", "#ffd700");
+    this.drawStrokedText(ctx, "Shop", px + this.PW / 2, py + 32, 28, "center", "#ffffff");
+    drawStarIcon(ctx, px + this.PW - 74, py + 32, 13);
+    this.drawStrokedText(ctx, this.formatPrice(this.game.stars), px + this.PW - 16, py + 32, 24, "right", "#ffd700");
 
     // 关闭按钮(与成就面板同款:红色渐变圆角按钮)
     this.drawStyledButton(
@@ -5793,7 +5793,7 @@ private darkenColor(color: string, percent: number): string {
         tabName === "redeem"
           ? active ? [155, 89, 182] : [108, 52, 131]
           : active ? [255, 215, 0] : [30, 48, 80];
-      this.drawStyledButton(ctx, label, [r.x, r.y, r.w, r.h], base, 15);
+      this.drawStyledButton(ctx, label, [r.x, r.y, r.w, r.h], base, 14);
     }
 
     if (this.currentTab === "buy") this.drawBuyTab(ctx, px, py);
@@ -5857,6 +5857,7 @@ private darkenColor(color: string, percent: number): string {
     ctx.clip();
     ctx.translate(0, -this.scrollOffset);
     this._shopCardRects = [];
+    let hoverTooltip: { item: number; rarity: number } | null = null;
     for (let i = 0; i < filtered.length; i++) {
       const entry = filtered[i];
       const col = i % COLS;
@@ -5872,16 +5873,17 @@ private darkenColor(color: string, percent: number): string {
       const price = this.getDiscountedPrice(entry.item, rarity);
       const cardScreenRect: Rect = { x: gx, y: gy - this.scrollOffset, w: SLOT_W, h: SLOT_H };
       const hovered = this.hitRect(cardScreenRect, this.mouseX, this.mouseY);
+      if (hovered) hoverTooltip = { item: entry.item, rarity };
 
       // 卡片背景
       ctx.fillStyle = "#78B8C9";
       ctx.beginPath();
-      roundRect(ctx, gx, gy, SLOT_W, SLOT_H, 8);
+      roundRect(ctx, gx, gy, SLOT_W, SLOT_H, 5);
       ctx.fill();
       ctx.strokeStyle = isDisc ? "#ffd700" : "#1a3050";
       ctx.lineWidth = isDisc ? 4 : 2;
       ctx.beginPath();
-      roundRect(ctx, gx, gy, SLOT_W, SLOT_H, 8);
+      roundRect(ctx, gx, gy, SLOT_W, SLOT_H, 5);
       ctx.stroke();
 
       // 卡片内容(图标+名称+稀有度行)在卡片矩形内 clip;切换稀有度时旧/新两帧水平滑动
@@ -5931,6 +5933,19 @@ private darkenColor(color: string, percent: number): string {
       });
     }
     ctx.restore();
+
+    // Hover tooltip (rarity-scaled stats) for the card under the cursor.
+    if (hoverTooltip) {
+      TooltipSystem.drawItemTooltip(
+        ctx,
+        { item: hoverTooltip.item, rarity: hoverTooltip.rarity, count: 1 },
+        this.mouseX + 14,
+        this.mouseY - 10,
+        this.PW,
+        this.PH,
+        null, // talent bonuses are rendered by the main UI tooltip; keep this lightweight
+      );
+    }
 
     // 滚动条
     if (maxOff > 0) {
