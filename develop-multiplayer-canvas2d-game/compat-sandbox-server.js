@@ -175,10 +175,14 @@ function replaceHost(headers) {
   for (const [k, v] of Object.entries(headers)) {
     const key = k.toLowerCase();
     if (key === "host") continue;
-    if (key === "accept-encoding") continue; // keep upstream uncompressed so we can patch HTML
+    // The browser sends the preview host in Origin. Next.js treats that as a
+    // cross-origin dev host and can block dev resources, so present the
+    // internal Next origin to it.
+    if (key === "origin" || key === "accept-encoding") continue;
     out[k] = v;
   }
   out.host = `${NEXT_HOST}:${NEXT_PORT}`;
+  out.origin = `http://${NEXT_HOST}:${NEXT_PORT}`;
   out["accept-encoding"] = "identity";
   return out;
 }
@@ -307,9 +311,14 @@ server.on("upgrade", (req, socket, head) => {
     const lines = [`GET ${targetPath} HTTP/1.1`];
     for (const [key, value] of Object.entries(req.headers)) {
       if (key.toLowerCase() === "host") continue;
+      // Next.js blocks cross-origin dev WebSocket upgrades (HMR) unless the
+      // Origin matches its own dev host. The browser uses the preview host,
+      // so present the internal Next origin when forwarding these upgrades.
+      if (!isGame && key.toLowerCase() === "origin") continue;
       lines.push(`${key}: ${value}`);
     }
     lines.push(`host: ${targetHost}:${targetPort}`);
+    if (!isGame) lines.push(`origin: http://${targetHost}:${targetPort}`);
     client.write(lines.join("\r\n") + "\r\n\r\n");
     if (head && head.length) client.write(head);
 
