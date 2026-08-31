@@ -42,6 +42,7 @@ import {
   xpForLevel,
   antennaeViewBonus,
   thirdEyeOrbitBonus,
+  orbitsAsPetal,
   ANTENNAE_ITEM,
   THIRD_EYE_ITEM,
 } from "../shared/defs";
@@ -6276,6 +6277,14 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private selfId = 0;
   private inputTimer = 0;
 
+  // ---- Client-authoritative movement ----
+  // The browser has the most accurate local player calculation, so it is the
+  // source of truth for the player's world position. The server threads that
+  // position into petal placement when it receives each C2S.INPUT packet.
+  private localAuthActive = false;
+  private clientVx = 0;
+  private clientVy = 0;
+
   // ---- Debug overlay (Settings → Debug Info) ----
   /** Smoothed frames-per-second, recomputed once a second from real (unclamped) frame deltas. */
   private debugFps = 0;
@@ -7291,6 +7300,11 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       this.ents.clear();
       this.roseParticles.length = 0;
       this.mapFlash = 1;
+      // A new world starts from the server's next snapshot. Until that sync
+      // lands, the local player cannot claim authority over its position.
+      this.localAuthActive = false;
+      this.clientVx = 0;
+      this.clientVy = 0;
       this.chat.addMessage("Welcome! Press [Enter] to chat. type /help for help", "System", true);
       // 将本地 loadout 同步到服务器（服务器在 JOIN 时创建了空列表）
       this.syncAllLoadoutsToServer();
@@ -7331,6 +7345,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
           rarity = r.u8();
         }
 
+        const isSelf = id === this.selfId;
         let e = this.ents.get(id);
         if (!e) {
           e = {
@@ -7363,8 +7378,24 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         e.kind = kind;
         e.type = etype;
         e.team = team;
-        e.tx = x;
-        e.ty = y;
+        // Once the local sim is authoritative, never let a networked snapshot
+        // move the local player back — the browser's calculated position is
+        // sent on the next INPUT packet and the server mirrors it for petals.
+        // When authority is paused (spawn / map change / death respawn) the
+        // first server snapshot re-seeds the client position before handing
+        // authority back.
+        const keepLocalSelf = isSelf && this.localAuthActive;
+        if (!keepLocalSelf) {
+          e.tx = x;
+          e.ty = y;
+          if (isSelf) {
+            e.x = x;
+            e.y = y;
+            this.localAuthActive = true;
+            this.clientVx = 0;
+            this.clientVy = 0;
+          }
+        }
         e.angle = angle;
         e.radius = radius;
         e.hp = hp;
@@ -7443,6 +7474,13 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       this.maxHp = r.u16();
       this.mapId = r.u8();
       this.alive = r.u8() === 1;
+      // When the flower dies it stops owning its position. The next snapshot
+      // after respawn re-seeds the client position before authority resumes.
+      if (!this.alive) {
+        this.localAuthActive = false;
+        this.clientVx = 0;
+        this.clientVy = 0;
+      }
       const oracleSecLeft = r.u32();
       const tradeSecLeft = r.u32();
       const now = Date.now();
@@ -7895,6 +7933,11 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       else if (this.time - e.seen > 0.6) this.ents.delete(e.id);
     }
 
+    // Client-authoritative local player. Run before the wall safety net so the
+    // self entity is at the position the browser calculated, then walls can
+    // still knock the flower out of a wall before it is sent to the server.
+    this.updateLocalAuthoritativePlayer(dt);
+
     // ---- 玩家与墙壁的精确碰撞 (client safety net, performance saving) ----
     // Mirrors server pushPlayerOutOfWall: broadphase skip when far, lastSafe fallback for deep penetration.
     if (this.wallCollider) {
@@ -8017,19 +8060,12 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     }
   }
 
-  private sendInput() {
-    if (!this.net || !this.connected) return;
-
-    // While the AFK prompt is up the world is frozen for this player: send a
-    // neutral packet so a parked mouse/held key can't keep driving the flower
-    // (and, since it never changes, it can't satisfy the check either).
-    if (this.afkPending) {
-      const w = new Writer(8);
-      w.u8(C2S.INPUT).i8(0).i8(0).u8(0);
-      this.net.send(w.bytes());
-      return;
-    }
-
+  /**
+   * Local player input vector used both by the client-authoritative position
+   * simulator and by the INPUT packet. Mirrors the previous sendInput logic.
+   */
+  private computeInputVector(): { dx: number; dy: number } {
+    if (this.afkPending) return { dx: 0, dy: 0 };
     let dx = 0;
     let dy = 0;
     const uiBusy = this.drag !== null || this.bagAnim > 0.4 || this.craftAnim > 0.4 || this.chat.inputActive;
@@ -8060,10 +8096,8 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       }
     } else {
       // Desktop: mouse movement is measured from the camera/screen centre
-      // (where the player is rendered). The server remains authoritative for
-      // acceleration, wall collision, and map bounds; this is only the desired
-      // direction. Close to the player, reduce the input so it eases to a stop
-      // instead of continuously overshooting the cursor.
+      // (where the player is rendered). Close to the player, reduce the input
+      // so it eases to a stop instead of continuously overshooting the cursor.
       const mouseDx = this.mx - this.w / 2;
       const mouseDy = this.my - this.h / 2;
       const mouseDistance = Math.hypot(mouseDx, mouseDy);
@@ -8080,6 +8114,82 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         if (this.keys.has("KeyS") || this.keys.has("ArrowDown")) dy += 1;
       }
     }
+    return { dx, dy };
+  }
+
+  /** Client-side mirror of the server's move speed formula. */
+  private computeClientMoveSpeed(): number {
+    let speedBonus = 0;
+    for (let i = 0; i < SLOT_COUNT; i++) {
+      const cell = this.slots[i];
+      if (!cell) continue;
+      const def = ITEMS[cell.item];
+      if (!def) continue;
+      // Reuse the per-slot reload progress from the snapshot: a slot is only
+      // contributing its speed while the petal is alive (reload === 1).
+      const alive = orbitsAsPetal(def.kind) ? (this.slotReload[i] ?? 1) >= 1 : true;
+      if (!alive) continue;
+      if (def.speed) speedBonus += def.speed * (1 + cell.rarity * 0.12);
+    }
+    return (190 + this.level * 0.8) * (1 + speedBonus / 100) * (this.talentBonuses?.speedMult ?? 1);
+  }
+
+  /**
+   * The browser owns the local player's world position. Every frame we run a
+   * small mirror of the server movement model and keep the self entity in sync.
+   * The same position is sent to the server in INPUT so it can place petals
+   * (and the rest of the local simulation) around the client-accurate spot.
+   */
+  private updateLocalAuthoritativePlayer(dt: number) {
+    if (!this.localAuthActive || this.scene !== "game") return;
+    const me = this.ents.get(this.selfId);
+    if (!me || !this.alive) return;
+
+    const { dx, dy } = this.computeInputVector();
+    const speed = this.computeClientMoveSpeed();
+    const mag = Math.hypot(dx, dy);
+    const nx = mag > 1 ? dx / mag : dx;
+    const ny = mag > 1 ? dy / mag : dy;
+    const k = Math.min(1, dt * 9);
+    this.clientVx += (nx * speed - this.clientVx) * k;
+    this.clientVy += (ny * speed - this.clientVy) * k;
+    if (this.afkPending) {
+      this.clientVx = 0;
+      this.clientVy = 0;
+    }
+    let nextX = me.x + this.clientVx * dt;
+    let nextY = me.y + this.clientVy * dt;
+    // Keep the client position inside the world the server knows about. The
+    // client wall safety net below handles precise wall collision.
+    if (this.wallCollider) {
+      nextX = Math.max(0, Math.min(this.worldW, nextX));
+      nextY = Math.max(0, Math.min(this.worldH, nextY));
+    }
+    me.x = nextX;
+    me.y = nextY;
+    me.tx = nextX;
+    me.ty = nextY;
+  }
+
+  private sendInput() {
+    if (!this.net || !this.connected) return;
+
+    const me = this.ents.get(this.selfId);
+    const hasPos = this.localAuthActive && !!me;
+
+    // While the AFK prompt is up the world is frozen for this player: send a
+    // neutral packet so a parked mouse/held key can't keep driving the flower
+    // (and, since it never changes, it can't satisfy the check either).
+    if (this.afkPending) {
+      const w = new Writer(12);
+      w.u8(C2S.INPUT).i8(0).i8(0).u8(0);
+      if (hasPos) w.i16(Math.round(me!.x)).i16(Math.round(me!.y));
+      this.net.send(w.bytes());
+      return;
+    }
+
+    const { dx, dy } = this.computeInputVector();
+    const uiBusy = this.drag !== null || this.bagAnim > 0.4 || this.craftAnim > 0.4 || this.chat.inputActive;
     let flags = 0;
     const isSpaceDown = this.keys.has("Space") || this.mobileSpreadActive;
     const isShiftDown = this.keys.has("ShiftLeft") || this.keys.has("ShiftRight") || this.keys.has("Shift") || this.mobileContractActive;
@@ -8087,8 +8197,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     // Keep mouse buttons as well for usability: left click = spread, right click = contract
     if ((this.mouseDown && !uiBusy) || isSpaceDown) flags |= 1;
     if (this.rightDown || isShiftDown) flags |= 2;
-    const w = new Writer(8);
+    const w = new Writer(12);
     w.u8(C2S.INPUT).i8(dx * 100).i8(dy * 100).u8(flags);
+    if (hasPos) w.i16(Math.round(me!.x)).i16(Math.round(me!.y));
     this.net.send(w.bytes());
   }
 
