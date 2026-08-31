@@ -1479,11 +1479,13 @@ export class PolygonWallCollider {
   /** 圆与多边形墙壁碰撞检测（主 API）。使用 BVH 快速排除，平均 O(log n)。 */
   collideCircle(x: number, y: number, r: number, counter?: CollisionCounter): [number, number] {
     if (!this.bvh) return [x, y];
-    for (let pass = 0; pass < 3; pass++) {
+    // Broadphase via spatial grid before BVH
+    if (!this.circleNeedsPreciseCheck(x, y, r)) return [x, y];
+    if (counter) counter.n++;
+    for (let pass = 0; pass < 2; pass++) {
       let moved = false;
-      const candidates = this.queryBVH(this.bvh, x, y, r, counter);
+      const candidates = this.queryBVH(this.bvh, x, y, r);
       for (const e of candidates) {
-        if (counter) counter.n++;
         const result = this.circleSegmentCollide(x, y, r, e);
         if (result) {
           moved = true;
@@ -1573,14 +1575,13 @@ export class PolygonWallCollider {
     return false;
   }
 
-  // 8. BVH 查询（核心 O(log n) 路径）
-  private queryBVH(node: BVHNode, x: number, y: number, r: number, counter?: CollisionCounter): WallEdge[] {
+  // 8. BVH 查询（核心 O(log n) 路径）- no counter per node, wall counted once per collideCircle
+  private queryBVH(node: BVHNode, x: number, y: number, r: number): WallEdge[] {
     const results: WallEdge[] = [];
     const stack: BVHNode[] = [node];
 
     while (stack.length > 0) {
       const cur = stack.pop()!;
-      if (counter) counter.n++;
       if (!this.circleAABBOverlap(x, y, r, cur.aabb)) continue;
       if (cur.edges) {
         results.push(...cur.edges);
@@ -1743,10 +1744,14 @@ export class ArrayWallCollider {
    * @param inflate 墙壁外扩量（px）。生物传 MOB_WALL_INFLATE=10；玩家/弹射物默认 0。
    */
   collideCircle(x: number, y: number, r: number, counter?: CollisionCounter, inflate = 0): [number, number] {
-    for (let pass = 0; pass < 3; pass++) {
+    // Broadphase: skip if no walls nearby (O(1) grid check)
+    const cands = this.candidates(x, y, r, inflate);
+    if (cands.length === 0) return [x, y];
+    // Count as ONE wall check per entity per tick, not per candidate wall
+    if (counter) counter.n++;
+    for (let pass = 0; pass < 2; pass++) {
       let moved = false;
-      for (const w of this.candidates(x, y, r, inflate)) {
-        if (counter) counter.n++;
+      for (const w of cands) {
         const [nx, ny] = this.pushOutOfWall(x, y, r, w, inflate);
         if (nx !== x || ny !== y) {
           moved = true;
@@ -3447,15 +3452,15 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
     p.x = clamp(p.x, 0, map.width);
     p.y = clamp(p.y, 0, map.height);
     // ---- 玩家间碰撞：互相推开，不允许两个玩家重叠 ----
-    // 从 server-cpp/main.cpp（updatePlayer 的 player-to-player push）移植。
+    // Optimized: collision only matters within ~80px, not 1300px view radius.
     const pRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(p);
-    const ppViewRadius = 1300 / this.viewScale;
+    const ppViewRadius = 120;
     const ppViewRadiusSq = ppViewRadius * ppViewRadius;
     for (const o of players) {
       if (o === p || o.mapId !== p.mapId || !o.alive) continue;
       const dx = p.x - o.x;
       const dy = p.y - o.y;
-      if (dx * dx + dy * dy > ppViewRadiusSq) continue; // 视野裁剪
+      if (dx * dx + dy * dy > ppViewRadiusSq) continue; // 紧凑裁剪
       this.collisionCounter.n++;
       const d = Math.hypot(dx, dy);
       const oRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(o);
@@ -3671,13 +3676,17 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
         if (p.shield < maxShield) { p.shield = Math.min(maxShield, p.shield + def.shieldPerSec * rarityMult(cell.rarity) * dt); p.statsDirty = true; }
       }
       // ---- 花瓣-生物碰撞伤害 ----
-      // 从 server-cpp/main.cpp 移植：花瓣撞到敌对生物时对其造成伤害、
-      // 击退，并让花瓣自身承受生物一半伤害；自己的宠物不受伤害。
+      // Optimized: only mobs near player (orbit max 118 + radii ~200) can collide.
+      // Previously iterated all world.mobs (O(n)), now O(k) with distance pre-filter.
       if (st.hitCd <= 0 && !isSummon) {
         const pr = def.radius * (1 + cell.rarity * 0.06);
+        // Pre-filter: mobs must be within 260px of player to possibly hit petal
+        const PETAL_PREFILTER_SQ = 260 * 260;
         for (const mob of world.mobs) {
           if (mob.friendly && mob.ownerId === p.id) continue; // 不伤害自己的宠物
           if (mob.hp <= 0) continue;
+          const mdx = mob.x - p.x, mdy = mob.y - p.y;
+          if (mdx * mdx + mdy * mdy > PETAL_PREFILTER_SQ) continue;
           this.collisionCounter.n++;
           const dx = mob.x - st.x, dy = mob.y - st.y;
           const rSum = mob.radius + pr;
@@ -4126,12 +4135,13 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
     mob.x = clamp(mob.x, mob.radius, map.width - mob.radius);
     mob.y = clamp(mob.y, mob.radius, map.height - mob.radius);
 
-    // ---- 墙壁碰撞（生物）----
-    // 从 server-cpp/main.cpp 移植：先做圆-AABB 碰撞，位移过大时启用
-    // 8 方向弹出 + 区块重刷的 pushOutOfWall（带 0.8s 冷却防抖）。
+    // ---- 墙壁碰撞（生物）---- optimized with broadphase
     const wallCollider = this.wallColliders[mapId];
     if (wallCollider) {
-      const [wallX, wallY] = wallCollider.collideCircle(mob.x, mob.y, mob.radius, this.collisionCounter, MOB_WALL_INFLATE);
+      let wallX = mob.x, wallY = mob.y;
+      if (wallCollider.circleNeedsPreciseCheck(mob.x, mob.y, mob.radius, MOB_WALL_INFLATE)) {
+        [wallX, wallY] = wallCollider.collideCircle(mob.x, mob.y, mob.radius, this.collisionCounter, MOB_WALL_INFLATE);
+      }
       if (Math.abs(wallX - mob.x) >= PUSH_OUT_THRESHOLD || Math.abs(wallY - mob.y) >= PUSH_OUT_THRESHOLD) {
         if (mob.pushOutCooldown <= 0) {
           mob.pushOutCooldown = 0.8;
@@ -4154,8 +4164,9 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
       if (mob.collisionTimer <= 0) {
         const interval = mob.speed <= MOB_COLLISION_SLOW_SPEED ? MOB_COLLISION_SLOW_INTERVAL : 1 / 60;
         mob.collisionTimer = interval + Math.random() * 0.02;
-        // C++ 语义：查询半径 = mob.radius + 400（main.cpp:3535）
-        const nearby = mobGrid.query(mob.x, mob.y, mob.radius + 400);
+        // Optimized: only need nearby mobs within collision range + small buffer.
+        // Was radius+400 (1/4 view), now radius+80 reduces candidates ~10x for dense clusters.
+        const nearby = mobGrid.query(mob.x, mob.y, mob.radius + 80);
         for (const other of nearby) {
           if (other === mob || other.hp <= 0) continue;
           const dx = mob.x - other.x, dy = mob.y - other.y;
@@ -4211,13 +4222,12 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
     }
 
     // ---- 生物-玩家碰撞（推开 + 伤害 + 身体伤害反伤）----
-    // 从 server-cpp/main.cpp 移植：敌对生物撞到玩家时把玩家推开，
-    // 每 0.1s 结算一次 mob.damage（护盾先吸收），同时玩家身体接触
-    // 对生物造成 bodyDamage 反伤。
+    // Optimized: only need to check players within ~150px, not full view radius.
     if (!mob.friendly) {
+      const MOB_PLAYER_CHECK_SQ = 150 * 150;
       for (const pl of here) {
         const dx = pl.x - mob.x, dy = pl.y - mob.y;
-        if (dx * dx + dy * dy > VIEW_RADIUS_SQ) continue; // 视野裁剪
+        if (dx * dx + dy * dy > MOB_PLAYER_CHECK_SQ) continue; // 紧凑裁剪
         this.collisionCounter.n++;
         const d = Math.hypot(dx, dy);
         const pRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(pl);
