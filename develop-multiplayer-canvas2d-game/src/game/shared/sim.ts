@@ -4562,10 +4562,18 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
     return total;
   }
 
+  /** Basic attract radius = player radius (including soil bonus) + 20px. Guaranteed collection. */
+  private basicPickupRadiusFor(p: Player): number {
+    return PLAYER_RADIUS + this.soilRadiusBonusOf(p) + 20;
+  }
+
   private pickupDrops(p: Player, dt: number) {
     if (!p.alive) return;
     const world = this.worlds[p.mapId];
-    const magnetRange = this.magnetRangeFor(p);
+    const basicRadius = this.basicPickupRadiusFor(p);
+    const magnetBonus = this.magnetRangeFor(p);
+    // Magnet operating method: additive radius (basic + magnet bonus), same numbers as before
+    const totalMagnetRange = basicRadius + magnetBonus;
     let looted = 0;
     for (let i = world.drops.length - 1; i >= 0; i--) {
       const d = world.drops[i];
@@ -4578,19 +4586,17 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
 
       const dist = Math.hypot(d.x - p.x, d.y - p.y);
 
-      // Magnet 快速吸取：0.5 秒直达玩家中心
-      if (magnetRange > 0 && dist < magnetRange) {
+      // Unified attraction: basicRadius (player radius +20) is 100% collect, magnet adds
+      if (dist < totalMagnetRange) {
         if (d.suctionTimer <= 0) {
-          d.suctionTimer = 0.2;
+          d.suctionTimer = 0.25;
         }
         const move = dist * dt / Math.max(d.suctionTimer, dt);
         if (dist > 0.001) {
           d.x += ((p.x - d.x) / dist) * move;
           d.y += ((p.y - d.y) / dist) * move;
         }
-
-        // 吸取到达或足够近时自动拾取
-        if (dist < 20 || d.suctionTimer <= dt) {
+        if (dist < 16 || d.suctionTimer <= dt) {
           if (this.addItem(p, d.item, d.rarity, d.count)) {
             world.drops.splice(i, 1);
             const c = this.clientOf(p.id);
@@ -4599,17 +4605,7 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
           continue;
         }
       } else {
-        // 离开 magnet 范围，重置吸取状态
         d.suctionTimer = 0;
-      }
-
-      // 无 magnet 时的正常拾取
-      if (dist < 50) {
-        if (this.addItem(p, d.item, d.rarity, d.count)) {
-          world.drops.splice(i, 1);
-          const c = this.clientOf(p.id);
-          if (c) this.pushEvent(c, EVT.LOOT, d.x, d.y - (looted++ % 3) * 18, 0, d.item, d.rarity);
-        }
       }
     }
   }

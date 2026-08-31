@@ -3724,10 +3724,16 @@ public:
   }
 
   // ---- Pickup drops ----
+  float basicPickupRadiusFor(Player& p) {
+    return PLAYER_RADIUS + soilRadiusBonusOf(p) + 20.f;
+  }
+
   void pickupDrops(Player& p, float dt) {
     if (!p.alive) return;
     World& world = worlds[p.mapId];
-    float magnetRange = magnetRangeFor(p);
+    float basicRadius = basicPickupRadiusFor(p);
+    float magnetBonus = magnetRangeFor(p);
+    float totalMagnetRange = basicRadius + magnetBonus; // additive magnet
     int looted = 0;
 
     for (int i = (int)world.drops.size() - 1; i >= 0; i--) {
@@ -3739,15 +3745,16 @@ public:
 
       float dist = std::hypot(d.x - p.x, d.y - p.y);
 
-      // Magnet attraction
-      if (magnetRange > 0 && dist < magnetRange) {
-        if (d.suctionTimer <= 0) d.suctionTimer = 0.2f;
+      // Unified attraction: basicRadius is 100% collect (player radius +20)
+      // magnetBonus adds to radius, same collection logic, with suction animation.
+      if (dist < totalMagnetRange) {
+        if (d.suctionTimer <= 0) d.suctionTimer = 0.25f;
         float move = dist * dt / std::max(d.suctionTimer, dt);
         if (dist > 0.001f) {
           d.x += ((p.x - d.x) / dist) * move;
           d.y += ((p.y - d.y) / dist) * move;
         }
-        if (dist < 20 || d.suctionTimer <= dt) {
+        if (dist < 16 || d.suctionTimer <= dt) {
           if (addItem(p, d.item, d.rarity, d.count)) {
             world.drops.erase(world.drops.begin() + i);
             looted++;
@@ -3756,14 +3763,6 @@ public:
         }
       } else {
         d.suctionTimer = 0;
-      }
-
-      // Normal pickup
-      if (dist < 50) {
-        if (addItem(p, d.item, d.rarity, d.count)) {
-          world.drops.erase(world.drops.begin() + i);
-          looted++;
-        }
       }
     }
 

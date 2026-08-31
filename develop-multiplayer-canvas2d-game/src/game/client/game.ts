@@ -115,6 +115,12 @@ interface Ent {
   seenSnapshot: number;
   hurt: number;
   spawn: number;
+  /** Time (client `this.time`) when this drop was first seen — used for spawn rotate/scale */
+  dropFirstSeen?: number;
+  /** Distance to player when suction first became true — used for shrink denominator */
+  suctionStartDist?: number;
+  /** Last frame suction state for edge detection */
+  _prevSuction?: boolean;
   spreadMode?: boolean;
   contractMode?: boolean;
   mousePosition?: { x: number; y: number };
@@ -7343,6 +7349,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
             seenSnapshot: snapshotSequence,
             hurt: 0,
             spawn: 0,
+            dropFirstSeen: kind === ENT.DROP ? this.time : undefined,
+            suctionStartDist: undefined,
+            _prevSuction: false,
           };
           this.ents.set(id, e);
         }
@@ -7356,6 +7365,26 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         e.radius = radius;
         e.hp = hp;
         e.rarity = rarity;
+        // Track suction edge for drop shrink animation
+        if (kind === ENT.DROP) {
+          if (e.dropFirstSeen === undefined) e.dropFirstSeen = this.time;
+          const prev = e._prevSuction ?? false;
+          if (suction && !prev) {
+            const me = this.ents.get(this.selfId);
+            if (me) {
+              e.suctionStartDist = Math.hypot(me.x - e.x, me.y - e.y);
+            } else {
+              // Fallback: use current radius as start distance or a reasonable default
+              e.suctionStartDist = Math.max(30, Math.hypot(e.tx - e.x, e.ty - e.y) + 40);
+              // If still small, use 100
+              if (!e.suctionStartDist || e.suctionStartDist < 20) e.suctionStartDist = 100;
+            }
+          }
+          if (!suction) {
+            e.suctionStartDist = undefined;
+          }
+          e._prevSuction = suction;
+        }
         e.suction = suction;
         if (name) e.name = name;
         e.seen = this.time;
@@ -13284,33 +13313,58 @@ drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
     const size = 46;
     const stack = Math.max(1, Math.round(e.hp * 255));
 
-    // 磁铁吸取中的掉落物：卡片不再随距离缩小（保持原大小），仅保留
-    // 淡出效果以示正在被吸向玩家。服务器标记 suction = 掉落物落入
-    // 磁铁吸取范围、正在被快速吸向玩家。
+    // Animation states:
+    // - spawn 0.3s: rotate 0->2PI, scale 0->1
+    // - idle on ground: pulse scale 1+sin(time*3+id)*0.1, rotation 0
+    // - suction (guaranteed collect): shrink = clamp(dist / suctionStartDist,0,1), no pulse, no extra scaling
+    let rotation = 0;
     let scale = 1;
-    let alpha = 1;
+
     if (e.suction) {
       const me = this.ents.get(this.selfId);
       if (me) {
         const dx = me.x - e.x;
         const dy = me.y - e.y;
         const d = Math.hypot(dx, dy);
-        const SUCK_START = 220; // world px — start fading at this distance
-        const SUCK_END = 24;    // world px — fully gone once this close
-        if (d < SUCK_START) {
-          const t = Math.max(0, Math.min(1, (d - SUCK_END) / (SUCK_START - SUCK_END)));
-          scale = 1;            // 保持原大小，不再缩放
-          alpha = 0.25 + t * 0.75;
+        const start = e.suctionStartDist ?? Math.max(d, 20);
+        // As drop approaches player, it becomes smaller and smaller.
+        // No pulse scaling while being sucked.
+        if (start > 1) {
+          scale = Math.max(0, Math.min(1, d / start));
+        } else {
+          scale = 1;
         }
+      } else {
+        // No self yet — keep full size
+        scale = 1;
+      }
+      rotation = 0;
+    } else {
+      const firstSeen = e.dropFirstSeen ?? this.time;
+      const tSpawn = this.time - firstSeen;
+      const SPAWN_DUR = 0.3;
+      if (tSpawn < SPAWN_DUR && tSpawn >= 0) {
+        const p = Math.max(0, Math.min(1, tSpawn / SPAWN_DUR));
+        // Spawn: rotate 0->2PI, scale 0->1
+        rotation = p * Math.PI * 2;
+        scale = p;
+        // Avoid exact 0 so card is visible immediately
+        if (scale < 0.01) scale = 0.01;
+      } else {
+        // Idle on ground: no rotation, gentle pulse +-10%
+        rotation = 0;
+        scale = 1 + Math.sin(this.time * 3 + e.id) * 0.1;
       }
     }
 
-    const finalSize = size * scale;
+    // Outer transform: translate + rotate + scale, inner drawCard at origin
     this.ctx.save();
-    this.ctx.globalAlpha = alpha;
+    this.ctx.translate(e.x, e.y + bob);
+    if (rotation !== 0) this.ctx.rotate(rotation);
+    if (scale !== 1) this.ctx.scale(scale, scale);
     drawCard(
       this.ctx,
-      { x: e.x - finalSize / 2, y: e.y - finalSize / 2 + bob * scale, w: finalSize, h: finalSize },
+      { x: -size / 2, y: -size / 2, w: size, h: size },
       { item: e.type, rarity: e.team, count: stack },
       { dim: 0.94 },
     );
