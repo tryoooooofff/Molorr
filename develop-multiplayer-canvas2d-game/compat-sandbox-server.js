@@ -165,12 +165,22 @@ function replaceHost(headers) {
 }
 
 function injectCompat(body) {
-  const needle = "</head>";
-  const idx = body.indexOf(needle);
-  if (idx === -1) return body;
+  // Inject as the very first thing inside <head> so the WebSocket/localStorage
+  // shim exists before any app bundle script can observe the globals. Placing
+  // it near </head> is too late: Next.js marks its entries `async`, so an app
+  // chunk may already have captured the native WebSocket by then.
+  const head = "<head>";
+  const idx = body.indexOf(head);
+  if (idx !== -1) {
+    const snippet =
+      `<script src="/compat/sandbox.js"></script>`;
+    return body.slice(0, idx + head.length) + snippet + body.slice(idx + head.length);
+  }
+  const closeIdx = body.indexOf("</head>");
+  if (closeIdx === -1) return body;
   const snippet =
     `<script src="/compat/sandbox.js"></script>`;
-  return body.slice(0, idx) + snippet + body.slice(idx);
+  return body.slice(0, closeIdx) + snippet + body.slice(closeIdx);
 }
 
 const server = http.createServer((req, res) => {
