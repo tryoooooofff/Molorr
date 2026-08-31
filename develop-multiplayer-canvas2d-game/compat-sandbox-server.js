@@ -100,8 +100,7 @@ const COMPAT_JS = `
       if (origOnError) return origOnError.apply(window, arguments);
     };
     document.addEventListener("DOMContentLoaded", function () {
-      ensure();
-      push("[compat] booted");
+      ensure(); // create the overlay only so error listeners have a target
     });
     window.__petaliaDiag = { push: push, clear: function(){ notes.length=0; render(); } };
   })();
@@ -125,19 +124,16 @@ const COMPAT_JS = `
       ? new NativeWebSocket(target)
       : new NativeWebSocket(target, protocols);
     try {
-      window.__petaliaDiag && window.__petaliaDiag.push(
-        "[ws] url=" + String(url) + " -> " + String(target)
-      );
+      if (window.console && console.info) console.info("[sandbox ws] " + String(url) + " -> " + String(target));
       ws.addEventListener("open", function () {
-        window.__petaliaDiag && window.__petaliaDiag.push("[ws] open " + String(target));
+        if (window.console && console.info) console.info("[sandbox ws] open " + String(target));
       });
       ws.addEventListener("error", function () {
+        if (window.console && console.error) console.error("[sandbox ws] error " + String(target));
         window.__petaliaDiag && window.__petaliaDiag.push("[ws] error " + String(target));
       });
       ws.addEventListener("close", function (e) {
-        window.__petaliaDiag && window.__petaliaDiag.push(
-          "[ws] close code=" + (e && e.code) + " " + String(target)
-        );
+        if (window.console && console.info) console.info("[sandbox ws] close code=" + (e && e.code) + " " + String(target));
       });
     } catch (e) { /* ignore */ }
     return ws;
