@@ -7,6 +7,7 @@ const http = require("http");
 const net = require("net");
 const { spawn } = require("child_process");
 const path = require("path");
+const fsBoot = require("fs");
 
 const RENDER_PORT = parseInt(process.env.PORT || "8080", 10);
 const CPP_PORT = 8081;
@@ -15,6 +16,10 @@ const CPP_PORT = 8081;
 let cppReady = false;
 let nextReady = false;
 let cppExitCode = null;
+let cppExitSignal = null;
+let cppRestarts = 0;
+let cppLastExitAt = null;
+let shuttingDown = false;
 
 // Connection management (OOM prevention)
 const MAX_CONN = parseInt(process.env.MAX_CONN || "50", 10);
@@ -25,21 +30,82 @@ const DEBUG = process.env.DEBUG === "true";
 let totalRequests = 0;
 let totalUpgrades = 0;
 
-// ── 1. Start the C++ game server on :8081 ─────────────────────────────
-const cpp = spawn(path.join(__dirname, "petalia-server"), [], {
-  stdio: "inherit",
-  env: { ...process.env, PORT: String(CPP_PORT) },
-});
-cpp.on("exit", (code) => {
-  cppExitCode = code;
-  cppReady = false;
-  console.error(`[entry] petalia-server exited with code ${code}`);
-  // Don't kill the whole process — let the proxy keep serving 502s
-  // so the container stays alive for debugging.
-});
-cpp.on("error", (err) => {
-  console.error("[entry] petalia-server failed to spawn:", err.message);
-});
+// ── 1. Start the C++ game server on :8081 (supervised) ────────────────
+// The C++ process can die (crash / OOM kill). Previously nothing restarted
+// it, so the game stayed down until the whole container was redeployed.
+// It is now supervised with exponential backoff.
+const CPP_BIN = path.join(__dirname, "petalia-server");
+const CPP_RESTART_MIN_MS = 1000;
+const CPP_RESTART_MAX_MS = 30000;
+let cppProc = null;
+let cppRestartDelay = CPP_RESTART_MIN_MS;
+
+function scheduleCppRestart() {
+  if (shuttingDown) return;
+  const delay = cppRestartDelay;
+  cppRestartDelay = Math.min(cppRestartDelay * 2, CPP_RESTART_MAX_MS);
+  console.error(`[entry] restarting petalia-server in ${delay}ms (restarts=${cppRestarts})`);
+  setTimeout(startCpp, delay).unref?.();
+}
+
+function startCpp() {
+  if (shuttingDown) return;
+  console.log(`[entry] starting petalia-server (${CPP_BIN})`);
+  const proc = spawn(CPP_BIN, [], {
+    stdio: "inherit",
+    env: { ...process.env, PORT: String(CPP_PORT) },
+  });
+  cppProc = proc;
+
+  // Reset the backoff once the process has stayed alive for a while.
+  const stableTimer = setTimeout(() => {
+    if (cppProc === proc) cppRestartDelay = CPP_RESTART_MIN_MS;
+  }, 60000);
+  stableTimer.unref?.();
+
+  proc.on("exit", (code, signal) => {
+    clearTimeout(stableTimer);
+    cppExitCode = code;
+    cppExitSignal = signal;
+    cppLastExitAt = new Date().toISOString();
+    cppReady = false;
+    cppRestarts++;
+    console.error(
+      `[entry] petalia-server exited (code=${code} signal=${signal})` +
+      (signal === "SIGKILL" ? " — likely OOM-killed" : "")
+    );
+    if (cppProc === proc) cppProc = null;
+    scheduleCppRestart();
+  });
+
+  proc.on("error", (err) => {
+    console.error(`[entry] petalia-server failed to spawn: ${err.message} (path=${CPP_BIN})`);
+    if (err.code === "ENOENT" || err.code === "EACCES") {
+      // Binary missing/not executable — a restart loop won't help much, but
+      // keep retrying slowly so a fixed image/volume recovers on its own.
+      cppRestartDelay = CPP_RESTART_MAX_MS;
+    }
+    if (cppProc === proc) {
+      cppProc = null;
+      cppReady = false;
+      cppRestarts++;
+      scheduleCppRestart();
+    }
+  });
+}
+
+if (!fsBoot.existsSync(CPP_BIN)) {
+  console.error(`[entry] FATAL: ${CPP_BIN} not found — WebSocket game server cannot start`);
+}
+startCpp();
+
+for (const sig of ["SIGTERM", "SIGINT"]) {
+  process.on(sig, () => {
+    shuttingDown = true;
+    try { cppProc?.kill(sig); } catch {}
+    process.exit(0);
+  });
+}
 
 // ── 2. Start the Next.js standalone server ────────────────────────────
 const nextServerPath = path.join(__dirname, "nextjs", "server.js");
@@ -161,6 +227,9 @@ const startProxy = async () => {
         next: nextReady,
         cpp: cppReady,
         cppExitCode: cppExitCode,
+        cppExitSignal: cppExitSignal,
+        cppRestarts: cppRestarts,
+        cppLastExitAt: cppLastExitAt,
         uptime: process.uptime(),
       }));
       return;
@@ -175,6 +244,9 @@ const startProxy = async () => {
         next: nextReady,
         cpp: cppReady,
         cppExitCode: cppExitCode,
+        cppExitSignal: cppExitSignal,
+        cppRestarts: cppRestarts,
+        cppLastExitAt: cppLastExitAt,
         uptime: process.uptime(),
         pid: process.pid,
         memory: {
@@ -274,7 +346,7 @@ const startProxy = async () => {
       cppReady = alive;
       console.log(`[entry] C++ server status changed: ${alive ? "up" : "down"}`);
     }
-  }, 15000);
+  }, 3000);
 
   // ── Debug / status output every 20 seconds ──────────────────────────
   setInterval(() => {
@@ -289,7 +361,7 @@ const startProxy = async () => {
         `mem=${rssMB}/${heapMB}MB ` +
         `conn=${activeConn}/${MAX_CONN} ` +
         `total=${totalRequests}req ${totalUpgrades}ws ` +
-        `cpp=${cppReady ? "up" : "down"} ` +
+        `cpp=${cppReady ? "up" : "down"}(r${cppRestarts}) ` +
         `next=${nextReady ? "up" : "down"} ` +
         `uptime=${(process.uptime() / 60).toFixed(1)}min`
       );

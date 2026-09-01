@@ -3418,6 +3418,12 @@ public:
       if (mobs[i].radius > maxMobRadius) maxMobRadius = mobs[i].radius;
     }
 
+    // Mobs spawned during the loop below (spawner thresholds) must NOT be
+    // pushed into `mobs` while we hold a `Mob&` into that same vector — a
+    // reallocation would dangle the reference (use-after-free → crash).
+    // They are buffered here and appended once the loop is done.
+    std::vector<Mob> pendingSpawns;
+
     for (int i = (int)mobs.size() - 1; i >= 0; i--) {
       Mob& mob = mobs[i];
       mob.hitCd = std::max(0.f, mob.hitCd - dt);
@@ -3441,13 +3447,19 @@ public:
         mob.x = clampf(mob.x, mob.radius, map.width - mob.radius);
         mob.y = clampf(mob.y, mob.radius, map.height - mob.radius);
         if (mob.hp <= 0) {
-          if (!mob.friendly) decZoneCount(mapId, zoneAt(mapId, mob.x, mob.y));
+          // NOTE: copy everything we still need BEFORE erase() — `mob` is a
+          // reference into `mobs` and dangles the moment the element is removed.
+          const bool wasFriendly = mob.friendly;
+          const int deadMobId = mob.id;
+          const int deadOwnerId = mob.ownerId;
+          const int deadOwnerSlot = mob.ownerSlot;
+          if (!wasFriendly) decZoneCount(mapId, zoneAt(mapId, mob.x, mob.y));
           mobs.erase(mobs.begin() + i);
-          if (mob.friendly && mob.ownerSlot >= 0) {
-            auto owner = get(mob.ownerId);
+          if (wasFriendly && deadOwnerSlot >= 0) {
+            auto owner = get((uint16_t)deadOwnerId);
             if (owner) {
-              auto& ownerPets = owner->pets[mob.ownerSlot];
-              ownerPets.erase(std::remove(ownerPets.begin(), ownerPets.end(), mob.id), ownerPets.end());
+              auto& ownerPets = owner->pets[deadOwnerSlot];
+              ownerPets.erase(std::remove(ownerPets.begin(), ownerPets.end(), deadMobId), ownerPets.end());
             }
           }
         }
@@ -3742,7 +3754,7 @@ public:
                 float dist = mob.radius + spawnDef.radius + 12 + (float)rand() / (float)RAND_MAX * 28;
                 float sx = clampf(mob.x + std::cos(angle) * dist, spawnDef.radius + 4, map.width - spawnDef.radius - 4);
                 float sy = clampf(mob.y + std::sin(angle) * dist, spawnDef.radius + 4, map.height - spawnDef.radius - 4);
-                mobs.push_back(Mob(nextMobId++, spawnId, mapId, sx, sy, mob.rarity));
+                pendingSpawns.push_back(Mob(nextMobId++, spawnId, mapId, sx, sy, mob.rarity));
               }
             }
           }
@@ -3751,21 +3763,32 @@ public:
 
       // ---- Death check ----
       if (mob.hp <= 0) {
-        if (!mob.friendly) {
+        // Copy everything needed before erase() — `mob` dangles afterwards.
+        const bool wasFriendly = mob.friendly;
+        const int deadMobId = mob.id;
+        const int deadOwnerId = mob.ownerId;
+        const int deadOwnerSlot = mob.ownerSlot;
+        if (!wasFriendly) {
           decZoneCount(mapId, zoneAt(mapId, mob.x, mob.y));
           onMobKilled(mob, mapId);  // 必须在erase之前调用，否则mob引用悬空
         }
         mobs.erase(mobs.begin() + i);
-        if (mob.friendly) {
-          auto owner = get(mob.ownerId);
-          if (owner && mob.ownerSlot >= 0) {
-            auto& ownerPets = owner->pets[mob.ownerSlot];
-            ownerPets.erase(std::remove(ownerPets.begin(), ownerPets.end(), mob.id), ownerPets.end());
+        if (wasFriendly) {
+          auto owner = get((uint16_t)deadOwnerId);
+          if (owner && deadOwnerSlot >= 0) {
+            auto& ownerPets = owner->pets[deadOwnerSlot];
+            ownerPets.erase(std::remove(ownerPets.begin(), ownerPets.end(), deadMobId), ownerPets.end());
           }
           continue;
         }
         continue;
       }
+    }
+
+    // Append mobs spawned by spawners during the loop (safe: no live refs now).
+    if (!pendingSpawns.empty()) {
+      mobs.insert(mobs.end(), pendingSpawns.begin(), pendingSpawns.end());
+      pendingSpawns.clear();
     }
 
     // ---- Drop updates ----
