@@ -105,6 +105,19 @@ interface Ent {
   /** Server-reported target position (before local self-petal prediction). */
   serverTx?: number;
   serverTy?: number;
+  /**
+   * Previous snapshot sample + client arrival times. Kept per entity so the
+   * spring can interpolate between the server's 20 Hz snapshots at render
+   * rate instead of chasing every 50 ms position step (which made petals
+   * visibly jitter while the flower moved smoothly).
+   */
+  prevTx?: number;
+  prevTy?: number;
+  prevAt?: number;
+  curAt?: number;
+  /** Render-rate interpolated target (between the two latest server samples). */
+  interpTx?: number;
+  interpTy?: number;
   angle: number;
   radius: number;
   hp: number;
@@ -184,6 +197,15 @@ interface SaveData {
 const SAVE_KEY = "petalia.save";
 const AUTH_KEY = "petalia.auth";
 const LOADOUT_SAVE_KEY = "petalia.loadouts";
+
+/**
+ * Render-rate snapshot interpolation delay (one server tick, 50 ms).
+ * Entities are drawn at server state delayed by exactly one tick so the two
+ * latest snapshot samples always bracket the render time. Chasing the
+ * freshest 20 Hz sample directly — or lerping without a delay — made petals
+ * visibly jump/shake while the local flower moved smoothly.
+ */
+const ENTITY_INTERP_DELAY = 0.05;
 
 // Biome names sourced straight from the map list. Each item is tagged with every
 // biome that has at least one mob capable of dropping it.
@@ -7400,10 +7422,25 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         e.kind = kind;
         e.type = etype;
         e.team = team;
+        // Keep the previous server sample + arrival time for every entity
+        // (including the self player, whose server echo is also stepped).
+        // The spring / self-petal prediction then interpolates between the
+        // two latest snapshots at render rate, so a new snapshot lands as a
+        // continuous motion instead of a 50 ms step + fast catch-up.
+        if (e.serverTx !== undefined) {
+          e.prevTx = e.serverTx;
+          e.prevTy = e.serverTy;
+          e.prevAt = e.curAt;
+        } else {
+          e.prevTx = x;
+          e.prevTy = y;
+          e.prevAt = this.time;
+        }
+        e.serverTx = x;
+        e.serverTy = y;
+        e.curAt = this.time;
         if (kind === ENT.PETAL) {
           this.petalOwners.set(id, currentPlayerId);
-          e.serverTx = x;
-          e.serverTy = y;
         }
         // Once the local sim is authoritative, never let a networked snapshot
         // move the local player back — the browser's calculated position is
@@ -7949,6 +7986,23 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     // still smoothing a little instead of teleporting.
     const ENTITY_SPRING_STIFFNESS = 48;
     for (const e of this.ents.values()) {
+      // Replace the stepped 20 Hz snapshot target with a render-rate
+      // interpolation between the two latest server samples. Without this the
+      // spring has to absorb each 50 ms step as a fast catch-up, which reads
+      // as a quick shake on fast-moving entities (most visibly the petals
+      // orbiting the render-smooth local flower). The self player is skipped:
+      // its position is client-authoritative and must not fight the spring.
+      if (!(e.id === this.selfId && e.kind === ENT.PLAYER)) {
+        const sampled = this.sampleServerPos(e, this.time);
+        if (sampled) {
+          e.tx = sampled.x;
+          e.ty = sampled.y;
+          if (e.kind === ENT.PETAL) {
+            e.interpTx = sampled.x;
+            e.interpTy = sampled.y;
+          }
+        }
+      }
       const k = Math.min(1, dt * ENTITY_SPRING_STIFFNESS);
       e.x += (e.tx - e.x) * k;
       e.y += (e.ty - e.y) * k;
@@ -8172,25 +8226,70 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   }
 
   /**
+   * Render-rate interpolation of an entity's server samples.
+   *
+   * The server stream is 20 Hz; the local flower is rendered at display rate.
+   * By sampling one tick in the past the two latest snapshot samples always
+   * bracket the render time, so the returned position moves continuously
+   * instead of stepping 50 ms. Falls back to the newest sample when only one
+   * is known yet (entity just spawned).
+   */
+  private sampleServerPos(e: Ent, at: number): { x: number; y: number } | null {
+    if (e.serverTx === undefined || e.serverTy === undefined || e.curAt === undefined) return null;
+    if (e.prevTx === undefined || e.prevTy === undefined || e.prevAt === undefined) {
+      return { x: e.serverTx, y: e.serverTy };
+    }
+    const rt = at - ENTITY_INTERP_DELAY;
+    if (rt >= e.prevAt && rt <= e.curAt) {
+      const t = (rt - e.prevAt) / Math.max(1e-3, e.curAt - e.prevAt);
+      return {
+        x: e.prevTx + (e.serverTx - e.prevTx) * t,
+        y: e.prevTy + (e.serverTy - e.prevTy) * t,
+      };
+    }
+    if (rt < e.prevAt) return { x: e.prevTx, y: e.prevTy };
+    return { x: e.serverTx, y: e.serverTy };
+  }
+
+  /**
    * Remove most snapshot round-trip lag from self-owned petals.
    *
    * The server still simulates and collides the player, but the local body is
-   * rendered slightly ahead for responsiveness. We shift self-owned petal
-   * targets by that same delta while letting the normal entity spring handle
-   * the visible lerp, instead of hard-snapping the petals every frame.
+   * rendered ahead for responsiveness. Self-owned petal targets are shifted
+   * by the (smooth) local-vs-server delta and glued straight to that target:
+   * the targets are already render-rate interpolated, so no spring lag is
+   * left to wobble against the render-smooth flower.
    */
   private predictOwnPetals() {
     if (!this.localAuthActive || this.scene !== "game") return;
     const me = this.ents.get(this.selfId);
     if (!me || !this.alive) return;
-    const dx = me.x - this.serverSelfX;
-    const dy = me.y - this.serverSelfY;
+    // The server echo of the self player also updates at 20 Hz. Interpolate it
+    // with the same fixed delay as the petal samples, otherwise the prediction
+    // offset dx would be a sawtooth (0 → one tick of movement → 0) and
+    // re-introduce the very jitter the interpolation is meant to remove.
+    const serverSample = this.sampleServerPos(me, this.time);
+    const serverX = serverSample?.x ?? this.serverSelfX;
+    const serverY = serverSample?.y ?? this.serverSelfY;
+    const dx = me.x - serverX;
+    const dy = me.y - serverY;
     for (const e of this.ents.values()) {
       if (e.kind !== ENT.PETAL) continue;
       if (e.serverTx === undefined || e.serverTy === undefined) continue;
       if (this.petalOwners.get(e.id) !== this.selfId) continue;
-      e.tx = e.serverTx + dx;
-      e.ty = e.serverTy + dy;
+      // Use the render-rate interpolated server sample (set in the spring
+      // pass) as the base, so the prediction offset is added on top of a
+      // continuous curve instead of a 20 Hz stepped one.
+      const bx = e.interpTx ?? e.serverTx;
+      const by = e.interpTy ?? e.serverTy;
+      e.tx = bx + dx;
+      e.ty = by + dy;
+      // The interpolated target is already smooth at render rate, so glue the
+      // petal straight to it. The normal spring would leave a reaction-time
+      // lag that keeps changing with frame rate, which is what made the
+      // petals wobble against the render-smooth local flower.
+      e.x = e.tx;
+      e.y = e.ty;
     }
   }
 
