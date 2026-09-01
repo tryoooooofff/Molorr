@@ -52,7 +52,6 @@ import { PLAYER_RADIUS, ArrayWallCollider, PolygonWallCollider } from "../shared
 import { createTransport, Transport } from "./transport";
 import {
   button,
-  craftBurst,
   craftPad,
   drawCard,
   drawDamageOverlay,
@@ -6529,15 +6528,15 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private craftScrollAtDragStart = 0;
   // craft juice
   private craftGlow = 0;
-  private craftBurstT = 0;
-  private craftBurstColor = "#ffe763";
   private craftShake = 0;
 
   // ── Ported CraftAnimation state (color / arrangement / animation) ──
-  // Rotation phase machine: "none" | "rotating" | "waiting" | "showing"
+  // Rotation phase machine: "none" | "rotating" | "waiting" | "merging" | "showing"
   // NOTE: values follow the requested CraftAnimation class but with increased
-  // animation time for more juice.
-  private craftPhase: "none" | "rotating" | "waiting" | "showing" = "none";
+  // animation time for more juice. On success the spin is followed by a
+  // "merging" step: the ring of input cards slowly converges into the result
+  // slot (panel center) before the result card spins out of it.
+  private craftPhase: "none" | "rotating" | "waiting" | "merging" | "showing" = "none";
   private craftRotTime = 0; // seconds elapsed while rotating
   private craftRotDuration = 2.5; // seconds — matches CraftAnimation.startAnimation(duration=2.5)
   private craftAngle = 0; // degrees, accumulates during rotation
@@ -6545,6 +6544,10 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private craftRotSpeed = 300; // deg/s, accelerates 300 -> 800
   private craftWaitStart = 0; // performance.now() ms
   private craftWaitDuration = 0.5; // seconds before revealing result (slightly longer)
+  // "merging" phase: 0 -> 1 across craftMergeDuration; drives the input cards
+  // converging into the result slot (pentagon radius eases to 0, cards shrink).
+  private craftMergeTime = 0; // seconds elapsed while merging
+  private craftMergeDuration = 0.65; // seconds — slow, deliberate pull into the center
   private craftShowTimer = 0; // seconds the result card is shown
   private craftShowDuration = 3.0; // unused now — result card stays until the player clicks it
   private craftPending: { item: number; rarity: number; count: number } | null = null;
@@ -7931,14 +7934,6 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.saveDirty = true;
   }
 
-  /** Shared feedback for every successful craft/oracle/trade: burst + green message. */
-  private craftSucceeded(rarity: number) {
-    this.craftMsgLife = 2.8;
-    this.craftSpin = 0;
-    this.craftBurstT = 1;
-    this.craftBurstColor = RARITIES[rarity]?.color ?? "#ffe763";
-  }
-
   /** Shared feedback for a refused/failed craft: shake + red message. */
   private craftFailed() {
     this.craftMsgLife = 2.6;
@@ -8002,7 +7997,6 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.craftAnim += ((this.craftOpen ? 1 : 0) - this.craftAnim) * Math.min(1, dt * 10);
     if (this.craftSpin > 0) this.craftSpin = Math.max(0, this.craftSpin - dt);
     if (this.craftMsgLife > 0) this.craftMsgLife -= dt;
-    if (this.craftBurstT > 0) this.craftBurstT = Math.max(0, this.craftBurstT - dt * 1.6);
     if (this.craftShake > 0) this.craftShake = Math.max(0, this.craftShake - dt * 2);
     this.craftGlow += ((this.craftSel ? 1 : 0) - this.craftGlow) * Math.min(1, dt * 8);
     // Keep the complete CraftAnimation port alive even while the panel is sliding.
@@ -8928,6 +8922,12 @@ private bagLayout() {
     return [Math.cos(a) * radius, Math.sin(a) * radius];
   }
 
+  /** Eased 0..1 progress of the success "merge" (input cards -> result slot). 0 when not merging. */
+  private craftMergeProgress(): number {
+    if (this.craftPhase !== "merging") return 0;
+    return ease.inOutCubic(Math.min(1, this.craftMergeTime / this.craftMergeDuration));
+  }
+
   /** Contraction curve from CraftAnimation.getContractedPosition (slots suck toward center). */
   private craftContractedPos(progress: number, ox: number, oy: number): [number, number] {
     const originalRadius = Math.sqrt(ox * ox + oy * oy);
@@ -8952,6 +8952,7 @@ private bagLayout() {
     this.craftRotSpeed = 300;
     this.craftPending = null;
     this.craftResultPulse = 0;
+    this.craftMergeTime = 0;
     this.craftSlotCounts = [0, 0, 0, 0, 0];
     this.craftSuccessParticles.length = 0;
     this.craftFailParticles.length = 0;
@@ -8970,7 +8971,6 @@ private bagLayout() {
   /** Accept a server craft response. The result is revealed after the active spin completes. */
   private craftResolve(result: { item: number; rarity: number; count: number } | null) {
     this.craftMsgLife = 3.2;
-    this.craftBurstColor = result ? RARITIES[result.rarity]?.color ?? "#ffe763" : "#ff8080";
     if (this.craftPhase === "rotating" || this.craftPhase === "waiting") {
       this.craftPending = result;
       return;
@@ -8989,7 +8989,6 @@ private bagLayout() {
       this.craftShowTimer = 0;
       this.craftResultPulse = 0;
       this.craftSpawnSuccessParticles(this.rarityRgb(this.craftPending.rarity), Math.min(50 * Math.max(1, this.craftPending.count), 1600));
-      this.craftBurstT = 1;
     } else {
       // Nothing crafted — burst failure particles from each pentagon slot.
       this.craftSpawnFailParticles();
@@ -9017,6 +9016,23 @@ private bagLayout() {
       }
     } else if (this.craftPhase === "waiting") {
       if ((performance.now() - this.craftWaitStart) / 1000 >= this.craftWaitDuration) {
+        if (this.craftPending) {
+          // Success: before the reveal, the ring of input cards is pulled
+          // into the result slot (see renderCraftSlots / renderCraftSingle);
+          // the result card then spins out of the center.
+          this.craftPhase = "merging";
+          this.craftMergeTime = 0;
+        } else {
+          this.craftFinalizeShow();
+        }
+      }
+    } else if (this.craftPhase === "merging") {
+      this.craftMergeTime += dt;
+      const m = Math.min(1, this.craftMergeTime / this.craftMergeDuration);
+      // Decelerating residual spin so the ring eases to a stop as it converges.
+      this.craftAngle -= this.craftRotDir * 160 * (1 - m) * dt;
+      if (this.craftMergeTime >= this.craftMergeDuration) {
+        this.craftAngle = 0;
         this.craftFinalizeShow();
       }
     } else if (this.craftPhase === "showing") {
@@ -14585,12 +14601,6 @@ if (me) {
       ctx.restore();
     }
 
-    // success burst over center
-    if (this.craftBurstT > 0) {
-      const focus = this.craftMode === "normal" ? layout.bigSlots[2] : layout.singleSlot;
-      craftBurst(ctx, focus.x + focus.w / 2, focus.y + focus.h / 2, this.craftBurstT, this.craftBurstColor);
-    }
-
     // Tooltip for inventory
     if (hovered) this.tooltip(hovered.cell, this.mx + 14, this.my - 10);
     if (this.craftBiomeOpen) dropdownList(ctx, layout.dropRect, BIOME_LIST, this.craftBiome, this.mx, this.my);
@@ -14630,15 +14640,18 @@ if (me) {
     const rarity = this.craftPending.rarity;
     const color = this.rarityRgb(rarity);
 
-    // Bounded scale: a quick overshoot "pop" as the card appears, settling
-    // into a small idle bob — it never keeps growing the longer it's shown.
-    const popDuration = 0.4;
+    // Bounded scale: spins out of the center from tiny to full size (two fast
+    // turns that settle with an easeOutBack overshoot), then a small idle bob —
+    // it never keeps growing the longer it's shown.
+    const popDuration = 0.55;
     let pulse: number;
+    let popRot = 0;
     if (this.craftShowTimer < popDuration) {
       const t = Math.max(0, this.craftShowTimer) / popDuration;
       const s = 1.70158;
       const tm1 = t - 1;
       pulse = 1 + (s + 1) * tm1 * tm1 * tm1 + s * tm1 * tm1; // easeOutBack, overshoots then settles at 1
+      popRot = (1 - ease.outCubic(t)) * Math.PI * 4; // two full turns, decelerating
     } else {
       pulse = 1 + Math.sin(this.time * 3) * 0.025;
     }
@@ -14653,7 +14666,8 @@ if (me) {
 
     // card background with corner radius 8 (matches CraftAnimation)
     ctx.translate(rr.x + rr.w / 2, rr.y + rr.h / 2);
-    ctx.scale(pulse, pulse);
+    ctx.rotate(popRot);
+    ctx.scale(Math.max(0.01, pulse), Math.max(0.01, pulse));
     ctx.translate(-rr.w / 2, -rr.h / 2);
 
     // Keep the result itself identical to every other item card; the glow is
@@ -14781,10 +14795,17 @@ if (me) {
     text(ctx, "Click: load 5 cards · Shift+click: load all (unlimited)", p.x + p.w * 0.38, layout.craftBottom - 18 * layout.scale, 9 * layout.scale, "rgba(255,255,255,0.55)");
 
     // Draw animated slots (pentagon with rotation/contraction)
+    const merging = this.craftMergeProgress();
     layout.bigSlots.forEach((baseRect, i) => {
       const [ox, oy] = this.craftLocalPos(i);
       const progress = this.craftPhase === "rotating" ? Math.min(1, this.craftRotTime / this.craftRotDuration) : 0;
-      const [px, py] = this.craftPhase === "rotating" ? this.craftContractedPos(progress, ox, oy) : [ox, oy];
+      let [px, py] = this.craftPhase === "rotating" ? this.craftContractedPos(progress, ox, oy) : [ox, oy];
+      // Success merge: the whole ring eases into the result slot at the center.
+      if (merging > 0) {
+        const k = 1 - merging;
+        px = ox * k;
+        py = oy * k;
+      }
       const rad = (Math.PI / 180) * this.craftAngle;
       const cx = layout.cx + px * Math.cos(rad) - py * Math.sin(rad);
       const cy = layout.cy + px * Math.sin(rad) + py * Math.cos(rad);
@@ -14794,7 +14815,7 @@ if (me) {
       // authoritative inventory update removes them from the bag. Otherwise
       // a slot is filled only once the player has clicked a card into it.
       const slotCount = this.craftSlotCounts[i] ?? 0;
-      const filled = !!sel && (submitting || slotCount > 0) && this.craftPhase !== "showing";
+      const filled = !!sel && (submitting || merging > 0 || slotCount > 0) && this.craftPhase !== "showing";
       // Slot background always drawn (CraftAnimation drawSlots behavior)
       ctx.save();
       roundRect(ctx, r.x, r.y, r.w, r.h, 8);
@@ -14817,6 +14838,15 @@ if (me) {
         ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
         ctx.rotate(fill.angle);
         ctx.scale(fill.scale, fill.scale);
+        ctx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2));
+      }
+      // While merging, the cards shrink and fade as they are absorbed into
+      // the result slot at the center.
+      if (merging > 0) {
+        const shrink = 1 - 0.7 * (merging * merging);
+        ctx.globalAlpha = merging < 0.55 ? 1 : Math.max(0, 1 - (merging - 0.55) / 0.45);
+        ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
+        ctx.scale(shrink, shrink);
         ctx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2));
       }
       drawCard(ctx, { ...r, y: r.y + bob }, { item: sel.item, rarity: sel.rarity, count: Math.max(1, slotCount) }, {
@@ -14902,6 +14932,16 @@ if (me) {
         ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
         ctx.rotate(fill.angle);
         ctx.scale(fill.scale, fill.scale);
+        ctx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2));
+      }
+      // Success merge: the input card shrinks and fades into the result slot
+      // (the single slot sits at the same center) before the result spins out.
+      const merging = this.craftMergeProgress();
+      if (merging > 0) {
+        const shrink = 1 - 0.7 * (merging * merging);
+        ctx.globalAlpha = merging < 0.55 ? 1 : Math.max(0, 1 - (merging - 0.55) / 0.45);
+        ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
+        ctx.scale(shrink, shrink);
         ctx.translate(-(r.x + r.w / 2), -(r.y + r.h / 2));
       }
       drawCard(ctx, r, { item: sel.item, rarity: sel.rarity, count: avail });
