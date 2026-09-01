@@ -418,29 +418,6 @@ export function craftPad(ctx: CanvasRenderingContext2D, r: Rect, glow: number, p
   ctx.restore();
 }
 
-/** One-shot success burst drawn over the craft slots. `t` goes 1 -> 0. */
-export function craftBurst(ctx: CanvasRenderingContext2D, x: number, y: number, t: number, color: string) {
-  if (t <= 0) return;
-  const p = 1 - t;
-  ctx.save();
-  ctx.globalAlpha = t;
-  ctx.strokeStyle = color;
-  ctx.lineWidth = 4 * t + 1;
-  ctx.beginPath();
-  ctx.arc(x, y, 20 + ease.outCubic(p) * 90, 0, Math.PI * 2);
-  ctx.stroke();
-  for (let i = 0; i < 10; i++) {
-    const a = (i / 10) * Math.PI * 2 + p * 1.2;
-    const d = 24 + ease.outCubic(p) * 74;
-    ctx.globalAlpha = t * 0.9;
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(x + Math.cos(a) * d, y + Math.sin(a) * d, 4 * t + 1, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.restore();
-}
-
 // ============================================
 // 核心绘制函数 - drawItemIcon (支持稀有度)
 // ============================================
