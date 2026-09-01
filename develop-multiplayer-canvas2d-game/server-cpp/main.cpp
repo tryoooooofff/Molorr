@@ -977,6 +977,8 @@ struct Player {
   uint8_t flags = 0;
   /** True once a modern client sends its calculated position in C2S_INPUT. */
   bool clientPosActive = false;
+  /** Latest client-reported world position; treated as a target, not a bypass. */
+  float clientTargetX = 1600, clientTargetY = 1600;
   float baseAngle = 0, orbit = 62;
   float hurtCd = 0;
   float shield = 0;
@@ -2214,7 +2216,7 @@ public:
         float y = tile.first * tileH + (float)rand() / (float)RAND_MAX * tileH;
         auto [cx, cy] = collider->collideCircle(x, y, spawnR, &collisionCounter);
         if (std::abs(cx - x) < 0.01f && std::abs(cy - y) < 0.01f) {
-          p.x = x; p.y = y; p.hp = p.maxHp; p.alive = true; p.statsDirty = true;
+          p.x = x; p.y = y; p.clientTargetX = p.x; p.clientTargetY = p.y; p.hp = p.maxHp; p.alive = true; p.statsDirty = true;
           return;
         }
       }
@@ -2231,6 +2233,7 @@ public:
       fallbackX = cx; fallbackY = cy;
       p.x = fallbackX; p.y = fallbackY;
     }
+    p.clientTargetX = p.x; p.clientTargetY = p.y;
     p.hp = p.maxHp; p.alive = true; p.statsDirty = true;
   }
 
@@ -2958,54 +2961,75 @@ public:
     p.vx += (nx * speed - p.vx) * std::min(1.f, dt * 9.f);
     p.vy += (ny * speed - p.vy) * std::min(1.f, dt * 9.f);
 
-    if (p.clientPosActive) {
-      // Client-authoritative position: never re-simulate here. The client is
-      // the most accurate source for its own location; the server mirrors it
-      // so petals and the rest of the world use that spot.
-      p.x = clampf(p.x, 0.f, (float)map.width);
-      p.y = clampf(p.y, 0.f, (float)map.height);
-    } else {
-      // Wall collision
-      float playerRadius = PLAYER_RADIUS + soilRadiusBonusOf(p);
-      auto [newX, newY] = collider->moveCircle(p.x, p.y, p.vx * dt, p.vy * dt, playerRadius, &collisionCounter);
-      p.x = clampf(newX, playerRadius, map.width - playerRadius);
-      p.y = clampf(newY, playerRadius, map.height - playerRadius);
-
-      // Player-to-player push - optimized but visually identical: check only within sum radii
-      for (auto* o : allPlayers) {
-        if (o == &p || o->mapId != p.mapId || !o->alive) continue;
-        float oRadius = PLAYER_RADIUS + soilRadiusBonusOf(*o);
-        float minDist = playerRadius + oRadius;
-        float checkDist = minDist + 10.f;
-        float dx = p.x - o->x;
-        float dy = p.y - o->y;
-        if (dx * dx + dy * dy > checkDist * checkDist) continue;
-        collisionCounter.n++;
-        float d = std::hypot(dx, dy);
-        if (d < minDist && d > 0.001f) {
-          float push = (minDist - d) * 0.5f;
-          p.x += (dx / d) * push;
-          p.y += (dy / d) * push;
-        }
-      }
-      p.x = clampf(p.x, playerRadius, map.width - playerRadius);
-      p.y = clampf(p.y, playerRadius, map.height - playerRadius);
-
-      // Arena 圆形边界
-      if (p.mapId == MAP_COUNT - 1) {
-        float cx = 4000, cy = 4000, R = 4000;
-        float dist = sqrt((p.x - cx) * (p.x - cx) + (p.y - cy) * (p.y - cy));
-        float maxDist = R - playerRadius;
-        if (dist > maxDist) {
-          float angle = atan2(p.y - cy, p.x - cx);
-          p.x = cx + cos(angle) * maxDist;
-          p.y = cy + sin(angle) * maxDist;
+    float playerRadius = PLAYER_RADIUS + soilRadiusBonusOf(p);
+    auto moveWithServerCollision = [&](float desiredDx, float desiredDy) {
+      float stepDx = desiredDx;
+      float stepDy = desiredDy;
+      if (p.clientPosActive) {
+        // Keep one delayed packet or a malicious jump from turning this tick
+        // into a huge expensive sweep; the server can catch up over later inputs.
+        float stepDist = std::hypot(stepDx, stepDy);
+        float maxClientStep = std::max(playerRadius, speed * dt * 2.5f);
+        if (stepDist > maxClientStep && stepDist > 0.001f) {
+          float scale = maxClientStep / stepDist;
+          stepDx *= scale;
+          stepDy *= scale;
         }
       }
 
-      // Stuck-in-wall safety net
-      pushPlayerOutOfWall(p, playerRadius);
+      float targetX = clampf(p.x + stepDx, playerRadius, map.width - playerRadius);
+      float targetY = clampf(p.y + stepDy, playerRadius, map.height - playerRadius);
+      if (collider && (stepDx != 0.f || stepDy != 0.f)) {
+        bool needsPrecise = collider->circleNeedsPreciseCheck(p.x, p.y, playerRadius)
+          || collider->circleNeedsPreciseCheck(targetX, targetY, playerRadius);
+        if (needsPrecise) {
+          auto moved = collider->moveCircle(p.x, p.y, targetX - p.x, targetY - p.y, playerRadius, &collisionCounter);
+          targetX = moved.first;
+          targetY = moved.second;
+        }
+      }
+
+      p.x = clampf(targetX, playerRadius, map.width - playerRadius);
+      p.y = clampf(targetY, playerRadius, map.height - playerRadius);
+    };
+
+    if (p.clientPosActive) moveWithServerCollision(p.clientTargetX - p.x, p.clientTargetY - p.y);
+    else moveWithServerCollision(p.vx * dt, p.vy * dt);
+
+    // Player-to-player push - optimized but visually identical: check only within sum radii
+    for (auto* o : allPlayers) {
+      if (o == &p || o->mapId != p.mapId || !o->alive) continue;
+      float oRadius = PLAYER_RADIUS + soilRadiusBonusOf(*o);
+      float minDist = playerRadius + oRadius;
+      float checkDist = minDist + 10.f;
+      float dx = p.x - o->x;
+      float dy = p.y - o->y;
+      if (dx * dx + dy * dy > checkDist * checkDist) continue;
+      collisionCounter.n++;
+      float d = std::hypot(dx, dy);
+      if (d < minDist && d > 0.001f) {
+        float push = (minDist - d) * 0.5f;
+        p.x += (dx / d) * push;
+        p.y += (dy / d) * push;
+      }
     }
+    p.x = clampf(p.x, playerRadius, map.width - playerRadius);
+    p.y = clampf(p.y, playerRadius, map.height - playerRadius);
+
+    // Arena 圆形边界
+    if (p.mapId == MAP_COUNT - 1) {
+      float cx = 4000, cy = 4000, R = 4000;
+      float dist = sqrt((p.x - cx) * (p.x - cx) + (p.y - cy) * (p.y - cy));
+      float maxDist = R - playerRadius;
+      if (dist > maxDist) {
+        float angle = atan2(p.y - cy, p.x - cx);
+        p.x = cx + cos(angle) * maxDist;
+        p.y = cy + sin(angle) * maxDist;
+      }
+    }
+
+    // Stuck-in-wall safety net
+    pushPlayerOutOfWall(p, playerRadius);
 
     p.hurtCd = std::max(0.f, p.hurtCd - dt);
     bool attack = (p.flags & 1) != 0;
@@ -3203,20 +3227,12 @@ public:
           }
           continue;
         }
-        if (p.clientPosActive) {
-          st.x = tx; st.y = ty;
-        } else {
-          st.x += (tx - st.x) * std::min(1.f, dt * 14.f);
-          st.y += (ty - st.y) * std::min(1.f, dt * 14.f);
-        }
+        st.x += (tx - st.x) * std::min(1.f, dt * 14.f);
+        st.y += (ty - st.y) * std::min(1.f, dt * 14.f);
         if (st.specialTimer <= 0 && missing > 0) { st.absorbTimer = ROSE_ABSORB_TIME; continue; }
       } else {
-        if (p.clientPosActive) {
-          st.x = tx; st.y = ty;
-        } else {
-          st.x += (tx - st.x) * std::min(1.f, dt * 14.f);
-          st.y += (ty - st.y) * std::min(1.f, dt * 14.f);
-        }
+        st.x += (tx - st.x) * std::min(1.f, dt * 14.f);
+        st.y += (ty - st.y) * std::min(1.f, dt * 14.f);
       }
 
       // Heal per sec
@@ -4499,6 +4515,8 @@ int main() {
   sim.clientMap = &clientStates;
 
   const int port = std::getenv("PORT") ? std::atoi(std::getenv("PORT")) : 8080;
+  const char* bindHostEnv = std::getenv("BIND_HOST");
+  std::string bindHost = bindHostEnv && bindHostEnv[0] ? bindHostEnv : "0.0.0.0";
 
   auto app = uWS::App().ws<PerSocket>("/*", {
       .compression = uWS::DISABLED,
@@ -4634,15 +4652,14 @@ int main() {
             p->inDx = r.i8v() / 100.f;
             p->inDy = r.i8v() / 100.f;
             p->flags = r.u8v();
-            // Newest client sends its calculated player position (i16 x, i16 y)
-            // after direction/flags. That position is the most accurate one the
-            // server can see, so it replaces the server-integrated location and
-            // becomes the centre used for petal placement every tick.
+            // Newest clients append their locally simulated world position
+            // (i16 x, i16 y). The server still resolves movement and wall collision
+            // itself, but following the same target keeps both sides closely aligned.
             if (r.remaining() >= 4) {
               const MapDef& map = MAPS[p->mapId];
               p->clientPosActive = true;
-              p->x = clampf((float)r.i16v(), 0.f, (float)map.width);
-              p->y = clampf((float)r.i16v(), 0.f, (float)map.height);
+              p->clientTargetX = clampf((float)r.i16v(), 0.f, (float)map.width);
+              p->clientTargetY = clampf((float)r.i16v(), 0.f, (float)map.height);
             }
             if (p->inDx != cs->lastInDx || p->inDy != cs->lastInDy || p->flags != cs->lastFlags) {
               cs->lastInDx = p->inDx;
@@ -5161,8 +5178,9 @@ int main() {
         sockets.erase(id);
         sim.remove(id);
       },
-  }).listen(port, [port](auto* token) {
-      if (token) printf("[petalia-cpp] listening on :%d\n", port);
+  }).listen(bindHost, port, [port, bindHost](auto* token) {
+      if (token) printf("[petalia-cpp] listening on %s:%d\n", bindHost.c_str(), port);
+      else fprintf(stderr, "[petalia-cpp] failed to listen on %s:%d\n", bindHost.c_str(), port);
   });
 
   // 20 Hz authoritative loop
