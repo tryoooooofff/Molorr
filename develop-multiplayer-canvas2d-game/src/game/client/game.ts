@@ -207,6 +207,19 @@ const LOADOUT_SAVE_KEY = "petalia.loadouts";
  */
 const ENTITY_INTERP_DELAY = 0.05;
 
+/**
+ * Softer, frame-rate-independent smoothing rate (per second) applied to petal
+ * orbital motion. Petals get their orbit position from the 20 Hz snapshot
+ * stream; the generic entity spring is deliberately very stiff (snaps in a
+ * couple of frames), which made petals "cut corners" as they revolve and read
+ * as a stiff, steppy rotation. Easing toward the target with
+ * `k = 1 - exp(-rate * dt)` instead lets the petal trail its target very
+ * slightly, which rounds the orbital arc and makes the rotation look smooth.
+ * The exponential form is frame-rate independent, so it does not reintroduce
+ * the frame-rate-dependent wobble the old hard-snap avoided.
+ */
+const PETAL_SMOOTH_RATE = 24;
+
 // Biome names sourced straight from the map list. Each item is tagged with every
 // biome that has at least one mob capable of dropping it.
 const BIOME_LIST = ["All", ...MAPS.map((m) => m.name)];
@@ -6288,11 +6301,10 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     maxLife: number;
   }> = [];
 
-  private serverRegion: "eu" | "as" | "hk" = "as";
+  private serverRegion: "eu" | "as" = "as";
   private static readonly SERVER_URLS: Record<string, string> = {
     eu: "wss://molorr-server-t34o.onrender.com",
     as: "wss://molorr-server-sg.onrender.com",
-    hk: "wss://molorr-server-hk.onrender.com",
   };
   private serverBtnRects: Record<string, { x: number; y: number; w: number; h: number }> = {};
 
@@ -6984,7 +6996,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         }
       }
       const sr = localStorage.getItem("petalia.server");
-      if (sr === "eu" || sr === "as" || sr === "hk") this.serverRegion = sr;
+      if (sr === "eu" || sr === "as") this.serverRegion = sr;
     } catch {
       /* ignore */
     }
@@ -8003,7 +8015,14 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
           }
         }
       }
-      const k = Math.min(1, dt * ENTITY_SPRING_STIFFNESS);
+      // Petals ease toward their orbit target with a softer, frame-rate
+      // independent lerp so the revolving motion reads smoothly instead of
+      // snapping between 20 Hz samples. Every other entity keeps the stiff
+      // catch-up spring so remote flowers/mobs still track tightly.
+      const k =
+        e.kind === ENT.PETAL
+          ? 1 - Math.exp(-PETAL_SMOOTH_RATE * dt)
+          : Math.min(1, dt * ENTITY_SPRING_STIFFNESS);
       e.x += (e.tx - e.x) * k;
       e.y += (e.ty - e.y) * k;
       e.hurt = Math.max(0, e.hurt - dt);
@@ -8060,7 +8079,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
 
     // Predict self petals ahead of the snapshot stream so they visibly track
     // the client-authoritative player position without a ~100ms server round-trip.
-    this.predictOwnPetals();
+    this.predictOwnPetals(dt);
 
     // ---- 检测视野内最近的 Ultra+ 生物（Ultra=6, Super=7, Omega=8, Eternal=9） ----
     {
@@ -8260,7 +8279,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
    * the targets are already render-rate interpolated, so no spring lag is
    * left to wobble against the render-smooth flower.
    */
-  private predictOwnPetals() {
+  private predictOwnPetals(dt: number) {
     if (!this.localAuthActive || this.scene !== "game") return;
     const me = this.ents.get(this.selfId);
     if (!me || !this.alive) return;
@@ -8284,12 +8303,16 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       const by = e.interpTy ?? e.serverTy;
       e.tx = bx + dx;
       e.ty = by + dy;
-      // The interpolated target is already smooth at render rate, so glue the
-      // petal straight to it. The normal spring would leave a reaction-time
-      // lag that keeps changing with frame rate, which is what made the
-      // petals wobble against the render-smooth local flower.
-      e.x = e.tx;
-      e.y = e.ty;
+      // The interpolated target is already smooth at render rate. Rather than
+      // gluing the petal straight to it (which snaps the orbit between the two
+      // bracketing snapshot samples and looks like a stiff, steppy rotation),
+      // ease toward it with a soft, frame-rate independent lerp. The tiny lag
+      // this leaves rounds the revolving arc so the rotation looks smooth,
+      // while the exponential form keeps it stable across frame rates so it
+      // still won't wobble against the render-smooth local flower.
+      const k = 1 - Math.exp(-PETAL_SMOOTH_RATE * dt);
+      e.x += (e.tx - e.x) * k;
+      e.y += (e.ty - e.y) * k;
     }
   }
 
@@ -10622,7 +10645,7 @@ private bagLayout() {
     }
 
     // Server selector buttons
-    for (const key of ['eu', 'as', 'hk'] as const) {
+    for (const key of ['eu', 'as'] as const) {
       const r = this.serverBtnRects[key];
       if (r && hit(r, mx, my)) {
         if (this.serverRegion !== key) {

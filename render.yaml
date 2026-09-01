@@ -1,4 +1,23 @@
 services:
+  # ── Static frontend (free — served from Render's CDN) ──────────────────
+  # Builds the Next.js client as a static export (out/) via the existing
+  # Netlify build script. Cloud accounts/saves are disabled on the static
+  # build (the api/ routes are stripped out) — the game falls back to
+  # browser localStorage.
+  - type: web
+    runtime: static
+    name: molorr
+    repo: https://github.com/tryoooooofff/Molorr
+    rootDir: develop-multiplayer-canvas2d-game
+    autoDeploy: true
+    buildCommand: npm ci && npm run build:static:netlify
+    staticPublishPath: ./out
+    envVars:
+      # Fallback WebSocket endpoint; the client normally picks EU/AS itself.
+      - key: NEXT_PUBLIC_GAME_WS
+        value: wss://molorr-server-t34o.onrender.com
+
+  # ── Game server: Europe ────────────────────────────────────────────────
   - type: web
     name: molorr-server-t34o
     runtime: docker
@@ -16,6 +35,7 @@ services:
       - key: DATABASE_URL
         sync: false
 
+  # ── Game server: Singapore ─────────────────────────────────────────────
   - type: web
     name: molorr-server-sg
     runtime: docker
@@ -31,23 +51,5 @@ services:
         value: production
       - key: NEXT_PUBLIC_GAME_WS
         value: wss://molorr-server-sg.onrender.com
-      - key: DATABASE_URL
-        sync: false
-
-  - type: web
-    name: molorr-server-hk
-    runtime: docker
-    repo: https://github.com/tryoooooofff/Molorr
-    rootDir: develop-multiplayer-canvas2d-game
-    dockerfilePath: Dockerfile
-    region: hong kong
-    autoDeploy: true
-    envVars:
-      - key: PORT
-        value: 8080
-      - key: NODE_ENV
-        value: production
-      - key: NEXT_PUBLIC_GAME_WS
-        value: wss://molorr-server-hk.onrender.com
       - key: DATABASE_URL
         sync: false
