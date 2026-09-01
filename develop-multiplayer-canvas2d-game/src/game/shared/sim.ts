@@ -3769,39 +3769,12 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
         }
       }
 
-      // ---- 花瓣-玩家碰撞伤害（PvP）----
-      // 从 server-cpp/main.cpp 移植：花瓣撞到其他玩家时造成伤害
-      // （护盾先吸收），花瓣自身扣 1 点耐久。
-      if (st.hitCd <= 0 && !isSummon) {
-        const pr = def.radius * (1 + cell.rarity * 0.06);
-        for (const other of players) {
-          if (other === p || other.mapId !== p.mapId || !other.alive) continue;
-          if (other.hurtCd > 0) continue;
-          this.collisionCounter.n++;
-          const dx = other.x - st.x, dy = other.y - st.y;
-          const plRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(other);
-          const rSum = plRadius + pr;
-          if (dx * dx + dy * dy < rSum * rSum) {
-            let dmg = def.damage * rarityMult(cell.rarity) * p.talentBonuses.petalDmgMult;
-            if (other.shield > 0 && dmg > 0) {
-              const absorbed = Math.min(other.shield * 2, dmg);
-              other.shield -= absorbed / 2;
-              dmg -= absorbed;
-            }
-            other.hp -= dmg;
-            other.hurtCd = 0.1;
-            other.statsDirty = true;
-            st.hp -= 1;
-            st.hitCd = 0.03;
-            if (other.hp <= 0) this.killPlayer(other);
-            if (st.hp <= 0) {
-              st.alive = false;
-              st.timer = this.applyTalentReload(p, def.reload);
-            }
-            break;
-          }
-        }
-      }
+      // ---- 花瓣-玩家碰撞伤害（PvP）—— 已禁用 ----
+      // Players can no longer damage other players. The old block (ported
+      // from server-cpp/main.cpp) applied petal contact damage to any other
+      // living player on the same map; it has been removed so the open world
+      // is strictly PvE. (The C++ server keeps PvP only between Arena-duel
+      // opponents; this TS fallback server has no arena mode at all.)
     }
   }
 /**
