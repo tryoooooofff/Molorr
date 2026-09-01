@@ -6,7 +6,7 @@ services:
   # browser localStorage.
   - type: web
     runtime: static
-    name: molorr-web
+    name: molorr
     repo: https://github.com/tryoooooofff/Molorr
     rootDir: develop-multiplayer-canvas2d-game
     autoDeploy: true
