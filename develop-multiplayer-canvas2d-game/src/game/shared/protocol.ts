@@ -3,11 +3,11 @@
 export const C2S = {
   JOIN: 1,
   /**
-   * Movement + authoritative client position. Legacy/new payload:
+   * Movement + optional client-predicted position. Legacy/new payload:
    *   `u8 id`, `i8 dx*100`, `i8 dy*100`, `u8 flags`
    * New clients append: `i16 x`, `i16 y` (world-space player position). The
-   * client is the most accurate source for its own location, so the server
-   * uses that point for its position and petal placement each tick.
+   * server treats that point as a movement target/hint, then still applies its
+   * own movement validation and wall collision before using the result.
    */
   INPUT: 2,
   SWAP: 3,

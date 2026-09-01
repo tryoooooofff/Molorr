@@ -6281,9 +6281,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private inputTimer = 0;
 
   // ---- Client-authoritative movement ----
-  // The browser has the most accurate local player calculation, so it is the
-  // source of truth for the player's world position. The server threads that
-  // position into petal placement when it receives each C2S.INPUT packet.
+  // The browser predicts the local player immediately for responsiveness and
+  // streams that position to the server as a movement target each C2S.INPUT.
+  // The server still performs its own wall collision and correction.
   private localAuthActive = false;
   private clientVx = 0;
   private clientVy = 0;
@@ -8172,14 +8172,12 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   }
 
   /**
-   * Remove the snapshot round-trip lag from self-owned petals.
+   * Remove most snapshot round-trip lag from self-owned petals.
    *
-   * The server already places petals exactly around the client-reported
-   * position, but that result only reaches the browser through a ~100 ms
-   * snapshot stream (the C++ server sends snapshots every other tick). The
-   * local player's visible position is already ahead of that server state, so
-   * we shift the visible petal ring by the same delta. This keeps the flower's
-   * petals visually locked to the client-authoritative position.
+   * The server still simulates and collides the player, but the local body is
+   * rendered slightly ahead for responsiveness. We shift self-owned petal
+   * targets by that same delta while letting the normal entity spring handle
+   * the visible lerp, instead of hard-snapping the petals every frame.
    */
   private predictOwnPetals() {
     if (!this.localAuthActive || this.scene !== "game") return;
@@ -8193,16 +8191,13 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       if (this.petalOwners.get(e.id) !== this.selfId) continue;
       e.tx = e.serverTx + dx;
       e.ty = e.serverTy + dy;
-      e.x = e.tx;
-      e.y = e.ty;
     }
   }
 
   /**
-   * The browser owns the local player's world position. Every frame we run a
-   * small mirror of the server movement model and keep the self entity in sync.
-   * The same position is sent to the server in INPUT so it can place petals
-   * (and the rest of the local simulation) around the client-accurate spot.
+   * The browser predicts the local player's world position every frame so the
+   * controls stay instant. That same position is sent to the server in INPUT as
+   * a target for the authoritative movement + wall-collision step.
    */
   private updateLocalAuthoritativePlayer(dt: number) {
     if (!this.localAuthActive || this.scene !== "game") return;
