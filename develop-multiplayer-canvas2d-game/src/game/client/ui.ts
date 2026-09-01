@@ -2354,8 +2354,13 @@ const drawSoldierAnt = () => {
     ctx.translate(x, y);
     ctx.rotate(angle + Math.PI / 2);
 
-    // 起始角度与终止角度（跨度 11/7 π，即约 283°）
-    const startAngle = 0;
+    // 起始角度与终止角度（跨度 11/7 π，即约 283°）。
+    // The notch (the exposed black head) spans the remaining 3/7 π; centre it
+    // on local "up" (-π/2) so that after the `angle + π/2` rotation the face
+    // points exactly along the mob's facing direction instead of drifting off
+    // to one side.
+    const notchSpan = 2 * Math.PI - (11 / 7) * Math.PI; // 3/7 π
+    const startAngle = -Math.PI / 2 + notchSpan / 2;    // -2/7 π
     const endAngle = startAngle + (11 / 7) * Math.PI;
 
     // 计算两个端点的绝对坐标

@@ -3288,11 +3288,18 @@ public:
         }
       }
 
-      // Petal-to-player collision damage (PvP)
-      if (st.hitCd <= 0 && !isSummon) {
+      // Petal-to-player collision damage — Arena duels ONLY.
+      // Players can no longer damage other players in the open (PvE) world.
+      // Damage applies solely between opponents of the same Arena room:
+      // both in Arena mode, same room code, different teams (so 3v3
+      // teammates never hurt each other either).
+      if (st.hitCd <= 0 && !isSummon && p.mode == Mode::Arena && !p.arenaRoomCode.empty()) {
         float pr = def.radius * (1 + cell.rarity * 0.06f);
         for (auto* other : allPlayers) {
           if (other->id == p.id || other->mapId != p.mapId || !other->alive) continue;
+          if (other->mode != Mode::Arena) continue;
+          if (other->arenaRoomCode != p.arenaRoomCode) continue;
+          if (other->arenaTeam == p.arenaTeam) continue;
           if (other->hurtCd > 0) continue;
           collisionCounter.n++;
           float dx = other->x - st.x, dy = other->y - st.y;

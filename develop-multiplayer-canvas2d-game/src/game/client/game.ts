@@ -118,6 +118,13 @@ interface Ent {
   /** Render-rate interpolated target (between the two latest server samples). */
   interpTx?: number;
   interpTy?: number;
+  /**
+   * Previous/current snapshot facing samples. Mobs interpolate their turning
+   * between these along the shortest arc, mirroring the position samples, so
+   * their facing rotates continuously instead of snapping every 50 ms.
+   */
+  prevAngle?: number;
+  serverAngle?: number;
   angle: number;
   radius: number;
   hp: number;
@@ -219,6 +226,42 @@ const ENTITY_INTERP_DELAY = 0.05;
  * the frame-rate-dependent wobble the old hard-snap avoided.
  */
 const PETAL_SMOOTH_RATE = 24;
+
+/**
+ * Frame-rate-independent smoothing rate (per second) for mob positions.
+ * Mobs previously used the very stiff generic spring (`dt * 48`), which glues
+ * them to the render-rate interpolated target so hard that any snapshot
+ * arrival jitter reads as a stall-then-jump. Easing with
+ * `k = 1 - exp(-rate * dt)` lets a mob trail its target by ~1/rate seconds,
+ * which absorbs that jitter into a smooth curve. Mobs never orbit the local
+ * flower, so the tiny added latency is invisible.
+ */
+const MOB_SMOOTH_RATE = 24;
+
+/**
+ * Frame-rate-independent smoothing rate (per second) for mob turning. The
+ * facing target is already interpolated between the two latest snapshot
+ * samples along the shortest arc; this ease rounds off late-snapshot jumps so
+ * a turning mob sweeps instead of ticking between headings.
+ */
+const MOB_TURN_SMOOTH_RATE = 18;
+
+/**
+ * How far past the newest snapshot sample mob positions may be linearly
+ * extrapolated (seconds). When a snapshot arrives late the render time
+ * overruns the newest sample; without extrapolation the mob freezes and then
+ * jumps when the packet lands. Two ticks of dead reckoning bridges the gap;
+ * the cap keeps overshoot small when the mob actually changed direction.
+ */
+const MOB_MAX_EXTRAPOLATION = 0.1;
+
+/** Shortest signed angular difference `to - from`, wrapped to [-π, π]. */
+function angleDelta(from: number, to: number): number {
+  let d = (to - from) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  else if (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
 
 // Biome names sourced straight from the map list. Each item is tagged with every
 // biome that has at least one mob capable of dropping it.
@@ -7442,14 +7485,17 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         if (e.serverTx !== undefined) {
           e.prevTx = e.serverTx;
           e.prevTy = e.serverTy;
+          e.prevAngle = e.serverAngle;
           e.prevAt = e.curAt;
         } else {
           e.prevTx = x;
           e.prevTy = y;
+          e.prevAngle = angle;
           e.prevAt = this.time;
         }
         e.serverTx = x;
         e.serverTy = y;
+        e.serverAngle = angle;
         e.curAt = this.time;
         if (kind === ENT.PETAL) {
           this.petalOwners.set(id, currentPlayerId);
@@ -7472,7 +7518,11 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
             this.clientVy = 0;
           }
         }
-        e.angle = angle;
+        // Mobs turn smoothly toward the interpolated snapshot facing in the
+        // render loop (shortest-arc lerp in the entity pass); writing the raw
+        // sample here would snap their heading every 50 ms. Every other kind
+        // keeps the instant update.
+        if (e.kind !== ENT.MOB) e.angle = angle;
         e.radius = radius;
         e.hp = hp;
         e.rarity = rarity;
@@ -8005,7 +8055,8 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       // orbiting the render-smooth local flower). The self player is skipped:
       // its position is client-authoritative and must not fight the spring.
       if (!(e.id === this.selfId && e.kind === ENT.PLAYER)) {
-        const sampled = this.sampleServerPos(e, this.time);
+        const isMob = e.kind === ENT.MOB;
+        const sampled = this.sampleServerPos(e, this.time, isMob);
         if (sampled) {
           e.tx = sampled.x;
           e.ty = sampled.y;
@@ -8013,16 +8064,28 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
             e.interpTx = sampled.x;
             e.interpTy = sampled.y;
           }
+          // Mobs rotate toward the render-rate interpolated snapshot facing
+          // along the shortest arc, with a soft frame-rate-independent ease
+          // on top. This replaces the old hard `e.angle = angle` snapshot
+          // write, which snapped a turning mob's heading every 50 ms.
+          if (isMob) {
+            const ka = 1 - Math.exp(-MOB_TURN_SMOOTH_RATE * dt);
+            e.angle += angleDelta(e.angle, sampled.angle) * ka;
+          }
         }
       }
       // Petals ease toward their orbit target with a softer, frame-rate
       // independent lerp so the revolving motion reads smoothly instead of
-      // snapping between 20 Hz samples. Every other entity keeps the stiff
-      // catch-up spring so remote flowers/mobs still track tightly.
+      // snapping between 20 Hz samples. Mobs get the same exponential form at
+      // their own rate so snapshot arrival jitter is absorbed instead of
+      // rendered as a stall-then-jump. Every other entity keeps the stiff
+      // catch-up spring so remote flowers/projectiles still track tightly.
       const k =
         e.kind === ENT.PETAL
           ? 1 - Math.exp(-PETAL_SMOOTH_RATE * dt)
-          : Math.min(1, dt * ENTITY_SPRING_STIFFNESS);
+          : e.kind === ENT.MOB
+            ? 1 - Math.exp(-MOB_SMOOTH_RATE * dt)
+            : Math.min(1, dt * ENTITY_SPRING_STIFFNESS);
       e.x += (e.tx - e.x) * k;
       e.y += (e.ty - e.y) * k;
       e.hurt = Math.max(0, e.hurt - dt);
@@ -8252,22 +8315,49 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
    * bracket the render time, so the returned position moves continuously
    * instead of stepping 50 ms. Falls back to the newest sample when only one
    * is known yet (entity just spawned).
+   *
+   * The facing is interpolated the same way, along the shortest arc, so
+   * consumers (mob rendering) can rotate continuously between samples.
+   *
+   * With `extrapolate` set (mobs), when the render time overruns the newest
+   * sample — a snapshot arrived late or was dropped — the position is dead
+   * reckoned along the last segment's velocity for up to
+   * MOB_MAX_EXTRAPOLATION seconds instead of freezing, so a late packet reads
+   * as continued motion rather than a stall followed by a jump.
    */
-  private sampleServerPos(e: Ent, at: number): { x: number; y: number } | null {
+  private sampleServerPos(
+    e: Ent,
+    at: number,
+    extrapolate = false,
+  ): { x: number; y: number; angle: number } | null {
     if (e.serverTx === undefined || e.serverTy === undefined || e.curAt === undefined) return null;
+    const curAngle = e.serverAngle ?? e.angle;
     if (e.prevTx === undefined || e.prevTy === undefined || e.prevAt === undefined) {
-      return { x: e.serverTx, y: e.serverTy };
+      return { x: e.serverTx, y: e.serverTy, angle: curAngle };
     }
+    const prevAngle = e.prevAngle ?? curAngle;
     const rt = at - ENTITY_INTERP_DELAY;
     if (rt >= e.prevAt && rt <= e.curAt) {
       const t = (rt - e.prevAt) / Math.max(1e-3, e.curAt - e.prevAt);
       return {
         x: e.prevTx + (e.serverTx - e.prevTx) * t,
         y: e.prevTy + (e.serverTy - e.prevTy) * t,
+        angle: prevAngle + angleDelta(prevAngle, curAngle) * t,
       };
     }
-    if (rt < e.prevAt) return { x: e.prevTx, y: e.prevTy };
-    return { x: e.serverTx, y: e.serverTy };
+    if (rt < e.prevAt) return { x: e.prevTx, y: e.prevTy, angle: prevAngle };
+    if (extrapolate) {
+      const span = e.curAt - e.prevAt;
+      if (span > 1e-3) {
+        const over = Math.min(rt - e.curAt, MOB_MAX_EXTRAPOLATION);
+        return {
+          x: e.serverTx + ((e.serverTx - e.prevTx) / span) * over,
+          y: e.serverTy + ((e.serverTy - e.prevTy) / span) * over,
+          angle: curAngle,
+        };
+      }
+    }
+    return { x: e.serverTx, y: e.serverTy, angle: curAngle };
   }
 
   /**
