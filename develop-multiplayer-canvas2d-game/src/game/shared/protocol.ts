@@ -63,6 +63,13 @@ export const C2S = {
   ARENA_WHEEL:    22, // { u8 bagSlot(0..4095) }
   ARENA_READY:    23, // { u8 ready(0|1) }
   ARENA_LOADOUT:  24, // { u8[10] cells }
+  /**
+   * Request the damage leaderboard for an inspected mob (enemy panel).
+   * Payload: `u16 mobId`. The server replies with S2C.MOB_DAMAGE for that mob,
+   * or nothing if it no longer exists / is out of view. Sent ~2×/s while the
+   * enemy panel is open against a remote server.
+   */
+  INSPECT_MOB:    25,
 } as const;
 
 /** SWAP_ROW payload meaning "swap the entire row", not a single slot. */
@@ -144,6 +151,12 @@ export const S2C = {
   ARENA_EVENT:  17, // { u8 type, u8 seat, u16 payload }
   ARENA_RESULT: 18, // { u8 winnerTeam, u8 cardCount, Cell[cardCount] }
   ARENA_LIST:   19, // { u8 count, RoomBrief[count] }
+  /**
+   * Damage leaderboard for an inspected mob (reply to C2S.INSPECT_MOB).
+   * Payload: `u16 mobId`, `u32 maxHp`, `u8 count`, then `count` ×
+   * (`u16 playerId`, `str name`, `u32 damage`) sorted by damage descending.
+   */
+  MOB_DAMAGE:   20,
 } as const;
 
 export const ENT = {

@@ -47,6 +47,9 @@ constexpr int TOTAL_CELLS = HOTBAR_CELLS + BAG_MAX;
 constexpr uint8_t EMPTY_ITEM = 255;
 constexpr int MAX_RARITY = 10;
 constexpr int MAX_CRAFT_RARITY = 9;
+// Rarity at which a defeated wild mob is announced in chat (Ultra = 6,
+// Super = 7, Omega = 8). Wild mobs never roll above Omega via BLOCK_ZONES.
+constexpr int KILL_ANNOUNCE_MIN_RARITY = 6;
 constexpr int CRAFT_CARD_COUNT = 5;
 constexpr float CRAFT_CARDS_PER_ATTEMPT = 3.5f;
 constexpr int ORACLE_SKIP = 1;
@@ -113,7 +116,7 @@ enum C2S : uint8_t {
   C2S_AFK_ACK = 13, C2S_TALENT = 14, C2S_SYNC_LEVEL = 15, C2S_LOADOUT = 16,
   C2S_ARENA_CREATE = 17, C2S_ARENA_LIST = 18, C2S_ARENA_SEARCH = 19,
   C2S_ARENA_JOIN = 20, C2S_ARENA_LEAVE = 21, C2S_ARENA_WHEEL = 22,
-  C2S_ARENA_READY = 23, C2S_ARENA_LOADOUT = 24
+  C2S_ARENA_READY = 23, C2S_ARENA_LOADOUT = 24, C2S_INSPECT_MOB = 25
 };
 enum S2C : uint8_t {
   S2C_WELCOME = 1, S2C_SNAPSHOT = 2, S2C_INVENTORY = 3, S2C_STATS = 4,
@@ -121,7 +124,8 @@ enum S2C : uint8_t {
   S2C_AFK_CHECK = 9, S2C_DEBUG = 10, S2C_TALENT_BONUSES = 11,
   S2C_SQUAD_MEMBER_STATE = 12, S2C_LOADOUT_DATA = 13,
   S2C_ARENA_LOBBY = 14, S2C_ARENA_UPDATE = 15, S2C_ARENA_START = 16,
-  S2C_ARENA_EVENT = 17, S2C_ARENA_RESULT = 18, S2C_ARENA_LIST = 19
+  S2C_ARENA_EVENT = 17, S2C_ARENA_RESULT = 18, S2C_ARENA_LIST = 19,
+  S2C_MOB_DAMAGE = 20
 };
 enum EntKind : uint8_t { ENT_PLAYER = 0, ENT_MOB = 1, ENT_PETAL = 2, ENT_DROP = 3, ENT_PROJECTILE = 4 };
 enum Team : uint8_t { TEAM_HOSTILE = 0, TEAM_FRIENDLY = 1, TEAM_SELF = 2 };
@@ -2523,6 +2527,32 @@ public:
     const MobDef& def = MOBS[mob.type];
     World& world = worlds[mapId];
 
+    // Announce high-rarity kills (Ultra / Super / Omega) to everyone in chat.
+    // The credited player is whoever dealt the highest damage.
+    if (mob.rarity >= KILL_ANNOUNCE_MIN_RARITY && clientMap) {
+      int topId = 0;
+      float topDmg = 0;
+      for (auto& [pid, dmg] : mob.damageByPlayer) {
+        if (dmg > topDmg) { topDmg = dmg; topId = pid; }
+      }
+      Player* top = get((uint16_t)topId);
+      if (top && topDmg > 0) {
+        // Damage as a share of the mob's max HP, clamped to 1..100%.
+        int pct = (int)std::round(100.0 * topDmg / std::max(1.0f, mob.maxHp));
+        if (pct < 1) pct = 1;
+        if (pct > 100) pct = 100;
+        const std::string& rarityName =
+          mob.rarity < (int)RARITIES.size() ? RARITIES[mob.rarity].name : "Unknown";
+        std::string msg = "A " + rarityName + " " + def.name + " was defeated by " +
+          top->name + " with " + std::to_string(pct) + "% damage";
+        for (auto& [csId, cs] : *clientMap) {
+          if (cs->player && cs->player->mapId == mapId) {
+            sendChat(*cs, msg, "System", true, false);
+          }
+        }
+      }
+    }
+
     // XP and kill event for last hitter
     if (mob.lastHitBy) {
       Player* killer = get(mob.lastHitBy);
@@ -4243,6 +4273,34 @@ public:
     cs.events.push_back(w.b);
   }
 
+  // ---- Send inspected mob's damage leaderboard (enemy panel) ----
+  // Looks up a live, hostile mob on the given map and pushes S2C_MOB_DAMAGE
+  // with the per-player damage totals (sorted descending, capped at 12 rows).
+  // No-op when the mob is gone (dead / dormant / friendly), so the client's
+  // panel simply stops refreshing and closes on the next snapshot.
+  void sendMobDamage(ClientState& cs, int mapId, uint16_t mobId) {
+    if (mapId < 0 || mapId >= (int)worlds.size()) return;
+    for (auto& mob : worlds[mapId].mobs) {
+      if (mob.id != (int)mobId || mob.friendly) continue;
+      std::vector<std::pair<int, float>> v(mob.damageByPlayer.begin(), mob.damageByPlayer.end());
+      std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second > b.second; });
+      if (v.size() > 12) v.resize(12);
+      Writer w;
+      w.u8v(S2C_MOB_DAMAGE);
+      w.u16v((uint16_t)mob.id);
+      w.u32v((uint32_t)std::max(1.0f, mob.maxHp));
+      w.u8v((uint8_t)v.size());
+      for (auto& [pid, dmg] : v) {
+        Player* pl = get((uint16_t)pid);
+        w.u16v((uint16_t)pid);
+        w.str(pl ? pl->name : "");
+        w.u32v((uint32_t)dmg);
+      }
+      cs.events.push_back(w.b);
+      return;
+    }
+  }
+
   // ---- Send squad update ----
   Writer squadUpdateWriter(const std::string& squadCode) {
     Writer w;
@@ -5191,6 +5249,12 @@ int main() {
             for (int i = 0; i < 10; i++) {
               p->arenaLoadout[i] = readCell(r);
             }
+            break;
+          }
+
+          case C2S_INSPECT_MOB: {
+            uint16_t mobId = r.u16v();
+            sim.sendMobDamage(*cs, p->mapId, mobId);
             break;
           }
 

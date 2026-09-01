@@ -2376,6 +2376,12 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
         }
         break;
       }
+
+      case C2S.INSPECT_MOB: {
+        const mobId = r.u16();
+        this.sendMobDamage(c, mobId);
+        break;
+      }
     }
   }
 
@@ -2396,6 +2402,29 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
     w.str(sender.slice(0, 30));
     w.u8(isSystem ? 1 : 0);
     w.u8(isCraftReport ? 1 : 0);
+    c.send(w.bytes());
+  }
+
+  /** Send the inspected mob's per-player damage leaderboard (enemy panel). */
+  private sendMobDamage(c: ClientState, mobId: number) {
+    const p = c.player;
+    if (!p) return;
+    const world = this.worlds[p.mapId];
+    const mob = world?.mobs.find((m) => m.id === mobId && !m.friendly);
+    if (!mob) return;
+    const entries = Array.from(mob.damageByPlayer.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 12);
+    const w = new Writer(256);
+    w.u8(S2C.MOB_DAMAGE);
+    w.u16(mob.id);
+    w.u32(Math.max(1, Math.round(mob.maxHp)));
+    w.u8(entries.length);
+    for (const [pid, dmg] of entries) {
+      w.u16(pid);
+      w.str(this.clientOf(pid)?.player?.name ?? "");
+      w.u32(Math.max(0, Math.round(dmg)));
+    }
     c.send(w.bytes());
   }
 

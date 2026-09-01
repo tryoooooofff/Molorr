@@ -36,6 +36,9 @@ import {
   isHotbarCell,
   isMainCell,
   craftChanceFor,
+  dropRarityChancesForMob,
+  enemyDamageMult,
+  enemyRarityMult,
   getSummonCount,
   mapRarityToSummonRarity,
   oracleRequiredCount,
@@ -212,6 +215,9 @@ const LOADOUT_SAVE_KEY = "petalia.loadouts";
  * visibly jump/shake while the local flower moved smoothly.
  */
 const ENTITY_INTERP_DELAY = 0.05;
+
+/** Seconds for the craft-fail particle burst to progress 0 → 1. */
+const CRAFT_FAIL_BURST_DURATION = 0.6;
 
 /**
  * Softer, frame-rate-independent smoothing rate (per second) applied to petal
@@ -6376,6 +6382,16 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private selfId = 0;
   private inputTimer = 0;
 
+  // ---- Enemy inspect panel ----
+  /** Entity id of the mob currently shown in the enemy info panel (0 = closed). */
+  private inspectMobId = 0;
+  /** Seconds until the next C2S.INSPECT_MOB refresh while the panel is open. */
+  private inspectTimer = 0;
+  /** Mob id the latest S2C.MOB_DAMAGE leaderboard belongs to. */
+  private mobDamageMobId = 0;
+  /** Latest damage leaderboard for the inspected mob (remote/multiplayer only). */
+  private mobDamageLeaderboard: { maxHp: number; entries: { id: number; name: string; dmg: number }[] } | null = null;
+
   // ---- Client-authoritative movement ----
   // The browser predicts the local player immediately for responsiveness and
   // streams that position to the server as a movement target each C2S.INPUT.
@@ -6577,6 +6593,11 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private craftFillTotal = 320; // ms, longer than original 200 for smoother feel
   // Dedicated result card pulse (when result is visible)
   private craftResultPulse = 0;
+  // Fail-burst progress (0 → 1) — drives the outward explosion when a craft
+  // fails. The input-card ring is contracted to 0.2 radius by the spin, so the
+  // burst is triggered from the *full* pentagon radius instead of the center,
+  // making the cards fly outward rather than gathering into the middle.
+  private craftFailBurst = 1;
   // Particle bursts
   private craftSuccessParticles: CraftParticle[] = [];
   private craftFailParticles: CraftParticle[] = [];
@@ -7672,6 +7693,21 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       this.chat.addMessage(text, sender, isSystem, isCraftReport, isSelf);
       break;
     }
+    case S2C.MOB_DAMAGE: {
+      const mobId = r.u16();
+      const maxHp = r.u32();
+      const count = r.u8();
+      const entries: { id: number; name: string; dmg: number }[] = [];
+      for (let i = 0; i < count; i++) {
+        const pid = r.u16();
+        const name = r.str();
+        const dmg = r.u32();
+        entries.push({ id: pid, name, dmg });
+      }
+      this.mobDamageMobId = mobId;
+      this.mobDamageLeaderboard = { maxHp, entries };
+      break;
+    }
     case S2C.AFK_CHECK: {
       const active = r.u8() === 1;
       const secondsLeft = r.u16();
@@ -8240,6 +8276,26 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       if (this.syncLevelTimer <= 0) {
         this.syncLevelTimer = 10;
         this.sendSyncLevel();
+      }
+      // Enemy inspect panel: refresh the damage leaderboard while open against
+      // a remote server, and auto-close the panel once the mob is gone (killed
+      // or dormant — it disappears from the entity stream).
+      if (this.inspectMobId) {
+        const inspected = this.ents.get(this.inspectMobId);
+        if (!inspected || inspected.kind !== ENT.MOB) {
+          this.inspectMobId = 0;
+          this.mobDamageLeaderboard = null;
+          this.mobDamageMobId = 0;
+        } else if (this.net?.kind === "remote") {
+          this.inspectTimer -= dt;
+          if (this.inspectTimer <= 0) {
+            this.inspectTimer = 0.5;
+            const w = new Writer(4);
+            w.u8(C2S.INSPECT_MOB);
+            w.u16(inspected.id);
+            this.net.send(w.bytes());
+          }
+        }
       }
       // Debug overlay: only ping the server while the panel is actually
       // shown, so leaving it off costs nothing on the wire.
@@ -9035,6 +9091,7 @@ private bagLayout() {
     }
     if (result) this.craftStartShow(result);
     else {
+      this.craftFailBurst = 0;
       this.craftSpawnFailParticles();
       this.craftShake = 0.6;
     }
@@ -9049,6 +9106,7 @@ private bagLayout() {
       this.craftSpawnSuccessParticles(this.rarityRgb(this.craftPending.rarity), Math.min(50 * Math.max(1, this.craftPending.count), 1600));
     } else {
       // Nothing crafted — burst failure particles from each pentagon slot.
+      this.craftFailBurst = 0;
       this.craftSpawnFailParticles();
       this.craftShake = 0.65;
       this.craftPhase = "none";
@@ -9115,6 +9173,14 @@ private bagLayout() {
       this.craftShowTimer += dt;
     }
 
+    // Fail-burst timer: ramps 0 → 1 while idle/showing so the fail particles
+    // explode outward, and is reset to 0 the moment a new spin begins.
+    if (this.craftPhase === "rotating" || this.craftPhase === "waiting" || this.craftPhase === "merging") {
+      this.craftFailBurst = 0;
+    } else if (this.craftFailBurst < 1) {
+      this.craftFailBurst = Math.min(1, this.craftFailBurst + dt / CRAFT_FAIL_BURST_DURATION);
+    }
+
     if (this.craftFillActive) {
       this.craftFillElapsed += dt * 1000;
       if (this.craftFillElapsed >= this.craftFillTotal) {
@@ -9158,24 +9224,34 @@ private bagLayout() {
     }
   }
 
+  /** Progress 0 → 1 of the fail burst (only matters while craftFailBurst is advancing). */
+  private craftFailProgress(): number {
+    return ease.outBack(Math.min(1, this.craftFailBurst));
+  }
+
   private craftSpawnFailParticles() {
-    const { cx, cy } = this.craftLayout();
+    const { cx, cy, radius } = this.craftLayout();
     const color: [number, number, number] = this.craftSel ? this.rarityRgb(this.craftSel.rarity) : [200, 80, 80];
+    // Pop the burst outward from the FULL pentagon radius. The input-card ring
+    // has contracted toward the center during the spin, so a burst sampled at
+    // the live (contracted) radius reads as the cards "gathering into the
+    // middle". Expanding from the full radius — and pushing each particle
+    // radially outward as the burst progresses — makes it read as the cards
+    // blowing apart instead.
     for (let i = 0; i < CRAFT_CARD_COUNT; i++) {
-      // Burst from the ring at its current (contracted) radius so the particles
-      // match where the cards actually are at the moment of the failure.
-      const factor = this.craftRadiusFactor();
       const [ox, oy] = this.craftLocalPos(i);
-      const rad = (Math.PI / 180) * this.craftAngle;
-      const wx = cx + ox * factor * Math.cos(rad) - oy * factor * Math.sin(rad);
-      const wy = cy + ox * factor * Math.sin(rad) + oy * factor * Math.cos(rad);
+      const slotAngle = Math.atan2(oy, ox);
+      const len = Math.max(1, Math.hypot(ox, oy));
       const count = 10 + Math.floor(Math.random() * 11);
       for (let j = 0; j < count; j++) {
-        const angle = Math.random() * 2 * Math.PI;
-        const speed = 2 + Math.random() * 5;
+        const b = this.craftFailProgress();
+        const angle = slotAngle + (Math.random() - 0.5) * 0.9;
+        const speed = (0.8 + 1.4 * b) * (5 + Math.random() * 5);
         this.craftFailParticles.push({
-          x: wx,
-          y: wy,
+          // Nudge the spawn point slightly outward along the burst so the very
+          // first frame already has visible separation from the center.
+          x: cx + (ox / len) * (radius + 4 + 14 * b),
+          y: cy + (oy / len) * (radius + 4 + 14 * b),
           vx: Math.cos(angle) * speed,
           vy: Math.sin(angle) * speed,
           life: 1.0,
@@ -9215,6 +9291,220 @@ private bagLayout() {
       return out;
     }
     return [160, 160, 160];
+  }
+
+  /** Compact stat formatting (1.5K / 2.3M / 1.2B) for the enemy panel readouts. */
+  private fmtNum(n: number): string {
+    if (n >= 1e12) return (n / 1e12).toFixed(1) + "T";
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + "B";
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+    return Math.floor(n).toString();
+  }
+
+  /**
+   * Enemy info panel (right side). Shows the clicked mob's name, sprite,
+   * rarity, live HP, ATTACK / SPEED, and either its drop table (offline /
+   * LocalTransport) or the per-player damage leaderboard (remote server).
+   */
+  private renderEnemyPanel() {
+    if (!this.inspectMobId || !this.alive) return;
+    const mob = this.ents.get(this.inspectMobId);
+    if (!mob || mob.kind !== ENT.MOB) return;
+    const def = MOBS[mob.type];
+    if (!def || mob.rarity <= 0) return;
+    const ctx = this.ctx;
+
+    const PW = Math.min(340, this.w - 24);
+    const PH = Math.min(600, this.h - 24);
+    const px = this.w - PW - 12;
+    const py = this.h / 2 - PH / 2;
+    let cy = py;
+
+    const rc = this.rarityRgb(mob.rarity);
+    const rRgb = `rgb(${rc[0]},${rc[1]},${rc[2]})`;
+    const rRgba = `rgba(${rc[0]},${rc[1]},${rc[2]},0.2)`;
+
+    ctx.save();
+
+    // Background + top rarity glow bar.
+    ctx.fillStyle = "rgba(15,15,25,0.72)";
+    roundRect(ctx, px, py, PW, PH, 15);
+    ctx.fill();
+    ctx.fillStyle = rRgba;
+    roundRect(ctx, px, py, PW, 64, 15);
+    ctx.fill();
+    ctx.fillStyle = "rgba(0,0,0,0.25)";
+    ctx.fillRect(px, py + 48, PW, 16);
+
+    // Header: name, sprite, rarity label.
+    cy += 26;
+    text(ctx, def.name, px + PW / 2, cy, 22, rRgb);
+    cy += 34;
+    const spriteSize = 84;
+    drawMob(ctx, mob.type, px + PW / 2, cy + spriteSize / 2, spriteSize * 0.46, 0, this.time, false, mob.rarity, 0, mob.id);
+    cy += spriteSize + 14;
+    text(ctx, (RARITIES[mob.rarity]?.name ?? "?").toUpperCase(), px + PW / 2, cy, 12, rRgb);
+    cy += 18;
+
+    const line = () => {
+      ctx.strokeStyle = "rgba(255,255,255,0.15)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(px + 20, cy);
+      ctx.lineTo(px + PW - 20, cy);
+      ctx.stroke();
+      cy += 16;
+    };
+    line();
+
+    // Health bar (live, from the latest snapshot).
+    const hpPct = Math.max(0, Math.min(1, mob.hp));
+    const barW = PW - 40;
+    const barH = 18;
+    text(ctx, "Health", px + 22, cy, 11, "rgba(255,255,255,0.7)", "left");
+    cy += 16;
+    ctx.fillStyle = "#222";
+    roundRect(ctx, px + 20, cy, barW, barH, 6);
+    ctx.fill();
+    const hpColor = hpPct > 0.5 ? "#7cfc00" : hpPct > 0.25 ? "#ffaa00" : "#ff4444";
+    if (hpPct > 0) {
+      ctx.fillStyle = hpColor;
+      roundRect(ctx, px + 20, cy, barW * hpPct, barH, 6);
+      ctx.fill();
+    }
+    text(ctx, `${(hpPct * 100).toFixed(1)}%`, px + 20 + barW / 2, cy + barH / 2, 12, "#ffffff");
+    cy += barH + 18;
+
+    // Attack + speed (Petalia mobs carry no armor stat).
+    const attack = def.damage * enemyDamageMult(mob.rarity);
+    text(ctx, `ATTACK: ${this.fmtNum(attack)}`, px + 22, cy, 12, "#ff6666", "left");
+    text(ctx, `SPEED: ${Math.round(def.speed)}`, px + PW - 22, cy, 12, "#66aaff", "right");
+    cy += 20;
+    line();
+
+    if (this.net?.kind === "remote") {
+      this.renderDamageLeaderboard(ctx, mob, px, py, PW, PH, cy);
+    } else {
+      this.renderEnemyDrops(ctx, mob, px, py, PW, PH, cy);
+    }
+
+    ctx.restore();
+  }
+
+  /** Drop table (offline / singleplayer): one cell per drop × rarity tier. */
+  private renderEnemyDrops(
+    ctx: CanvasRenderingContext2D,
+    mob: Ent,
+    px: number,
+    py: number,
+    PW: number,
+    PH: number,
+    startY: number,
+  ) {
+    const def = MOBS[mob.type];
+    let cy = startY;
+    text(ctx, "Drops", px + 22, cy, 13, "#ffd700", "left");
+    cy += 20;
+
+    const chances = dropRarityChancesForMob(mob.rarity);
+    const itemSize = 45;
+    const itemGap = 10;
+    const perRow = Math.max(2, Math.floor((PW - 40 + itemGap) / (itemSize + itemGap)));
+
+    for (const drop of def.drops) {
+      const itemDef = ITEMS[drop.item];
+      if (!itemDef) continue;
+      let col = 0;
+      let rowConsumed = false;
+      for (const { rarity, chance } of chances) {
+        const rIdx = RARITIES.findIndex((x) => x.name === rarity);
+        if (rIdx < 0) continue;
+        const cellX = px + 20 + col * (itemSize + itemGap);
+        if (cy + itemSize + 22 > py + PH) break;
+        const rCol = this.rarityRgb(rIdx);
+        const dark = `rgb(${Math.max(0, rCol[0] - 120)},${Math.max(0, rCol[1] - 120)},${Math.max(0, rCol[2] - 120)})`;
+        const bright = `rgb(${rCol[0]},${rCol[1]},${rCol[2]})`;
+        ctx.fillStyle = dark;
+        roundRect(ctx, cellX, cy, itemSize, itemSize, 6);
+        ctx.fill();
+        ctx.strokeStyle = bright;
+        ctx.lineWidth = 2;
+        roundRect(ctx, cellX, cy, itemSize, itemSize, 6);
+        ctx.stroke();
+        drawItemIcon(ctx, drop.item, cellX + itemSize / 2, cy + itemSize / 2, itemSize * 0.5, 0, rIdx);
+        const nameFont = itemDef.name.length > 8 ? 7 : 8;
+        text(ctx, itemDef.name, cellX + itemSize / 2, cy + itemSize - 6, nameFont, "#ffffff");
+        text(ctx, `${(chance * 100).toFixed(1)}%`, cellX + itemSize / 2, cy + itemSize + 12, 9, bright);
+        col++;
+        rowConsumed = true;
+        if (col >= perRow) {
+          col = 0;
+          cy += itemSize + 30;
+          rowConsumed = false;
+        }
+      }
+      if (rowConsumed) cy += itemSize + 30;
+    }
+  }
+
+  /** Damage leaderboard (remote / multiplayer): per-player damage of the inspected mob. */
+  private renderDamageLeaderboard(
+    ctx: CanvasRenderingContext2D,
+    mob: Ent,
+    px: number,
+    py: number,
+    PW: number,
+    PH: number,
+    startY: number,
+  ) {
+    let cy = startY;
+    text(ctx, "Damage", px + 22, cy, 13, "#ff6666", "left");
+    text(ctx, "Leaderboard", px + PW - 22, cy, 13, "#ff6666", "right");
+    cy += 20;
+    ctx.strokeStyle = "rgba(255,255,255,0.15)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(px + 20, cy);
+    ctx.lineTo(px + PW - 20, cy);
+    ctx.stroke();
+    cy += 16;
+
+    const lb = this.mobDamageLeaderboard;
+    if (!lb || this.mobDamageMobId !== mob.id || lb.entries.length === 0) {
+      text(ctx, "No damage yet", px + PW / 2, cy + 20, 12, "#888888");
+      return;
+    }
+    const maxHp = lb.maxHp || 1;
+    const rankColors = ["#FFD700", "#C0C0C0", "#CD7F32"];
+    const rowH = 44;
+    const barW = PW - 40;
+    const barH = 12;
+    for (let i = 0; i < lb.entries.length; i++) {
+      if (cy + rowH > py + PH - 10) break;
+      const e = lb.entries[i];
+      const pct = Math.min(1, e.dmg / maxHp);
+      const pctStr = (pct * 100).toFixed(1) + "%";
+      const isMe = e.id === this.selfId;
+      const rankLabel = i < 3 ? ["1", "2", "3"][i] : `${i + 1}.`;
+      const rankColor = rankColors[i] || (isMe ? "#aaddff" : "#cccccc");
+      const nameStr = isMe ? "You" : (e.name || String(e.id));
+      text(ctx, rankLabel, px + 22, cy + 10, 13, rankColor, "left");
+      text(ctx, nameStr, px + 44, cy + 10, 11, isMe ? "#aaddff" : "#dddddd", "left");
+      text(ctx, this.fmtNum(e.dmg), px + PW - 22, cy + 10, 11, rankColor, "right");
+      ctx.fillStyle = "rgba(255,255,255,0.08)";
+      roundRect(ctx, px + 20, cy + 24, barW, barH, 4);
+      ctx.fill();
+      if (pct > 0) {
+        ctx.globalAlpha = 0.75;
+        ctx.fillStyle = isMe ? "#aaddff" : (rankColors[i] || "#888888");
+        roundRect(ctx, px + 20, cy + 24, Math.max(2, barW * pct), barH, 4);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      text(ctx, pctStr, px + 20 + barW / 2, cy + 24 + barH / 2, 9, "#ffffff");
+      cy += rowH;
+    }
   }
 
   /** Start the slot grow+spin fill animation (when a card lands). */
@@ -9502,7 +9792,16 @@ private bagLayout() {
         e.preventDefault();
         return;
       }
-      if (e.code === "Escape") this.gotoMenu();
+      if (e.code === "Escape") {
+        if (this.inspectMobId) {
+          this.inspectMobId = 0;
+          this.mobDamageLeaderboard = null;
+          this.mobDamageMobId = 0;
+          e.preventDefault();
+        } else {
+          this.gotoMenu();
+        }
+      }
       // QuickSlot hotkeys: 'r' swaps both rows at once; the number keys swap a
       // single main slot with its secondary partner.
       if (e.code === "KeyR") {
@@ -11129,6 +11428,27 @@ private bagLayout() {
       }
       return;
     }
+
+    // Clicking a hostile mob opens the enemy info panel; clicking empty ground
+    // closes it. (Movement follows the mouse, so a ground click has no other
+    // meaning and is safe to repurpose as "close panel".)
+    const worldX = (mx - this.w / 2) / this.viewZoom + this.camX;
+    const worldY = (my - this.h / 2) / this.viewZoom + this.camY;
+    let hitMob = 0;
+    for (const e of this.ents.values()) {
+      if (e.kind !== ENT.MOB || e.team === TEAM.FRIENDLY || e.team === TEAM.SELF) continue;
+      if (e.rarity <= 0) continue; // Common mobs carry no panel, like the reference.
+      const rr = e.radius + 6;
+      const dx = e.x - worldX;
+      const dy = e.y - worldY;
+      if (dx * dx + dy * dy <= rr * rr) { hitMob = e.id; break; }
+    }
+    this.inspectMobId = hitMob;
+    this.inspectTimer = 0;
+    if (!hitMob) {
+      this.mobDamageLeaderboard = null;
+      this.mobDamageMobId = 0;
+    }
   }
 
   /** The bag and the craft panel are the same size, so only one is ever open. */
@@ -12569,6 +12889,7 @@ private bagLayout() {
     this.chat.draw(this.ctx, this.h - this.hotbarHeight() + chatLift);
     this.renderBag();
     this.renderCraft();
+    this.renderEnemyPanel();
 
     // 天赋面板（游戏内由主菜单 Talent 入口打开后显示在最上层）。
     this.talent.draw(this.ctx);
