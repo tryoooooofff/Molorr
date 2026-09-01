@@ -5605,13 +5605,20 @@ class ShopSystem {
         if (this.hitRect(m.rect, dx, dy)) return false;
       }
     }
-    // redeem 页签:兑换输入框(该页签无滚动,直接放行给点击)
+    // redeem 页签:兑换输入框 + 确认按钮(该页签无滚动,直接放行给点击)。
+    // 若不排除确认按钮,`beginTouch` 会把点击当作滚动手势吞掉,
+    // `handleClick` 永远不会执行 → 兑换码按了没反应。
     if (this.currentTab === "redeem") {
       const boxW = Math.min(420, this.PW - 120);
       const boxX = px + this.PW / 2 - boxW / 2;
       const boxY = py + 112 + 130;
       const boxH = 44;
       if (dx >= boxX && dx <= boxX + boxW && dy >= boxY && dy <= boxY + boxH) return false;
+      const btnW = 140;
+      const btnH = 40;
+      const btnX = px + this.PW / 2 - btnW / 2;
+      const btnY = boxY + boxH + 30;
+      if (dx >= btnX && dx <= btnX + btnW && dy >= btnY && dy <= btnY + btnH) return false;
     }
 
     this.touchScrolling = true;
@@ -8928,17 +8935,38 @@ private bagLayout() {
     return ease.inOutCubic(Math.min(1, this.craftMergeTime / this.craftMergeDuration));
   }
 
-  /** Contraction curve from CraftAnimation.getContractedPosition (slots suck toward center). */
-  private craftContractedPos(progress: number, ox: number, oy: number): [number, number] {
-    const originalRadius = Math.sqrt(ox * ox + oy * oy);
-    const originalAngle = Math.atan2(oy, ox);
+  /** Scalar 0..1 radius factor of the input-card ring, continuous across the whole
+   *  animation so the cards never snap between phases. During the spin the ring
+   *  contracts with a little oscillation; it then holds that contraction while
+   *  awaiting the server, and eases the rest of the way into the center on merge.
+   */
+  private craftContractionFactor(progress: number): number {
     const maxContraction = 1.0;
     const minContraction = 0.2;
     const currentBase = maxContraction - (maxContraction - minContraction) * progress;
     const frequency = 4.0 + progress * 7.0;
     const oscillation = Math.sin(progress * Math.PI * frequency);
-    const factor = currentBase + 0.3 * oscillation;
-    return [Math.cos(originalAngle) * originalRadius * factor, Math.sin(originalAngle) * originalRadius * factor];
+    return currentBase + 0.3 * oscillation;
+  }
+
+  /** Current radius factor of the input-card ring (1 full pentagon -> 0 center),
+   *  chosen per phase so the transition looks continuous rather than pausing and
+   *  re-expanding between the spin and the merge.
+   */
+  private craftRadiusFactor(): number {
+    if (this.craftPhase === "rotating") {
+      return this.craftContractionFactor(Math.min(1, this.craftRotTime / this.craftRotDuration));
+    }
+    if (this.craftPhase === "waiting") {
+      // Hold the contracted ring where the spin left it — no outward snap while
+      // we wait for a slow server response.
+      return 0.2;
+    }
+    if (this.craftPhase === "merging") {
+      // Ease the remaining contraction (0.2) into the center (0) for the result.
+      return 0.2 * (1 - this.craftMergeProgress());
+    }
+    return 1;
   }
 
   /** Begin the accelerating spin + contraction animation when a craft is fired.
@@ -9008,13 +9036,25 @@ private bagLayout() {
       const progress = Math.min(this.craftRotTime / this.craftRotDuration, 1);
       const baseMin = 300, baseMax = 800;
       this.craftRotSpeed = baseMin + (baseMax - baseMin) * progress;
+      // Continuous spin: the ring keeps its momentum at the end of the spin so it
+      // never snaps to a stop before the merge.
       this.craftAngle -= this.craftRotDir * this.craftRotSpeed * dt;
       if (this.craftRotTime >= this.craftRotDuration) {
-        this.craftAngle = 0;
-        this.craftPhase = "waiting";
-        this.craftWaitStart = performance.now();
+        if (this.craftPending) {
+          // Result already arrived while spinning — flow straight into the merge
+          // with no dead pause. The ring is already contracted, so this is smooth.
+          this.craftPhase = "merging";
+          this.craftMergeTime = 0;
+        } else {
+          this.craftPhase = "waiting";
+          this.craftWaitStart = performance.now();
+        }
       }
     } else if (this.craftPhase === "waiting") {
+      // Preserve the residual spin while we wait for a slow server response so
+      // the motion keeps flowing instead of freezing, then continues into the merge.
+      this.craftRotSpeed = Math.max(120, this.craftRotSpeed - 240 * dt);
+      this.craftAngle -= this.craftRotDir * this.craftRotSpeed * dt;
       if ((performance.now() - this.craftWaitStart) / 1000 >= this.craftWaitDuration) {
         if (this.craftPending) {
           // Success: before the reveal, the ring of input cards is pulled
@@ -9029,10 +9069,13 @@ private bagLayout() {
     } else if (this.craftPhase === "merging") {
       this.craftMergeTime += dt;
       const m = Math.min(1, this.craftMergeTime / this.craftMergeDuration);
-      // Decelerating residual spin so the ring eases to a stop as it converges.
-      this.craftAngle -= this.craftRotDir * 160 * (1 - m) * dt;
+      // Ease the carried spin smoothly down to a stop as the ring converges, so
+      // there is no visible transition bump between the spin and the merge.
+      this.craftRotSpeed *= 1 - ease.inOutCubic(m);
+      this.craftAngle -= this.craftRotDir * this.craftRotSpeed * dt;
       if (this.craftMergeTime >= this.craftMergeDuration) {
         this.craftAngle = 0;
+        this.craftRotSpeed = 0;
         this.craftFinalizeShow();
       }
     } else if (this.craftPhase === "showing") {
@@ -9089,10 +9132,13 @@ private bagLayout() {
     const { cx, cy } = this.craftLayout();
     const color: [number, number, number] = this.craftSel ? this.rarityRgb(this.craftSel.rarity) : [200, 80, 80];
     for (let i = 0; i < CRAFT_CARD_COUNT; i++) {
+      // Burst from the ring at its current (contracted) radius so the particles
+      // match where the cards actually are at the moment of the failure.
+      const factor = this.craftRadiusFactor();
       const [ox, oy] = this.craftLocalPos(i);
       const rad = (Math.PI / 180) * this.craftAngle;
-      const wx = cx + ox * Math.cos(rad) - oy * Math.sin(rad);
-      const wy = cy + ox * Math.sin(rad) + oy * Math.cos(rad);
+      const wx = cx + ox * factor * Math.cos(rad) - oy * factor * Math.sin(rad);
+      const wy = cy + ox * factor * Math.sin(rad) + oy * factor * Math.cos(rad);
       const count = 10 + Math.floor(Math.random() * 11);
       for (let j = 0; j < count; j++) {
         const angle = Math.random() * 2 * Math.PI;
@@ -14798,14 +14844,11 @@ if (me) {
     const merging = this.craftMergeProgress();
     layout.bigSlots.forEach((baseRect, i) => {
       const [ox, oy] = this.craftLocalPos(i);
-      const progress = this.craftPhase === "rotating" ? Math.min(1, this.craftRotTime / this.craftRotDuration) : 0;
-      let [px, py] = this.craftPhase === "rotating" ? this.craftContractedPos(progress, ox, oy) : [ox, oy];
-      // Success merge: the whole ring eases into the result slot at the center.
-      if (merging > 0) {
-        const k = 1 - merging;
-        px = ox * k;
-        py = oy * k;
-      }
+      // Continuous ring radius: contracts through the spin, holds while waiting,
+      // then eases into the center on merge — no outward snap between phases.
+      const factor = this.craftRadiusFactor();
+      const px = ox * factor;
+      const py = oy * factor;
       const rad = (Math.PI / 180) * this.craftAngle;
       const cx = layout.cx + px * Math.cos(rad) - py * Math.sin(rad);
       const cy = layout.cy + px * Math.sin(rad) + py * Math.cos(rad);
