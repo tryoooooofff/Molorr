@@ -12,7 +12,8 @@ type BonusData = {
   last_bonus_time: string | null;
   bonus_history: { date: string; multiplier: number; streak: number; extra?: boolean }[];
   saved_multiplier: number;
-  extra_claim_date: string | null;
+  /** Seconds the CURRENT window lasts (membership bonusMinutes may extend the daily one; Extra is always 1h). */
+  bonus_duration: number;
 };
 
 /**
@@ -21,15 +22,19 @@ type BonusData = {
  * starts. The simulation still owns the actual drop spawning and expiry.
  *
  * Membership integration:
+ *  - `setBonusMinutes(n)` (Bronze 15 → Diamond 120, Ruby 0) EXTENDS the daily
+ *    window: base 1h + n minutes (plain players only get 1h/day).
  *  - `setMembershipBuff(n)` (Diamond +1, Ruby +2) stacks on TOP of the window
  *    multiplier: daily streak 2x/3x/4x becomes 3x/4x/5x (Diamond) or
  *    4x/5x/6x (Ruby); the Extra Bonus base 3x becomes 4x/5x.
- *  - `setExtraBonusAvailable(true)` (Ruby only) unlocks a SEPARATE "Extra
- *    Bonus" claim: once per day, its own 1-hour window at 3x + buff.
+ *  - `setExtraBonusAvailable(true)` (Ruby only) unlocks the SEPARATE "Extra
+ *    Bonus" claim: each click opens its own 1h window at 3x + buff, with NO
+ *    daily limit — the 1h window itself is the cooldown (claim again as soon
+ *    as it expires).
  *
- * `saved_multiplier` always stores the BASE of the running window; the buff is
- * applied live so mid-window membership changes are reflected without
- * double-counting.
+ * `saved_multiplier` stores the BASE of the running window and `bonus_duration`
+ * its length in seconds; the buff is applied live so mid-window membership
+ * changes are reflected without double-counting.
  */
 export class BonusSystem {
   private data: BonusData;
@@ -37,6 +42,8 @@ export class BonusSystem {
   private endsAt = 0;
   /** Membership buff (Diamond +1, Ruby +2) added on top of the window multiplier. */
   private _membershipBuff = 0;
+  /** Membership bonus minutes (Bronze 15 → Diamond 120) added to the DAILY window length. */
+  private _bonusMinutes = 0;
   /** Ruby "Extra Bonus" perk: true while a membership granting it is active. */
   private _extraAvailable = false;
 
@@ -46,7 +53,7 @@ export class BonusSystem {
   }
 
   private load(): BonusData {
-    const defaults: BonusData = { last_claim_date: null, streak_days: 0, total_claims: 0, last_bonus_time: null, bonus_history: [], saved_multiplier: 1, extra_claim_date: null };
+    const defaults: BonusData = { last_claim_date: null, streak_days: 0, total_claims: 0, last_bonus_time: null, bonus_history: [], saved_multiplier: 1, bonus_duration: BONUS_DURATION };
     try {
       const saved = localStorage.getItem(BONUS_KEY);
       if (!saved) return defaults;
@@ -69,7 +76,10 @@ export class BonusSystem {
   private restore() {
     if (!this.data.last_bonus_time) return;
     const started = new Date(this.data.last_bonus_time).getTime();
-    const remaining = BONUS_DURATION - (Date.now() - started) / 1000;
+    // The window may be longer than the 1h base (membership bonusMinutes),
+    // so use the stored length; old saves fall back to the 1h base.
+    const duration = this.data.bonus_duration > 0 ? this.data.bonus_duration : BONUS_DURATION;
+    const remaining = duration - (Date.now() - started) / 1000;
     if (Number.isFinite(remaining) && remaining > 0) {
       this.active = true;
       this.endsAt = Date.now() + remaining * 1000;
@@ -86,6 +96,7 @@ export class BonusSystem {
       this.endsAt = 0;
       this.data.last_bonus_time = null;
       this.data.saved_multiplier = 1;
+      this.data.bonus_duration = BONUS_DURATION;
       this.save();
       return true;
     }
@@ -109,6 +120,22 @@ export class BonusSystem {
 
   get membershipBuff() { return this._membershipBuff; }
 
+  /**
+   * Membership bonus minutes (Bronze +15 → Diamond +120, Ruby 0). They EXTEND
+   * the daily window: plain players get 1h/day, a Diamond member 3h. No-op
+   * when unchanged.
+   */
+  setBonusMinutes(n: number) {
+    const minutes = Math.max(0, Math.min(600, Math.floor(n) || 0));
+    if (minutes === this._bonusMinutes) return;
+    this._bonusMinutes = minutes;
+  }
+
+  get bonusMinutes() { return this._bonusMinutes; }
+
+  /** Length of the DAILY bonus window: 1h base + membership bonus minutes. */
+  get dailyDuration() { return BONUS_DURATION + this._bonusMinutes * 60; }
+
   /** Ruby "Extra Bonus" perk — set by the shop while the membership is valid. */
   setExtraBonusAvailable(v: boolean) {
     this._extraAvailable = !!v;
@@ -122,21 +149,21 @@ export class BonusSystem {
   /**
    * Extra Bonus claim rules (independent of the daily streak claim):
    *  - only while the Ruby membership is active,
-   *  - once per day,
+   *  - unlimited over time — the 1h window itself is the cooldown: each click
+   *    opens a fresh 1h window, claimable again as soon as it expires,
    *  - only when no bonus window is currently running.
    */
   get canClaimExtra() {
-    return this.extraAvailable && !this.active && this.data.extra_claim_date !== this.today();
+    return this.extraAvailable && !this.active;
   }
-
-  get extraClaimedToday() { return this.data.extra_claim_date === this.today(); }
 
   claimExtra() {
     this.update();
     if (!this.canClaimExtra) return false;
     this.active = true;
+    // Extra windows are always exactly 1h (the cooldown between claims).
+    this.data.bonus_duration = BONUS_DURATION;
     this.endsAt = Date.now() + BONUS_DURATION * 1000;
-    this.data.extra_claim_date = this.today();
     this.data.last_bonus_time = new Date().toISOString();
     // Store the base only; the membership buff is applied live (see currentMultiplier).
     this.data.saved_multiplier = EXTRA_BONUS_BASE;
@@ -163,7 +190,9 @@ export class BonusSystem {
     // mid-window membership changes are reflected without double-counting.
     this.data.saved_multiplier = this.nextMultiplier();
     this.active = true;
-    this.endsAt = Date.now() + BONUS_DURATION * 1000;
+    // Window length = 1h base + membership bonusMinutes (plain players: 1h/day).
+    this.data.bonus_duration = this.dailyDuration;
+    this.endsAt = Date.now() + this.dailyDuration * 1000;
     this.data.last_claim_date = today;
     this.data.last_bonus_time = new Date().toISOString();
     this.data.total_claims++;

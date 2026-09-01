@@ -4433,8 +4433,12 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
   // 区块达到 ZONE_MOB_LIMITS 上限时不再生成，只有生物减少后才补生。
 }
   private setBonusStatus(p: Player, multiplier: number, seconds: number) {
-    const safeMultiplier = Math.max(1, Math.min(5, Math.floor(multiplier)));
-    const safeSeconds = Math.max(0, Math.min(60 * 60, Math.floor(seconds)));
+    // Anti-cheat caps, matched to the highest LEGITIMATE client values:
+    //  - multiplier: daily streak 4x + Ruby buff 2 = 6x (Extra Bonus tops out at 5x)
+    //  - duration:   daily 1h base + Diamond bonusMinutes 120 = 3h
+    // (The Extra Bonus window is always exactly the 1h base.)
+    const safeMultiplier = Math.max(1, Math.min(6, Math.floor(multiplier)));
+    const safeSeconds = Math.max(0, Math.min(60 * 60 * 3, Math.floor(seconds)));
     p.bonusMultiplier = safeSeconds > 0 ? safeMultiplier : 1;
     p.bonusEndsAt = safeSeconds > 0 ? Date.now() + safeSeconds * 1000 : 0;
   }
