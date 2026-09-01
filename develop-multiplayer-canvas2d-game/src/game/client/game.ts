@@ -5605,13 +5605,20 @@ class ShopSystem {
         if (this.hitRect(m.rect, dx, dy)) return false;
       }
     }
-    // redeem 页签:兑换输入框(该页签无滚动,直接放行给点击)
+    // redeem 页签:兑换输入框 + 确认按钮(该页签无滚动,直接放行给点击)。
+    // 若不排除确认按钮,`beginTouch` 会把点击当作滚动手势吞掉,
+    // `handleClick` 永远不会执行 → 兑换码按了没反应。
     if (this.currentTab === "redeem") {
       const boxW = Math.min(420, this.PW - 120);
       const boxX = px + this.PW / 2 - boxW / 2;
       const boxY = py + 112 + 130;
       const boxH = 44;
       if (dx >= boxX && dx <= boxX + boxW && dy >= boxY && dy <= boxY + boxH) return false;
+      const btnW = 140;
+      const btnH = 40;
+      const btnX = px + this.PW / 2 - btnW / 2;
+      const btnY = boxY + boxH + 30;
+      if (dx >= btnX && dx <= btnX + btnW && dy >= btnY && dy <= btnY + btnH) return false;
     }
 
     this.touchScrolling = true;
