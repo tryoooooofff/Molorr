@@ -4906,7 +4906,8 @@ class ChallengeSystem {
 //  - 星星(⭐)是玩家货币,存入本地存档 SaveData.stars;
 //  - 物品购买/兑换码奖励直接写入本地背包 this.bag —— 主菜单场景的背包就是
 //    本地存档,点击 PLAY 时随 JOIN 同步到服务器;
-//  - 会员存 localStorage,纯本地生效(ruby 会员同步主菜单 Extra Bonus 面板)。
+//  - 会员存 localStorage,纯本地生效(bonusBuff 叠加每日 Bonus 倍数;
+//    ruby 会员额外拥有每日一次、1 小时的 Extra Bonus 窗口)。
 // 入口：主菜单顶部 Shop 图标(top_shop)。
 // =====================================================================
 
@@ -5044,8 +5045,8 @@ class ShopSystem {
     { id: "silver", label: "Silver", price: 90000, color: [160, 160, 175], bonusMinutes: 30, xpMult: 1.1, dropRate: 0.02, bonusBuff: 0, extraBonus: false, desc: ["+30 min bonus time/day", "×1.1 XP", "+2% drop rate"] },
     { id: "gold", label: "Gold", price: 200000, color: [220, 180, 40], bonusMinutes: 60, xpMult: 1.3, dropRate: 0.05, bonusBuff: 0, extraBonus: false, desc: ["+1 h bonus time/day", "×1.3 XP", "+5% drop rate"] },
     { id: "platinum", label: "Platinum", price: 900000, color: [100, 210, 230], bonusMinutes: 90, xpMult: 1.4, dropRate: 0.075, bonusBuff: 0, extraBonus: false, desc: ["+1.5 h bonus time/day", "×1.4 XP", "+7.5% drop rate"] },
-    { id: "diamond", label: "Diamond", price: 20000000, color: [140, 230, 255], bonusMinutes: 120, xpMult: 1.5, dropRate: 0.1, bonusBuff: 1, extraBonus: false, desc: ["+2 h bonus time/day", "×1.5 XP", "+10% drop rate", "+1 Bonus Buff (3x→4x, base 3x)"] },
-    { id: "ruby", label: "Ruby", price: 200000000, color: [220, 40, 80], bonusMinutes: 0, xpMult: 1.7, dropRate: 0.15, bonusBuff: 2, extraBonus: true, desc: ["×1.7 XP", "+15% drop rate", "+2 Bonus Buff (3x→5x)", "Extra Bonus: 1 month"] },
+    { id: "diamond", label: "Diamond", price: 20000000, color: [140, 230, 255], bonusMinutes: 120, xpMult: 1.5, dropRate: 0.1, bonusBuff: 1, extraBonus: false, desc: ["+2 h bonus time/day", "×1.5 XP", "+10% drop rate", "+1 Bonus Buff (+1x to Daily Bonus)"] },
+    { id: "ruby", label: "Ruby", price: 200000000, color: [220, 40, 80], bonusMinutes: 0, xpMult: 1.7, dropRate: 0.15, bonusBuff: 2, extraBonus: true, desc: ["×1.7 XP", "+15% drop rate", "+2 Bonus Buff (+2x to Daily Bonus)", "Extra Bonus: 5x · 1h · once/day (1 month)"] },
   ];
 
   /** 与 RARITIES 对齐的稀有度价格倍率(参考 PRICE_MULTIPLIERS)。 */
@@ -5073,9 +5074,7 @@ class ShopSystem {
   constructor(game: GameClient) {
     this.game = game;
     this.activeMembership = this.loadMembership();
-    if (this.activeMembership && this.activeMembership.tierId === "ruby" && this.activeMembership.expiresAt > Date.now()) {
-      this.game.setRubyMembership(this.activeMembership.expiresAt);
-    }
+    this.syncMembershipEffects();
     for (const def of ITEMS) {
       if (!def) continue;
       this.shopItems.push({ item: def.id, basePrice: this.BASE_PRICES[def.name] ?? 10 });
@@ -5256,6 +5255,18 @@ class ShopSystem {
     return this.MEMBERSHIP_TIERS.find(t => t.id === this.activeMembership?.tierId) ?? null;
   }
 
+  /**
+   * 把会员效果同步到游戏（幂等，每帧安全调用；会员过期后自动降级）：
+   *  - bonusBuff（Diamond +1 / Ruby +2）叠加在每日 Bonus 的 streak 倍数上；
+   *  - extraBonus 仅 Ruby 拥有，解锁 Extra Bonus 按钮（每日一次独立窗口）。
+   */
+  syncMembershipEffects() {
+    const m = this.activeMembership;
+    const valid = !!m && m.expiresAt > Date.now();
+    const tier = valid ? this.MEMBERSHIP_TIERS.find(t => t.id === m.tierId) ?? null : null;
+    this.game.setMembershipEffects(tier?.bonusBuff ?? 0, !!tier?.extraBonus);
+  }
+
   private purchaseMembership(tier: MembershipTier) {
     if (this.game.stars < tier.price) {
       this.showMessage(`❌ Need ${this.formatPrice(tier.price)} Stars for ${tier.label}`);
@@ -5273,7 +5284,7 @@ class ShopSystem {
     this.game.addStars(-tier.price);
     this.saveMembership(tier.id, 30);
     this.showMessage(`✅ ${tier.label} Membership activated! (30 days)`);
-    if (tier.id === "ruby" && this.activeMembership) this.game.setRubyMembership(this.activeMembership.expiresAt);
+    this.syncMembershipEffects();
     this.game.saveNow();
   }
 
@@ -5388,10 +5399,10 @@ class ShopSystem {
       const tier = this.MEMBERSHIP_TIERS.find(t => t.id === membershipTier);
       if (tier) {
         this.saveMembership(tier.id, membershipDuration);
-        if (tier.id === "ruby" && this.activeMembership) this.game.setRubyMembership(this.activeMembership.expiresAt);
         rewards.push(`${tier.label} membership ${membershipDuration}d`);
       }
     }
+    this.syncMembershipEffects();
 
     this.usedRecords.set(key, true);
     this.saveUsedRecords();
@@ -6826,11 +6837,21 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     return true;
   }
 
-  /** Ruby 会员同步主菜单 Extra Bonus 面板状态。 */
-  setRubyMembership(expiresAt: number) {
-    this.rubyMembershipActive = true;
-    this.extraBonusActive = true;
-    this.extraBonusExpireTime = expiresAt;
+  /**
+   * 会员效果同步（由 ShopSystem 调用，幂等；会员过期后自动降级）：
+   *  - bonusBuff: Diamond +1 / Ruby +2，叠加在每日 Bonus 的 streak 倍数上
+   *    （无会员 2x/3x/4x → Diamond 3x/4x/5x → Ruby 4x/5x/6x）；
+   *  - extraBonus: 仅 Ruby 拥有，解锁主菜单 Extra Bonus 按钮——每日额外一次
+   *    独立 1 小时窗口（固定 3x 基础 + 会员 buff → Ruby 5x）。
+   */
+  setMembershipEffects(bonusBuff: number, extraBonus: boolean) {
+    const prevBuff = this.bonus.membershipBuff;
+    this.bonus.setMembershipBuff(bonusBuff);
+    this.bonus.setExtraBonusAvailable(extraBonus);
+    // 窗口进行中若 buff 变化，立即把新倍数同步给服务器。
+    if (prevBuff !== this.bonus.membershipBuff && this.bonus.isActive && this.connected) {
+      this.sendBonusStatus();
+    }
   }
 
   /** 立即写盘(商店购买/兑换后调用;主菜单没有周期存档)。 */
@@ -7999,6 +8020,8 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     }
     this.mapFlash = Math.max(0, this.mapFlash - dt * 1.6);
     if (this.bonus.update()) this.sendBonusStatus();
+    // 会员可能在运行中到期 → 降级 buff / Extra Bonus 状态（幂等，每帧调用）。
+    this.shopSystem.syncMembershipEffects();
 
     this.bagAnim += ((this.bagOpen ? 1 : 0) - this.bagAnim) * Math.min(1, dt * 10);
     this.craftAnim += ((this.craftOpen ? 1 : 0) - this.craftAnim) * Math.min(1, dt * 10);
@@ -10007,11 +10030,8 @@ private bagLayout() {
   // ── Bonus 面板（_drawBonusPanel）状态，参考 MainMenu ──
   /** 面板矩形（右上角），每帧在 renderMenu 中重算。 */
   private extraBonusButton: number[] = [0, 0, 180, 165];
-  /** Extra Bonus 尚未实现：保持默认未激活（面板显示 inactive，点击 → Coming soon）。 */
-  private extraBonusActive = false;
-  private extraBonusExpireTime = 0;
-  private extraBonusPermanent = false;
-  private rubyMembershipActive = false;
+  // Extra Bonus 的实际状态在 this.bonus（BonusSystem）里：
+  // extraAvailable（Ruby 会员）/ extraClaimedToday / canClaimExtra / extraMultiplier。
   private _bonusClaimRect: number[] | null = null;
   private _bonusExtraRect: number[] | null = null;
   /** 面板/按钮 hover 状态（'bonus_claim' / 'bonus_extra'）。 */
@@ -10561,7 +10581,18 @@ private bagLayout() {
         if (this.hitArr(this._bonusClaimRect, mx, my)) {
           if (this.bonus.canClaim() && this.bonus.claim()) this.sendBonusStatus();
         } else if (this.hitArr(this._bonusExtraRect, mx, my)) {
-          this.showMenuToast('Coming soon');
+          // Extra Bonus（Ruby 专属，独立于每日 streak 领取）：每日一次 1 小时窗口，
+          // 倍数 = 固定 3x + 会员 buff（Ruby = 5x）。
+          if (!this.bonus.extraAvailable) {
+            this.showMenuToast('Extra Bonus requires Ruby membership');
+          } else if (this.bonus.claimExtra()) {
+            this.sendBonusStatus();
+            this.showMenuToast(`✅ Extra Bonus: ${this.bonus.currentMultiplier}x for 1h`);
+          } else if (this.bonus.extraClaimedToday) {
+            this.showMenuToast('Extra Bonus: claimed — back tomorrow');
+          } else {
+            this.showMenuToast('Wait for the active bonus to expire first');
+          }
         }
         return;
       }
@@ -12350,16 +12381,24 @@ private bagLayout() {
     const btn2Y = btn1Y + btnH + (isMobile ? 4 : 8);
     this._bonusExtraRect = [btn2X, btn2Y, btnW, btnH];
 
-    const extraActive = (this.extraBonusActive && Date.now() < this.extraBonusExpireTime) ||
-                        this.extraBonusPermanent || this.rubyMembershipActive;
     const extraHover = this.hoveredButton === 'bonus_extra';
     let extraColor: number[], extraText: string;
-    if (extraActive) {
-        extraColor = extraHover ? [80, 180, 80] : [60, 160, 60];
-        extraText = isMobile ? `Extra (${remainingTime})` : `Extra Bonus (${remainingTime})`;
-    } else {
+    if (!bonusSys.extraAvailable) {
+        // 无 Ruby 会员：置灰不可用
         extraColor = extraHover ? [150, 150, 150] : [120, 120, 120];
         extraText = isMobile ? 'Extra (inactive)' : 'Extra Bonus (inactive)';
+    } else if (isActive) {
+        // 有窗口进行中（每日或 Extra）：显示剩余时间，窗口结束后才能领取 Extra
+        extraColor = extraHover ? [80, 180, 80] : [60, 160, 60];
+        extraText = isMobile ? `Extra (${remainingTime})` : `Extra Bonus (${remainingTime})`;
+    } else if (bonusSys.extraClaimedToday) {
+        // 今日已领取
+        extraColor = extraHover ? [120, 160, 120] : [90, 130, 90];
+        extraText = isMobile ? 'Extra (done)' : 'Extra Bonus (done)';
+    } else {
+        // 可领取：显示将获得的倍数
+        extraColor = extraHover ? [80, 180, 80] : [60, 160, 60];
+        extraText = isMobile ? `Extra (${bonusSys.extraMultiplier}x)` : `Extra Bonus (${bonusSys.extraMultiplier}x)`;
     }
 
     ctx.fillStyle = `rgb(${extraColor.join(',')})`;
