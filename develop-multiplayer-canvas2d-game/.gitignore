@@ -7,7 +7,9 @@ out
 *.tsbuildinfo
 
 # C++ server build artifacts
-uWebSockets/
+uWebSockets/uSockets/*.o
+uWebSockets/uSockets/*.a
+uWebSockets/uSockets/*.dSYM
 server-cpp/petalia-server
 
 # Local game server player saves (runtime artifact)
