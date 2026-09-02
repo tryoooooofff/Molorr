@@ -14629,6 +14629,7 @@ if (me) {
       }
     }
     // ---- 最近的 Ultra+ 生物血条（屏幕顶部中央） ----
+    // 布局：生物名在血条上方，稀有度标签移到血条下方并用稀有度颜色填充。
     if (this.nearestUltraPlus) {
       const target = this.nearestUltraPlus;
       const rarityInfo = RARITIES[target.rarity];
@@ -14639,18 +14640,20 @@ if (me) {
       const barH = 28;
       const barX = barCenterX - barW / 2;
       const rarityColor = rarityInfo?.color ?? "#ff4444";
+      const rarityName = rarityInfo?.name ?? "";
+      const showRarityTag = this.settings?.showRarity !== false;
 
       ctx.save();
-      // 名字（稀有度色 + 黑描边）
+      // 名字（白色 + 黑描边）
       ctx.font = `bold 18px ${FONT_FAMILY || "Arial"}`;
       ctx.textAlign = "center";
       ctx.textBaseline = "bottom";
       ctx.strokeStyle = "#000000";
       ctx.lineWidth = 4;
       ctx.lineJoin = "round";
-      ctx.strokeText(`${rarityInfo?.name ?? ""} ${targetName}`, barCenterX, barY - 5);
+      ctx.strokeText(targetName, barCenterX, barY - 5);
       ctx.fillStyle = "#ffffff";
-      ctx.fillText(`${rarityInfo?.name ?? ""} ${targetName}`, barCenterX, barY - 5);
+      ctx.fillText(targetName, barCenterX, barY - 5);
 
       // 血条背景（深灰圆角）
       roundRect(ctx, barX, barY, barW, barH, 14);
@@ -14660,12 +14663,12 @@ if (me) {
       ctx.lineWidth = 2;
       ctx.stroke();
 
-      // 血条前景（稀有度颜色，基于 displayHp 平滑过渡）
+      // 血条前景（绿色，基于 displayHp 平滑过渡；稀有度颜色只用于下方标签）
       const pct = Math.max(0, Math.min(1, target.displayHp ?? target.hp));
       const fillW = Math.max(0, (barW - 4) * pct);
       if (fillW > 0) {
         roundRect(ctx, barX + 2, barY + 2, fillW, barH - 4, 12);
-        ctx.fillStyle ="#66cc00";
+        ctx.fillStyle = "#66cc00";
         ctx.fill();
       }
 
@@ -14680,6 +14683,25 @@ if (me) {
       ctx.lineJoin = "round";
       ctx.strokeText(hpText, barCenterX, barY + barH / 2);
       ctx.fillText(hpText, barCenterX, barY + barH / 2);
+
+      // 稀有度标签（血条下方，用稀有度颜色填充）
+      if (rarityName && showRarityTag) {
+        // 深色稀有度（如 Unique）改用白描边，否则黑字配黑边完全看不见。
+        const rgbMatch = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(rarityColor);
+        const lum = rgbMatch
+          ? (0.299 * Number(rgbMatch[1]) + 0.587 * Number(rgbMatch[2]) + 0.114 * Number(rgbMatch[3])) / 255
+          : 1;
+        const tagY = barY + barH + 4;
+        ctx.font = `bold 13px ${FONT_FAMILY || "Arial"}`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.lineJoin = "round";
+        ctx.strokeStyle = lum < 0.35 ? "rgba(255,255,255,0.9)" : "#000000";
+        ctx.lineWidth = 3;
+        ctx.strokeText(rarityName, barCenterX, tagY);
+        ctx.fillStyle = rarityColor;
+        ctx.fillText(rarityName, barCenterX, tagY);
+      }
       ctx.restore();
     }
 

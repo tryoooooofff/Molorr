@@ -110,6 +110,15 @@ export const MAX_RARITY = RARITIES.length - 1;
 export const MAX_CRAFT_RARITY = RARITIES.length - 2;
 
 /**
+ * Lowest rarity index that triggers a server-wide chat announcement when a
+ * player produces a card ("Super+" = Super, Omega, Eternal, Unique). Applies
+ * to both normal crafting and Oracle conversions. Derived from the rarity
+ * table so the ladder can be reordered without silently breaking the gate.
+ */
+const SUPER_RARITY_INDEX = RARITIES.findIndex((r) => r.name === "Super");
+export const CRAFT_ANNOUNCE_MIN_RARITY = SUPER_RARITY_INDEX >= 0 ? SUPER_RARITY_INDEX : 7;
+
+/**
  * Visual and collision-size multiplier for mobs at each rarity, in rarity
  * order. Unique is outside the normal ladder, so it uses the Eternal cap.
  */

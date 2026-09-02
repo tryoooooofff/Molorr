@@ -50,6 +50,10 @@ constexpr int MAX_CRAFT_RARITY = 9;
 // Rarity at which a defeated wild mob is announced in chat (Ultra = 6,
 // Super = 7, Omega = 8). Wild mobs never roll above Omega via BLOCK_ZONES.
 constexpr int KILL_ANNOUNCE_MIN_RARITY = 6;
+// Rarity at which a crafted/Oracle-converted card is announced server-wide in
+// chat ("Super+" = Super 7, Omega 8, Eternal 9, Unique 10). Must stay in sync
+// with CRAFT_ANNOUNCE_MIN_RARITY in src/game/shared/defs.ts.
+constexpr int CRAFT_ANNOUNCE_MIN_RARITY = 7;
 constexpr int CRAFT_CARD_COUNT = 5;
 constexpr float CRAFT_CARDS_PER_ATTEMPT = 3.5f;
 constexpr int ORACLE_SKIP = 1;
@@ -1963,6 +1967,7 @@ public:
     if (successes > 0) {
       addItem(p, item, rarity + 1, successes);
       pushEvent(cs, EVT_CRAFT_OK, p.x, p.y, successes, item, rarity + 1);
+      announceCraft(p, item, rarity + 1, successes);
     } else {
       int kept = 1 + (int)((float)rand() / (float)RAND_MAX * std::min(4, needed));
       addItem(p, item, rarity, kept);
@@ -1990,6 +1995,7 @@ public:
     addItem(p, item, targetRarity, 1);
     p.nextOracleAt = now + (int64_t)(ORACLE_COOLDOWN_HOURS * 3600 * 1000);
     pushEvent(cs, EVT_ORACLE_OK, p.x, p.y, 0, item, targetRarity);
+    announceCraft(p, item, targetRarity, 1);
     p.dirty = true;
     p.statsDirty = true;
   }
@@ -4271,6 +4277,24 @@ public:
     w.u8v(isSystem ? 1 : 0);
     w.u8v(isCraftReport ? 1 : 0);
     cs.events.push_back(w.b);
+  }
+
+  // ---- Server-wide Super+ craft announcement ----
+  // Any player who produces a Super-or-better card (normal craft or Oracle
+  // conversion) is announced in EVERY connected client's chat, regardless of
+  // which map they are on. Sent as a craft report so the client colorizes the
+  // rarity and item names.
+  void announceCraft(Player& p, int item, int rarity, int count) {
+    if (rarity < CRAFT_ANNOUNCE_MIN_RARITY || !clientMap) return;
+    if (item < 0 || item >= (int)ITEMS.size()) return;
+    std::string rarityName = rarity < (int)RARITIES.size() ? RARITIES[rarity].name : std::string("Unknown");
+    std::string msg = p.name + " crafted ";
+    if (count > 1) msg += std::to_string(count) + "x ";
+    msg += rarityName + " " + ITEMS[item].name + "!";
+    for (auto& [csId, other] : *clientMap) {
+      if (!other || !other->player) continue;
+      sendChat(*other, msg, "System", true, true);
+    }
   }
 
   // ---- Send inspected mob's damage leaderboard (enemy panel) ----
