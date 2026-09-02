@@ -7186,14 +7186,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     } catch {
       /* ignore */
     }
-    if (this.account) {
-      void fetch("/api/save", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ token: this.account.token, data }),
-      }).catch(() => {});
-    }
-    // Sync all localStorage data to cloud storage
+    // Sync to storage
     if (CloudStorage.isReady) {
       CloudStorage.instance.set(SAVE_KEY, data);
       CloudStorage.instance.set("petalia.name", this.playerName);
@@ -7201,15 +7194,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   }
 
   private async pullCloudSave() {
-    if (!this.account) return;
-    try {
-      const res = await fetch(`/api/save?token=${encodeURIComponent(this.account.token)}`);
-      if (!res.ok) return;
-      const json = (await res.json()) as { data?: SaveData };
-      if (json.data) this.applySave(json.data);
-    } catch {
-      /* ignore */
-    }
+    // Pure local storage mode
   }
 
   private async auth(mode: "login" | "register") {
@@ -7217,43 +7202,24 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       this.authStatus = "Username and password need 3+ characters.";
       return;
     }
-    this.authStatus = mode === "login" ? "Signing in..." : "Creating account...";
+    this.authStatus = mode === "login" ? "Signed in locally." : "Account created locally.";
+    this.account = { username: this.authUser, token: "local_" + Date.now() };
     try {
-      const res = await fetch(`/api/auth/${mode}`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ username: this.authUser, password: this.authPass }),
-      });
-      const json = (await res.json()) as { token?: string; error?: string; data?: SaveData };
-      if (!res.ok || !json.token) {
-        this.authStatus = json.error || "Failed.";
-        return;
-      }
-      this.account = { username: this.authUser, token: json.token };
       localStorage.setItem(AUTH_KEY, JSON.stringify(this.account));
-      // Re-initialize CloudStorage with the new token and load all data
-      if (CloudStorage.isReady) {
-        CloudStorage.instance.set(AUTH_KEY, this.account);
-        void CloudStorage.instance.loadAll().then((allData) => {
-          // Apply all loaded data to localStorage
-          for (const [k, v] of Object.entries(allData)) {
-            if (v !== null && v !== undefined) {
-              try { localStorage.setItem(k, JSON.stringify(v)); } catch {}
-            }
-          }
-        });
-      }
-      this.playerName = this.authUser;
-      if (json.data) this.applySave(json.data);
-      this.authStatus = `Signed in as ${this.authUser}. Progress syncs to the database.`;
     } catch {
-      this.authStatus = "Network error.";
+      /* ignore */
     }
+    this.playerName = this.authUser;
+    this.authStatus = `Signed in as ${this.authUser}. Progress saved locally.`;
   }
 
   private logout() {
     this.account = null;
-    localStorage.removeItem(AUTH_KEY);
+    try {
+      localStorage.removeItem(AUTH_KEY);
+    } catch {
+      /* ignore */
+    }
     if (CloudStorage.isReady) {
       CloudStorage.instance.remove(AUTH_KEY);
     }

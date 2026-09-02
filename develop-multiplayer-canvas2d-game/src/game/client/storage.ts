@@ -1,25 +1,18 @@
 /**
- * CloudStorageService
+ * LocalStorageService (CloudStorage interface compatibility)
  * --------------------
- * Unified client-side storage abstraction that persists all player data
- * (settings, talents, achievements, mob gallery, etc.) to PostgreSQL via
- * the /api/storage endpoint. Falls back to localStorage when the API is
- * unavailable or the user is offline.
+ * Pure client-side storage abstraction using localStorage.
+ * Retains the same API (get, set, remove, loadAll, flush) for all game subsystems
+ * (settings, talents, achievements, mob gallery, loadouts) with 0 HTTP network requests.
  */
-
-const STORAGE_API = "/api/storage";
-
-/** How long (ms) a remote value is cached in memory before re-fetching. */
-const CACHE_TTL = 30_000;
 
 interface CacheEntry {
   value: unknown;
-  expiry: number;
 }
 
 interface StorageCallbacks {
   /** Returns the auth token for the current user, or null if not logged in. */
-  getToken: () => string | null;
+  getToken?: () => string | null;
 }
 
 /**
@@ -28,91 +21,68 @@ interface StorageCallbacks {
  */
 export class CloudStorage {
   private static _instance: CloudStorage | null = null;
-  private callbacks: StorageCallbacks;
   private cache = new Map<string, CacheEntry>();
-  /** Queue of pending writes (key → value) to batch. */
-  private dirty = new Map<string, unknown>();
-  private flushTimer: ReturnType<typeof setTimeout> | null = null;
-  private flushInterval = 2000; // flush every 2s
 
-  private constructor(callbacks: StorageCallbacks) {
-    this.callbacks = callbacks;
-  }
+  private constructor(_callbacks?: StorageCallbacks) {}
 
   /** Initialize (or re-initialize) the singleton. */
-  static init(callbacks: StorageCallbacks): CloudStorage {
-    CloudStorage._instance = new CloudStorage(callbacks);
+  static init(callbacks?: StorageCallbacks): CloudStorage {
+    if (!CloudStorage._instance) {
+      CloudStorage._instance = new CloudStorage(callbacks);
+    }
     return CloudStorage._instance;
   }
 
   static get instance(): CloudStorage {
     if (!CloudStorage._instance) {
-      throw new Error("CloudStorage not initialized. Call CloudStorage.init() first.");
+      CloudStorage._instance = new CloudStorage();
     }
     return CloudStorage._instance;
   }
 
   static get isReady(): boolean {
-    return CloudStorage._instance !== null;
+    return true;
   }
 
   // ──────────────────────────────────────────────────
-  //  Public API
+  //  Public API (Pure localStorage - Zero HTTP traffic)
   // ──────────────────────────────────────────────────
 
   /**
-   * Read a value by key. Returns cached value if available and fresh,
-   * otherwise fetches from the server. Falls back to localStorage.
+   * Read a value by key directly from localStorage.
    */
   async get<T>(key: string): Promise<T | null> {
-    // 1. Check memory cache
     const cached = this.cache.get(key);
-    if (cached && Date.now() < cached.expiry) {
+    if (cached) {
       return cached.value as T;
     }
 
-    // 2. Try remote
-    const token = this.callbacks.getToken();
-    if (token) {
-      try {
-        const res = await fetch(`${STORAGE_API}?token=${encodeURIComponent(token)}&key=${encodeURIComponent(key)}`);
-        if (res.ok) {
-          const json = (await res.json()) as { data: T | null };
-          this.cache.set(key, { value: json.data, expiry: Date.now() + CACHE_TTL });
-          return json.data;
-        }
-      } catch {
-        // Network error – fall through to localStorage
-      }
+    if (typeof window === "undefined" || !window.localStorage) {
+      return null;
     }
 
-    // 3. Fallback to localStorage
     try {
       const raw = localStorage.getItem(key);
-      return raw ? (JSON.parse(raw) as T) : null;
+      if (raw === null) return null;
+      const parsed = JSON.parse(raw) as T;
+      this.cache.set(key, { value: parsed });
+      return parsed;
     } catch {
       return null;
     }
   }
 
   /**
-   * Write a value by key. Schedules a batched flush to the server.
-   * Also writes to localStorage as a fallback.
+   * Write a value by key directly to localStorage.
    */
   set(key: string, value: unknown): void {
-    // Update memory cache immediately
-    this.cache.set(key, { value, expiry: Date.now() + CACHE_TTL });
-
-    // Write to localStorage as fallback
+    this.cache.set(key, { value });
+    if (typeof window === "undefined" || !window.localStorage) return;
     try {
       localStorage.setItem(key, JSON.stringify(value));
     } catch {
-      /* storage full */
+      /* storage full / private mode */
     }
-
-    // Schedule batched remote write
-    this.dirty.set(key, value);
-    this.scheduleFlush();
   }
 
   /**
@@ -120,95 +90,44 @@ export class CloudStorage {
    */
   remove(key: string): void {
     this.cache.delete(key);
-    this.dirty.delete(key);
+    if (typeof window === "undefined" || !window.localStorage) return;
     try {
       localStorage.removeItem(key);
     } catch {
       /* ignore */
     }
-    // Schedule a flush with null to signal deletion
-    this.dirty.set(key, null);
-    this.scheduleFlush();
   }
 
   /**
-   * Load all data from the server at once (useful on login).
-   * Returns the full data map.
+   * Load all data from localStorage.
    */
   async loadAll(): Promise<Record<string, unknown>> {
-    const token = this.callbacks.getToken();
-    if (!token) return {};
-
+    const res: Record<string, unknown> = {};
+    if (typeof window === "undefined" || !window.localStorage) return res;
     try {
-      const res = await fetch(`${STORAGE_API}?token=${encodeURIComponent(token)}`);
-      if (res.ok) {
-        const json = (await res.json()) as { data: Record<string, unknown> };
-        if (json.data) {
-          // Populate cache
-          for (const [k, v] of Object.entries(json.data)) {
-            this.cache.set(k, { value: v, expiry: Date.now() + CACHE_TTL });
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key) {
+          try {
+            const raw = localStorage.getItem(key);
+            if (raw !== null) {
+              res[key] = JSON.parse(raw);
+            }
+          } catch {
+            res[key] = localStorage.getItem(key);
           }
-          return json.data;
         }
       }
     } catch {
-      /* network error */
+      /* ignore */
     }
-    return {};
+    return res;
   }
 
   /**
-   * Force an immediate flush of all pending writes.
+   * Flush is a no-op since writes to localStorage are synchronous.
    */
   async flush(): Promise<void> {
-    if (this.flushTimer) {
-      clearTimeout(this.flushTimer);
-      this.flushTimer = null;
-    }
-
-    if (this.dirty.size === 0) return;
-
-    const token = this.callbacks.getToken();
-    if (!token) {
-      this.dirty.clear();
-      return;
-    }
-
-    const batch = new Map(this.dirty);
-    this.dirty.clear();
-
-    // Build the full data snapshot from our cache
-    const data: Record<string, unknown> = {};
-    for (const [k, v] of batch) {
-      if (v !== null) {
-        data[k] = v;
-      }
-    }
-
-    try {
-      await fetch(STORAGE_API, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ token, data }),
-      });
-    } catch {
-      // Re-queue on failure
-      for (const [k, v] of batch) {
-        if (v !== null) this.dirty.set(k, v);
-      }
-      this.scheduleFlush();
-    }
-  }
-
-  // ──────────────────────────────────────────────────
-  //  Internal
-  // ──────────────────────────────────────────────────
-
-  private scheduleFlush(): void {
-    if (this.flushTimer) return;
-    this.flushTimer = setTimeout(() => {
-      this.flushTimer = null;
-      void this.flush();
-    }, this.flushInterval);
+    return Promise.resolve();
   }
 }
