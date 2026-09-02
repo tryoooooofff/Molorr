@@ -30,6 +30,36 @@ const DEBUG = process.env.DEBUG === "true";
 let totalRequests = 0;
 let totalUpgrades = 0;
 
+// ── HTTP audit log ────────────────────────────────────────────────────
+// Real gameplay traffic is 100% WebSocket (an upgrade + binary frames never
+// passes through the HTTP request handler). EVERY plain-HTTP response this
+// process emits is therefore non-game traffic: Render health probes,
+// UptimeRobot pings, stray browsers/crawlers, curl. Each response is counted
+// and ONE aggregated line is printed per minute — which path was hit, the
+// status sent, where it was routed, and WHO asked (user-agent) — so the log
+// shows both the problem (HTTP that shouldn't exist) and where it went.
+const httpAudit = new Map(); // "METHOD path → status via … | ua=…" → count
+let httpAuditMinute = 0;
+
+function auditHttpResponse(req, statusCode, via) {
+  httpAuditMinute++;
+  const ua = String(req.headers["user-agent"] || "-").replace(/\s+/g, " ").slice(0, 80);
+  const key = `${req.method} ${req.url} → ${statusCode} via ${via} | ua=${ua}`;
+  httpAudit.set(key, (httpAudit.get(key) || 0) + 1);
+}
+
+setInterval(() => {
+  if (httpAuditMinute === 0) return; // zero plain HTTP = the ideal state, stay quiet
+  const detail = [...httpAudit.entries()].map(([k, n]) => `${n}× ${k}`).join(" | ");
+  console.log(
+    `[http-audit] ⚠ ${httpAuditMinute} plain-HTTP response(s) in the last 60s — ` +
+    `gameplay is WebSocket-only, so this is external traffic; act on the sources below. ` +
+    `Where it went: ${detail}`,
+  );
+  httpAudit.clear();
+  httpAuditMinute = 0;
+}, 60_000);
+
 // ── 1. Start the C++ game server on :8081 (supervised) ────────────────
 // The C++ process can die (crash / OOM kill). Previously nothing restarted
 // it, so the game stayed down until the whole container was redeployed.
@@ -219,6 +249,12 @@ const startProxy = async () => {
   const proxy = http.createServer((req, res) => {
     totalRequests++;
 
+    // HTTP audit (see block near the top of this file) — fires when the
+    // response is actually flushed. WebSocket upgrades never reach this
+    // handler, so everything counted here is genuine plain-HTTP traffic.
+    let proxyVia = "entry(direct answer)";
+    res.on("finish", () => auditHttpResponse(req, res.statusCode, proxyVia));
+
     // ── /status endpoint for debugging ────────────────────────────────
     if (req.url === "/status") {
       res.writeHead(200, { "content-type": "application/json" });
@@ -261,6 +297,8 @@ const startProxy = async () => {
       return;
     }
 
+    // Every other plain-HTTP request is proxied to Next.js.
+    proxyVia = "proxy→Next.js:3080";
     const options = {
       hostname: "localhost",
       port: 3080,
