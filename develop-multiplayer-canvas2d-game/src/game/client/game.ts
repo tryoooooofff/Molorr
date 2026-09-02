@@ -16,6 +16,7 @@ import {
   CRAFT_CARD_COUNT,
   EMPTY_ITEM,
   ENEMY_DROP_TABLE,
+  ENEMY_PANEL_MIN_RARITY,
   HOTBAR_CELLS,
   ITEM_STATS,
   ITEMS,
@@ -250,6 +251,16 @@ const MOB_SMOOTH_RATE = 24;
  * a turning mob sweeps instead of ticking between headings.
  */
 const MOB_TURN_SMOOTH_RATE = 18;
+
+/**
+ * Frame-rate-independent smoothing rate (per second) for the hotbar reload
+ * sweep. `slotReload` only changes when a snapshot lands (10-20 Hz), so
+ * drawing it directly makes the dark pie overlay tick in visible ~100 ms
+ * steps. Easing the drawn value toward the streamed one with
+ * `k = 1 - exp(-rate * dt)` turns those steps into a continuous sweep; the
+ * rate is high enough that the overlay still tracks a fast reload closely.
+ */
+const RELOAD_SMOOTH_RATE = 14;
 
 /**
  * How far past the newest snapshot sample mob positions may be linearly
@@ -6385,6 +6396,18 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   // ---- Enemy inspect panel ----
   /** Entity id of the mob currently shown in the enemy info panel (0 = closed). */
   private inspectMobId = 0;
+  /**
+   * True when `inspectMobId` was picked automatically (nearest Super+ mob in
+   * view) instead of by clicking a mob. Auto targets are released as soon as
+   * no qualifying mob is left; a clicked mob stays until it disappears.
+   */
+  private inspectIsAuto = false;
+  /**
+   * Mob the player explicitly closed the auto panel on (Escape / ground
+   * click). Auto-open skips that same mob so the panel does not pop straight
+   * back; cleared once the mob leaves the entity stream.
+   */
+  private inspectDismissedId = 0;
   /** Seconds until the next C2S.INSPECT_MOB refresh while the panel is open. */
   private inspectTimer = 0;
   /** Mob id the latest S2C.MOB_DAMAGE leaderboard belongs to. */
@@ -6525,6 +6548,12 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private bag: (Cell | null)[] = emptyCells(BAG_COUNT);
   /** Per-hotbar-slot reload progress (0..1, 1 = ready), streamed with each snapshot. */
   private slotReload: number[] = new Array(SLOT_COUNT).fill(1);
+  /**
+   * Smoothed copy of `slotReload` used ONLY for drawing the hotbar reload
+   * overlay, so the sweep glides between 10-20 Hz snapshot steps instead of
+   * jumping. Gameplay checks keep reading the authoritative `slotReload`.
+   */
+  private slotReloadDisplay: number[] = new Array(SLOT_COUNT).fill(1);
   /** Per-hotbar-slot remaining health (0..1, 1 = full health), streamed with each snapshot. */
   private slotHp: number[] = new Array(SLOT_COUNT).fill(1);
   private floaters: Floater[] = [];
@@ -6669,6 +6698,13 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   stars = 10;
   /** 视野内最近的 Ultra+ 生物（rarity >= 6），用于顶部 HUD 血条显示。 */
   private nearestUltraPlus: Ent | null = null;
+  /**
+   * 视野内最近的 Super+ 敌对生物 id（rarity >= ENEMY_PANEL_MIN_RARITY，即不
+   * 含 Ultra；0 = 没有），由每帧的视野扫描写入，敌人面板自动锁定它。
+   */
+  private nearestPanelMobId = 0;
+  /** `nearestPanelMobId` 的距离平方，用于切换目标时的迟滞判断。 */
+  private nearestPanelDistSq = Infinity;
   /** Drops collected during the current run, displayed on the death panel. */
   private currentRunDrops: any[] = [];
   /** Scroll offset for the death drop panel. */
@@ -6813,7 +6849,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       viewHeight: () => this.h,
       mainCells: () => this.slots,
       secondaryCells: () => this.secondary,
-      reloadProgress: (slot: number) => this.slotReload[slot] ?? 1,
+      reloadProgress: (slot: number) => this.slotReloadDisplay[slot] ?? 1,
       slotHp: (slot: number) => this.slotHp[slot] ?? 1,
       draggingFrom: () => this.drag?.from ?? -1,
       requestSwapSlot: (slot: number) => this.sendSwapRow(slot),
@@ -8072,6 +8108,20 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     if (this.craftMsgLife > 0) this.craftMsgLife -= dt;
     if (this.craftShake > 0) this.craftShake = Math.max(0, this.craftShake - dt * 2);
     this.craftGlow += ((this.craftSel ? 1 : 0) - this.craftGlow) * Math.min(1, dt * 8);
+    // Hotbar reload overlay: ease the drawn value toward the streamed one so
+    // the dark sweep glides instead of stepping every snapshot (10-20 Hz).
+    // Snaps when a reload completes (target 1 — the overlay must vanish the
+    // moment the petal is ready) and when a new reload cycle starts (target
+    // drops far below the drawn value — never sweep backwards).
+    {
+      const kReload = 1 - Math.exp(-RELOAD_SMOOTH_RATE * dt);
+      for (let i = 0; i < SLOT_COUNT; i++) {
+        const target = this.slotReload[i] ?? 1;
+        const shown = this.slotReloadDisplay[i] ?? 1;
+        this.slotReloadDisplay[i] =
+          target >= 1 || target < shown - 0.3 ? target : shown + (target - shown) * kReload;
+      }
+    }
     // Keep the complete CraftAnimation port alive even while the panel is sliding.
     // This drives pentagon contraction, fill cards, delayed results, and particles.
     this.craftUpdate(dt);
@@ -8211,25 +8261,36 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     // the client-authoritative player position without a ~100ms server round-trip.
     this.predictOwnPetals(dt);
 
-    // ---- 检测视野内最近的 Ultra+ 生物（Ultra=6, Super=7, Omega=8, Eternal=9） ----
+    // ---- 视野扫描：最近的 Ultra+ 敌对生物（顶部血条）与最近的 Super+ 敌对生物（敌人面板） ----
+    // 一次遍历同时求出两个目标。友方召唤物（team != HOSTILE）不是敌人，两个
+    // HUD 都跳过——否则自己的 Super 召唤物会被当成 boss 显示在顶部血条上。
     {
       let nearest: Ent | null = null;
       let nearestDistSq = Infinity;
+      let panelMobId = 0;
+      let panelDistSq = Infinity;
       const me = this.ents.get(this.selfId);
       if (me) {
         for (const ent of this.ents.values()) {
-          if (ent.kind === ENT.MOB && ent.rarity >= 6) {
-            const dx = ent.x - me.x;
-            const dy = ent.y - me.y;
-            const distSq = dx * dx + dy * dy;
-            if (distSq < nearestDistSq) {
-              nearestDistSq = distSq;
-              nearest = ent;
-            }
+          if (ent.kind !== ENT.MOB || ent.team !== TEAM.HOSTILE) continue;
+          if (ent.rarity < 6) continue; // 顶部血条门槛：Ultra+（6/7/8/9/10）
+          const dx = ent.x - me.x;
+          const dy = ent.y - me.y;
+          const distSq = dx * dx + dy * dy;
+          if (distSq < nearestDistSq) {
+            nearestDistSq = distSq;
+            nearest = ent;
+          }
+          // 敌人面板门槛更高：Super 及以上（不含 Ultra）。
+          if (ent.rarity >= ENEMY_PANEL_MIN_RARITY && distSq < panelDistSq) {
+            panelDistSq = distSq;
+            panelMobId = ent.id;
           }
         }
       }
       this.nearestUltraPlus = nearest;
+      this.nearestPanelMobId = panelMobId;
+      this.nearestPanelDistSq = panelMobId ? panelDistSq : Infinity;
     }
 
     for (let i = this.floaters.length - 1; i >= 0; i--) {
@@ -8284,6 +8345,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         const inspected = this.ents.get(this.inspectMobId);
         if (!inspected || inspected.kind !== ENT.MOB) {
           this.inspectMobId = 0;
+          this.inspectIsAuto = false;
           this.mobDamageLeaderboard = null;
           this.mobDamageMobId = 0;
         } else if (this.net?.kind === "remote") {
@@ -8297,6 +8359,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
           }
         }
       }
+      // 敌人面板自动锁定：始终跟随视野内最近的 Super+ 生物（不含 Ultra）。
+      // 放在上面的清理之后，死掉的目标当帧就被释放，面板不会空一帧。
+      this.updateAutoInspect();
       // Debug overlay: only ping the server while the panel is actually
       // shown, so leaving it off costs nothing on the wire.
       if (this.settings.showDebugInfo && this.connected) {
@@ -9303,7 +9368,67 @@ private bagLayout() {
   }
 
   /**
-   * Enemy info panel (right side). Shows the clicked mob's name, sprite,
+   * Auto-open the enemy info panel on the nearest qualifying mob so it shows
+   * up on its own instead of only after a lucky click.
+   *
+   * Rules:
+   *  - Qualifying = hostile mob at Super rarity or above (Ultra excluded, see
+   *    ENEMY_PANEL_MIN_RARITY) that is currently in the snapshot stream.
+   *  - Only ONE mob ever owns the panel: the nearest qualifying one. When a
+   *    closer mob appears the panel switches to it immediately.
+   *  - A mob the player clicked keeps the panel (any rarity > Common) until it
+   *    dies or leaves view, then auto-lock takes over again.
+   *  - A mob the player explicitly closed (Escape / ground click) is skipped
+   *    until it leaves the stream, so the panel never pops straight back.
+   */
+  private updateAutoInspect() {
+    // A dismissed mob may be shown again once it is gone (respawn / walked back
+    // into view range), otherwise the panel would stay dead for the whole zone.
+    if (this.inspectDismissedId && !this.ents.has(this.inspectDismissedId)) {
+      this.inspectDismissedId = 0;
+    }
+
+    // `nearestPanelMobId` is refreshed by the per-frame view scan (hostile mobs
+    // at Super rarity and above — Ultra is deliberately excluded).
+    const nearestId = this.alive && this.scene === "game" ? this.nearestPanelMobId : 0;
+
+    // A manually inspected mob owns the panel until the block in update()
+    // clears it (mob killed / out of view), which also resets inspectIsAuto.
+    if (this.inspectMobId && !this.inspectIsAuto) return;
+
+    // Hysteresis: while a mob is already auto-locked, only a clearly closer one
+    // (more than ~8% nearer) takes the panel over — otherwise two mobs at a
+    // similar distance make the panel flip targets every frame.
+    if (this.inspectIsAuto && this.inspectMobId && nearestId && nearestId !== this.inspectMobId) {
+      const me = this.ents.get(this.selfId);
+      const current = this.ents.get(this.inspectMobId);
+      if (me && current) {
+        const cdx = current.x - me.x;
+        const cdy = current.y - me.y;
+        const currentDistSq = cdx * cdx + cdy * cdy;
+        if (this.nearestPanelDistSq > currentDistSq * 0.92) return;
+      }
+    }
+
+    if (nearestId && nearestId !== this.inspectDismissedId && nearestId !== this.inspectMobId) {
+      this.inspectMobId = nearestId;
+      this.inspectIsAuto = true;
+      // Request the leaderboard on this very frame instead of waiting for the
+      // 0.5 s refresh cadence, and drop the previous mob's rows.
+      this.inspectTimer = 0;
+      this.mobDamageLeaderboard = null;
+      this.mobDamageMobId = 0;
+    } else if (!nearestId && this.inspectIsAuto) {
+      // Nothing qualifying in view any more — release the panel.
+      this.inspectMobId = 0;
+      this.inspectIsAuto = false;
+      this.mobDamageLeaderboard = null;
+      this.mobDamageMobId = 0;
+    }
+  }
+
+  /**
+   * Enemy info panel (right side). Shows the inspected mob's name, sprite,
    * rarity, live HP, ATTACK / SPEED, and either its drop table (offline /
    * LocalTransport) or the per-player damage leaderboard (remote server).
    */
@@ -9794,7 +9919,12 @@ private bagLayout() {
       }
       if (e.code === "Escape") {
         if (this.inspectMobId) {
+          // Closing the auto-locked panel marks that mob as dismissed so it
+          // does not pop back open on the very next frame; a mob the player
+          // clicked simply closes.
+          if (this.inspectIsAuto) this.inspectDismissedId = this.inspectMobId;
           this.inspectMobId = 0;
+          this.inspectIsAuto = false;
           this.mobDamageLeaderboard = null;
           this.mobDamageMobId = 0;
           e.preventDefault();
@@ -11443,11 +11573,20 @@ private bagLayout() {
       const dy = e.y - worldY;
       if (dx * dx + dy * dy <= rr * rr) { hitMob = e.id; break; }
     }
+    // Clicking a mob is a manual inspection: it owns the panel until the mob
+    // dies or leaves view, then the nearest Super+ auto-lock takes over.
+    // Clicking empty ground closes the panel — and if that was the auto target
+    // it is marked dismissed so it does not pop straight back open.
+    const dismissedAuto = !hitMob && this.inspectIsAuto ? this.inspectMobId : 0;
     this.inspectMobId = hitMob;
+    this.inspectIsAuto = false;
     this.inspectTimer = 0;
-    if (!hitMob) {
+    if (hitMob) {
+      if (hitMob === this.inspectDismissedId) this.inspectDismissedId = 0;
+    } else {
       this.mobDamageLeaderboard = null;
       this.mobDamageMobId = 0;
+      this.inspectDismissedId = dismissedAuto;
     }
   }
 
@@ -14629,6 +14768,7 @@ if (me) {
       }
     }
     // ---- 最近的 Ultra+ 生物血条（屏幕顶部中央） ----
+    // 布局：生物名在血条上方，稀有度标签移到血条下方并用稀有度颜色填充。
     if (this.nearestUltraPlus) {
       const target = this.nearestUltraPlus;
       const rarityInfo = RARITIES[target.rarity];
@@ -14639,18 +14779,20 @@ if (me) {
       const barH = 28;
       const barX = barCenterX - barW / 2;
       const rarityColor = rarityInfo?.color ?? "#ff4444";
+      const rarityName = rarityInfo?.name ?? "";
+      const showRarityTag = this.settings?.showRarity !== false;
 
       ctx.save();
-      // 名字（稀有度色 + 黑描边）
+      // 名字（白色 + 黑描边）
       ctx.font = `bold 18px ${FONT_FAMILY || "Arial"}`;
       ctx.textAlign = "center";
       ctx.textBaseline = "bottom";
       ctx.strokeStyle = "#000000";
       ctx.lineWidth = 4;
       ctx.lineJoin = "round";
-      ctx.strokeText(`${rarityInfo?.name ?? ""} ${targetName}`, barCenterX, barY - 5);
+      ctx.strokeText(targetName, barCenterX, barY - 5);
       ctx.fillStyle = "#ffffff";
-      ctx.fillText(`${rarityInfo?.name ?? ""} ${targetName}`, barCenterX, barY - 5);
+      ctx.fillText(targetName, barCenterX, barY - 5);
 
       // 血条背景（深灰圆角）
       roundRect(ctx, barX, barY, barW, barH, 14);
@@ -14660,12 +14802,12 @@ if (me) {
       ctx.lineWidth = 2;
       ctx.stroke();
 
-      // 血条前景（稀有度颜色，基于 displayHp 平滑过渡）
+      // 血条前景（绿色，基于 displayHp 平滑过渡；稀有度颜色只用于下方标签）
       const pct = Math.max(0, Math.min(1, target.displayHp ?? target.hp));
       const fillW = Math.max(0, (barW - 4) * pct);
       if (fillW > 0) {
         roundRect(ctx, barX + 2, barY + 2, fillW, barH - 4, 12);
-        ctx.fillStyle ="#66cc00";
+        ctx.fillStyle = "#66cc00";
         ctx.fill();
       }
 
@@ -14680,6 +14822,25 @@ if (me) {
       ctx.lineJoin = "round";
       ctx.strokeText(hpText, barCenterX, barY + barH / 2);
       ctx.fillText(hpText, barCenterX, barY + barH / 2);
+
+      // 稀有度标签（血条下方，用稀有度颜色填充）
+      if (rarityName && showRarityTag) {
+        // 深色稀有度（如 Unique）改用白描边，否则黑字配黑边完全看不见。
+        const rgbMatch = /rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/.exec(rarityColor);
+        const lum = rgbMatch
+          ? (0.299 * Number(rgbMatch[1]) + 0.587 * Number(rgbMatch[2]) + 0.114 * Number(rgbMatch[3])) / 255
+          : 1;
+        const tagY = barY + barH + 4;
+        ctx.font = `bold 13px ${FONT_FAMILY || "Arial"}`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.lineJoin = "round";
+        ctx.strokeStyle = lum < 0.35 ? "rgba(255,255,255,0.9)" : "#000000";
+        ctx.lineWidth = 3;
+        ctx.strokeText(rarityName, barCenterX, tagY);
+        ctx.fillStyle = rarityColor;
+        ctx.fillText(rarityName, barCenterX, tagY);
+      }
       ctx.restore();
     }
 

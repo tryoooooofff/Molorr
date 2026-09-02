@@ -10,6 +10,7 @@ import {
   BLOCK_GRID_ROWS,
   CRAFT_CARD_COUNT,
   CRAFT_CARDS_PER_ATTEMPT,
+  CRAFT_ANNOUNCE_MIN_RARITY,
   craftChanceFor,
   EMPTY_ITEM,
   ITEMS,
@@ -2445,6 +2446,24 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
     }
   }
 
+  /**
+   * Announce a Super+ card production (normal craft or Oracle conversion) to
+   * EVERY connected player's chat, regardless of which map they are on. Sent
+   * as a craft report so the client colorizes the rarity and item names.
+   */
+  private announceCraft(p: Player, item: number, rarity: number, count: number) {
+    if (rarity < CRAFT_ANNOUNCE_MIN_RARITY) return;
+    if (item < 0 || item >= ITEMS.length) return;
+    const rarityName = RARITIES[rarity]?.name ?? "Unknown";
+    const itemName = ITEMS[item]?.name ?? "Unknown";
+    const amount = count > 1 ? `${count}x ` : "";
+    const msg = `${p.name} crafted ${amount}${rarityName} ${itemName}!`;
+    for (const c of this.clients.values()) {
+      if (!c.player) continue;
+      this.sendChatToClient(c, msg, "System", true, true);
+    }
+  }
+
   private sendSquadUpdate(c: ClientState, squadCode: string) {
     const w = new Writer(16);
     w.u8(S2C.SQUAD_UPDATE);
@@ -2909,6 +2928,7 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
     if (successes > 0) {
       this.addItem(p, item, rarity + 1, successes);
       this.pushEvent(c, EVT.CRAFT_OK, p.x, p.y, successes, item, rarity + 1);
+      this.announceCraft(p, item, rarity + 1, successes);
     } else {
       const kept = 1 + Math.floor(Math.random() * Math.min(4, needed));
       this.addItem(p, item, rarity, kept);
@@ -2928,6 +2948,7 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
     this.addItem(p, item, targetRarity, 1);
     p.nextOracleAt = Date.now() + ORACLE_COOLDOWN_HOURS * 3600 * 1000;
     this.pushEvent(c, EVT.ORACLE_OK, p.x, p.y, 0, item, targetRarity);
+    this.announceCraft(p, item, targetRarity, 1);
     p.dirty = true;
     p.statsDirty = true;
   }
