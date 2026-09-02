@@ -110,13 +110,26 @@ export const MAX_RARITY = RARITIES.length - 1;
 export const MAX_CRAFT_RARITY = RARITIES.length - 2;
 
 /**
- * Lowest rarity index that triggers a server-wide chat announcement when a
- * player produces a card ("Super+" = Super, Omega, Eternal, Unique). Applies
- * to both normal crafting and Oracle conversions. Derived from the rarity
- * table so the ladder can be reordered without silently breaking the gate.
+ * Rarity index of "Super" — the first tier above Ultra. Derived from the
+ * rarity table so the ladder can be reordered without silently breaking the
+ * gates below; falls back to its current position (7) if it ever goes missing.
  */
 const SUPER_RARITY_INDEX = RARITIES.findIndex((r) => r.name === "Super");
-export const CRAFT_ANNOUNCE_MIN_RARITY = SUPER_RARITY_INDEX >= 0 ? SUPER_RARITY_INDEX : 7;
+export const SUPER_RARITY = SUPER_RARITY_INDEX >= 0 ? SUPER_RARITY_INDEX : 7;
+
+/**
+ * Lowest rarity index that triggers a server-wide chat announcement when a
+ * player produces a card ("Super+" = Super, Omega, Eternal, Unique). Applies
+ * to both normal crafting and Oracle conversions.
+ */
+export const CRAFT_ANNOUNCE_MIN_RARITY = SUPER_RARITY;
+
+/**
+ * Lowest wild-mob rarity that auto-opens the client's enemy info panel:
+ * Super and above, so Ultra itself is excluded. Client-side only — the panel
+ * is drawn from the snapshot stream, the servers never gate on it.
+ */
+export const ENEMY_PANEL_MIN_RARITY = SUPER_RARITY;
 
 /**
  * Visual and collision-size multiplier for mobs at each rarity, in rarity
