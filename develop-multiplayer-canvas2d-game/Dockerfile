@@ -11,12 +11,11 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-# Build C++ server — only build uSockets (not the full uWebSockets examples)
-RUN git clone --depth 1 https://github.com/uNetworking/uWebSockets.git && \
-    cd uWebSockets && \
-    git submodule update --init --depth 1 uSockets && \
-    make -s -j$(nproc) -C uSockets && \
-    cd .. && \
+# Build C++ server — only build uSockets (not the full uWebSockets examples).
+# uWebSockets + uSockets are vendored under ./uWebSockets so the build is fully
+# self-contained and does not need to clone from GitHub at build time (some
+# build environments can't reach github.com over the git protocol).
+RUN make -s -j$(nproc) -C uWebSockets/uSockets && \
     g++ -std=c++20 -O2 server-cpp/main.cpp \
         -IuWebSockets/src -IuWebSockets/uSockets/src \
         uWebSockets/uSockets/*.o -lz -lssl -lcrypto -o /app/petalia-server
