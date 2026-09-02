@@ -48,14 +48,22 @@ const persistCallback = (clientId: number, save: PlayerSave) => {
 const game = new GameServer({ mobCapScale: MOB_CAP_SCALE, persistCallback });
 let nextClientId = 1;
 
+// HTTP on this port is reduced to nearly zero. The ONLY HTTP responses left:
+//   1. the mandatory WebSocket upgrade handshake (101 Switching Protocols),
+//      answered by the `ws` library itself — it never reaches this handler
+//      and CANNOT be removed: RFC 6455 requires exactly one HTTP request+response
+//      to open every WebSocket connection;
+//   2. an empty 200 on /health so hosting-platform health probes still pass;
+//   3. an empty 426 (Upgrade Required) for any other stray plain-HTTP request.
+// Zero body bytes and `connection: close` — no keep-alive, each leftover HTTP
+// exchange is one tiny header-only response, then the socket dies.
+// Everything real (snapshots, inputs, pings) is binary WebSocket frames — no HTTP.
 const httpServer = http.createServer((req, res) => {
-  if (req.url === "/health") {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true, uptime: process.uptime() }));
-    return;
-  }
-  res.writeHead(200, { "content-type": "text/plain" });
-  res.end("petalia game server");
+  res.writeHead(req.url === "/health" ? 200 : 426, {
+    "content-length": "0",
+    connection: "close",
+  });
+  res.end();
 });
 
 const wss = new WebSocketServer({ server: httpServer });
