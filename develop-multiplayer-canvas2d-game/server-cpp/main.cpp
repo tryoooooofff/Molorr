@@ -2584,7 +2584,11 @@ public:
           for (auto& [csId, cs] : *clientMap) {
             if (cs->player == killer) {
               pushEvent(*cs, EVT_XP, mob.x, mob.y, xp);
-              pushEvent(*cs, EVT_KILL, mob.x, mob.y, mob.type);
+              // Rarity MUST be forwarded: the client's Mob Gallery keys its
+              // kill counter by (mobType, rarity) — see mobGallery.recordKill.
+              // Omitting it defaulted every kill to rarity 0, so all defeats
+              // piled into the Common column and the other nine stayed empty.
+              pushEvent(*cs, EVT_KILL, mob.x, mob.y, mob.type, EMPTY_ITEM, mob.rarity);
               break;
             }
           }
