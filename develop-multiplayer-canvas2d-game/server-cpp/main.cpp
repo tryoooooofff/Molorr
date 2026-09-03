@@ -66,6 +66,9 @@ constexpr int SHELL_ITEM = 38;
 constexpr int ANTENNAE_ITEM = 43;
 constexpr int THIRD_EYE_ITEM = 48;
 constexpr int MISSILE_ITEM = 52;
+constexpr int YGGDRASIL_ITEM = 53;
+constexpr int SHINY_LADYBUG_TYPE = 18;
+constexpr float YGGDRASIL_REVIVE_RANGE = 80.f;
 constexpr float ROSE_HEAL_DELAY = 1.0f;
 constexpr float ROSE_ABSORB_TIME = 0.4f;
 constexpr float PLAYER_RADIUS = 26.f * 0.7f;
@@ -378,6 +381,8 @@ static std::vector<ItemDef> makeItems() {
   items.push_back({50, "Faster", IK_PETAL, 10, 10, 10, 2.5f, 0,0,1,0,0,0,0,10,0,false,0,0,0,0,false});
   items.push_back({51, "Spider Egg", IK_SUMMON, 12, 1, 10, 8.0f, 0,0,1,0,0,0,0,0,17,false,0,0,0,0,false});
   items.push_back({52, "Missile", IK_PETAL, 10, 15, 10, 2.0f, 0,0,1,0,0,0,0,0,0,false,0,0,0,0,false});
+  items.push_back({53, "Yggdrasil", IK_PETAL, 12, 5, 15, 3.5f, 0,0,1,0,0,0,0,0,0,false,0,0,0,0,false});
+  items.push_back({54, "Shiny Ladybug Egg", IK_SUMMON, 10, 5, 24, 4.0f, 0,0,1,0,0,0,0,0,SHINY_LADYBUG_TYPE,false,0,0,0,0,false});
   return items;
 }
 
@@ -420,6 +425,9 @@ static std::vector<MobDef> makeMobs() {
   mobs.push_back({15, "Hive", 28, 600, 60, 0, 28, {{2,0.55f},{18,0.55f},{19,0.55f},{20,0.05f}}, true, {0.85f,0.60f,0.35f,0.10f}, {1,1}});
   mobs.push_back({16, "Hornet", 16, 80, 22, 50, 18, {{43,0.7f},{46,0.7f},{49,0.7f},{52,0.5f}}, false, {}, {}});
   mobs.push_back({17, "Spider", 18, 80, 22, 50, 18, {{51,0.7f},{45,0.7f},{50,0.7f},{48,0.01f}}, false, {}, {}});
+  // Shiny Ladybug — very rare desert Ladybug variant, a bit tougher and
+  // harder-hitting. Drops Rose + Yggdrasil + Shiny Ladybug Egg.
+  mobs.push_back({SHINY_LADYBUG_TYPE, "Shiny Ladybug", 22, 130, 14, 42, 40, {{30,0.7f},{53,0.5f},{54,0.2f}}, false, {}, {}});
   return mobs;
 }
 
@@ -444,7 +452,8 @@ static const std::vector<std::string> ZONE_LETTERS = {"A","B","C","D","E","F","G
 
 static std::unordered_map<int, std::unordered_map<int, float>> SPAWN_WEIGHTS = {
   {0, {{0,30},{1,50},{2,10},{3,50},{10,40},{13,5},{15,5},{16,10},{17,40}}},
-  {1, {{4,30},{5,40},{6,50},{2,15},{11,20}}},
+  // Shiny Ladybug (18) weight tuned so 0.07754 / (155 + 0.07754) ≈ 1/2000.
+  {1, {{4,30},{5,40},{6,50},{2,15},{11,20},{18,0.07754f}}},
   {2, {{7,40},{8,50},{9,40},{12,30},{14,5}}},
 };
 
@@ -739,6 +748,7 @@ static std::unordered_map<int, SummonCfg> SUMMON_CFG = {
   {47, {8, 8, DEFAULT_SPAWN_PROTECTION}},
   {49, {2, 2, DEFAULT_SPAWN_PROTECTION}},
   {51, {3, 3, DEFAULT_SPAWN_PROTECTION}},
+  {54, {1, 1, DEFAULT_SPAWN_PROTECTION}}, // Shiny Ladybug Egg
 };
 
 static int getSummonCount(int itemId) {
@@ -2683,6 +2693,51 @@ public:
     }
   }
 
+  // ---- Yggdrasil revive ----
+  // A dead PvE player's body stays on the ground (see snapshotFor). When
+  // another player's Yggdrasil petal drifts within YGGDRASIL_REVIVE_RANGE of
+  // the body, the petal flies into its centre and brings the flower back to
+  // life at that exact spot. The petal itself then breaks and reloads.
+  void revivePlayer(Player& target, Player& reviver) {
+    target.alive = true;
+    target.hp = target.maxHp;
+    target.shield = 0;
+    target.x = target.deathX;
+    target.y = target.deathY;
+    target.clientTargetX = target.x;
+    target.clientTargetY = target.y;
+    target.clientPosActive = false;
+    target.vx = 0;
+    target.vy = 0;
+    target.hurtCd = 0;
+    target.statsDirty = true;
+    target.dirty = true;
+    // Every petal restarts on a fresh reload cycle, exactly like a respawn —
+    // the flower just comes back where it fell instead of at a spawn tile.
+    for (int i = 0; i < SLOT_COUNT; i++) {
+      Cell& cell = target.slots[i];
+      PetalState& st = target.petals[i];
+      if (cell.item == EMPTY_ITEM) continue;
+      const ItemDef& def = ITEMS[cell.item];
+      if (!orbitsAsPetal(def.kind)) continue;
+      st.alive = false;
+      st.hp = 0;
+      st.timer = applyTalentReload(target, def.reload);
+      st.x = target.x;
+      st.y = target.y;
+    }
+    if (clientMap) {
+      for (auto& [csId, cs] : *clientMap) {
+        if (!cs->player) continue;
+        if (cs->player == &target) {
+          sendChat(*cs, reviver.name + "'s Yggdrasil revived you!", "System", true, false);
+        } else if (cs->player == &reviver) {
+          sendChat(*cs, "Your Yggdrasil revived " + target.name + "!", "System", true, false);
+        }
+      }
+    }
+  }
+
   // ---- Arena death/respawn handler ----
   void handleArenaPlayerDeath(Player& p) {
     if (p.mode != Mode::Arena) return;
@@ -3266,6 +3321,44 @@ public:
         st.x += (tx - st.x) * std::min(1.f, dt * 14.f);
         st.y += (ty - st.y) * std::min(1.f, dt * 14.f);
         if (st.specialTimer <= 0 && missing > 0) { st.absorbTimer = ROSE_ABSORB_TIME; continue; }
+      } else if (cell.item == YGGDRASIL_ITEM) {
+        // ---- Yggdrasil revive cycle: reload → find dead body → fly → revive → reload ----
+        // Travel phase: the petal is flying into the centre of a dead body.
+        if (st.absorbTimer > 0 && st.targetId != 0) {
+          Player* deadP = get((uint16_t)st.targetId);
+          if (!deadP || deadP->alive || deadP->mapId != p.mapId) {
+            // Body vanished (respawned / already revived / left the map).
+            st.targetId = 0;
+            st.absorbTimer = 0;
+          } else {
+            float travelStep = std::min(1.f, dt / std::max(dt, st.absorbTimer));
+            st.x += (deadP->deathX - st.x) * travelStep;
+            st.y += (deadP->deathY - st.y) * travelStep;
+            st.absorbTimer = std::max(0.f, st.absorbTimer - dt);
+            if (st.absorbTimer <= 0) {
+              revivePlayer(*deadP, p);
+              st.targetId = 0;
+              st.alive = false; st.hp = 0; st.timer = applyTalentReload(p, def.reload);
+            }
+            continue;
+          }
+        }
+        // Orbit phase: follow the ring and scan for a nearby dead body.
+        st.x += (tx - st.x) * std::min(1.f, dt * 14.f);
+        st.y += (ty - st.y) * std::min(1.f, dt * 14.f);
+        st.targetId = 0; // clear any stale lock from a broken/reloaded cycle
+        for (auto& [oid, other] : players) {
+          if (&other == &p) continue;
+          if (other.alive || other.menuMode) continue;
+          if (other.mode == Mode::Arena || p.mode == Mode::Arena) continue;
+          if (other.mapId != p.mapId) continue;
+          float ddx = other.deathX - st.x, ddy = other.deathY - st.y;
+          if (ddx * ddx + ddy * ddy < YGGDRASIL_REVIVE_RANGE * YGGDRASIL_REVIVE_RANGE) {
+            st.targetId = other.id;
+            st.absorbTimer = ROSE_ABSORB_TIME; // fly-to-body travel time
+            break;
+          }
+        }
       } else {
         st.x += (tx - st.x) * std::min(1.f, dt * 14.f);
         st.y += (ty - st.y) * std::min(1.f, dt * 14.f);
@@ -4105,7 +4198,32 @@ public:
 
     // Players
     for (auto& [id, other] : players) {
-      if (other.mapId != me.mapId || !other.alive) continue;
+      if (other.mapId != me.mapId) continue;
+      // Dead PvE players leave their body on the ground (petal-less, X-eyed)
+      // until they respawn or another player's Yggdrasil revives them. The
+      // body is flagged with bit 4 of the flags byte so the client can render
+      // it as a corpse instead of a live flower.
+      if (!other.alive) {
+        // Never echo the viewer's own body — a self snapshot entry would
+        // re-arm client-side position authority while the death page is up
+        // and break the respawn position re-seed.
+        if (&other == &me) continue;
+        if (other.menuMode || other.mode == Mode::Arena) continue;
+        if (std::abs(other.deathX - me.x) >= snapViewX || std::abs(other.deathY - me.y) >= snapViewY) continue;
+        float bodyRadius = PLAYER_RADIUS + soilRadiusBonusOf(other);
+        body.u8v(ENT_PLAYER);
+        body.u16v(other.id);
+        body.u8v((uint8_t)4); // flags byte: bit 2 (value 4) = dead body, no spread/contract
+        body.u8v(TEAM_FRIENDLY);
+        body.i16v((int16_t)std::round(other.deathX));
+        body.i16v((int16_t)std::round(other.deathY));
+        body.u16v(0);
+        body.u8v((uint8_t)std::round(bodyRadius));
+        body.u8v(0); // 0 hp
+        body.str(other.name);
+        count++;
+        continue;
+      }
       if (&other != &me && (std::abs(other.x - me.x) >= snapViewX || std::abs(other.y - me.y) >= snapViewY)) continue;
       float opRadius = PLAYER_RADIUS + soilRadiusBonusOf(other);
       body.u8v(ENT_PLAYER);
@@ -4576,7 +4694,7 @@ static std::vector<MapDef> makeMaps() {
     {4000,7200,400,800},{6800,7200,200,800},{600,7400,200,600},{1000,7400,200,600},
     {1600,7400,400,600},{4400,7400,800,600},{6400,7400,400,600},{800,7600,200,400},
     {1200,7600,400,400},{5200,7600,1200,400},
-  }, {4,5,6,2,11}, 80, 0.12f});
+  }, {4,5,6,2,11,18}, 80, 0.12f});
   // Map 2: Ocean
   maps.push_back({2, "Ocean", 8000, 8000, {
     {0,0,8000,400},{0,400,800,200},{1200,400,4000,200},{7400,400,600,200},

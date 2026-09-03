@@ -5078,10 +5078,11 @@ class ShopSystem {
     Claw: 7, Powder: 6, Rose: 8, Light: 8, Glass: 10, Bone: 7, Pincer: 8,
     Iris: 2, Shell: 3, Magnet: 10, Cactus: 4, Antennae: 12, Soil: 6,
     Fang: 5, Orange: 12, "Third Eye": 15, Faster: 12, Missile: 5,
+    Yggdrasil: 60,
     "Ladybug Egg": 12, "Soldier Ant Egg": 12, "Worker Ant Egg": 10, "Rock Egg": 12,
     "Bee Egg": 12, "Starfish Egg": 15, "Jellyfish Egg": 18, "Crab Egg": 18,
     "Beetle Egg": 15, "Scorpion Egg": 10, "Shell Egg": 22, "Cactus Egg": 12,
-    "Ant Hole Egg": 42, "Hornet Egg": 13, "Spider Egg": 12,
+    "Ant Hole Egg": 42, "Hornet Egg": 13, "Spider Egg": 12, "Shiny Ladybug Egg": 60,
   };
 
   shopItems: ShopListEntry[] = [];
@@ -14435,6 +14436,15 @@ private drawProjectileEnt(e: Ent) {
   private drawPlayerEnt(e: Ent) {
     const ctx = this.ctx;
     const isSelf = e.team === TEAM.SELF;
+    // Bit 2 (value 4) of the player flags byte marks a dead body left on the
+    // ground (server-side Yggdrasil revive system). Bodies render petal-less
+    // with two 'x' eyes and a bitter mouth, waiting for a revive.
+    const isDeadBody = (e.type & 4) !== 0;
+    if (isDeadBody) {
+      drawDefaultSkin(ctx, e.x, e.y, e.radius, { ...e, dead: true, spreadMode: false, contractMode: false });
+      text(ctx, e.name || "flower", e.x, e.y - e.radius - 16, 14, "#cccccc");
+      return;
+    }
     let spreadMode = false;
     let contractMode = false;
     let mousePos: { x: number; y: number } | undefined = undefined;
@@ -15657,6 +15667,7 @@ if (me) {
     ctx.fillRect(0, 0, this.w, this.h);
     text(ctx, "You were shredded!", this.w / 2, this.h / 2 - 70, 42, "#ff8080");
     text(ctx, "click Respawn to continue", this.w / 2, this.h / 2 - 20, 17, "#ffffff");
+    text(ctx, "your body stays on the ground — another player's Yggdrasil can revive you", this.w / 2, this.h / 2 + 8, 14, "#b8ffcf");
     const bw = 180;
     const cx = this.w / 2;
     this.deathCenterRespawnRect = { x: cx - bw - 10, y: this.h / 2 + 40, w: bw, h: 52 };
