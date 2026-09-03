@@ -386,7 +386,15 @@ export const ITEMS: ItemDef[] = [
   { id: 50, name: "Faster", kind: "petal", color: "#e0e0e0", outline: "#c0c0c0", shape: "circle", radius: 10, damage: 10, health: 10, reload: 2.5, speed: 10, dropFactor: 0.55, desc: "Increase your maximum speed" },
   { id: 51, name: "Spider Egg", kind: "summon", color: "#663300", outline: "#331900", shape: "egg", radius: 12, damage: 1, health: 10, reload: 8, petMob: 17,dropFactor: 0.7, desc: "spawn something interesting" },
   { id: 52, name: "Missile", kind: "petal", color: "#3a3a3a", outline: "#1a1a1a", shape: "triangle", radius: 10, damage: 15, health: 10, reload: 2.0, dropFactor: 0.5, desc: "Fires a homing projectile at nearby enemies when spread is held." },
+  // ── Shiny Ladybug drops (desert) ─────────────────────────────────────────
+  { id: 53, name: "Yggdrasil", kind: "petal", color: "#735800", outline: "#5A4500", shape: "leaf", radius: 12, damage: 5, health: 15, reload: 3.5, dropFactor: 0.5, desc: "A leaf of the world tree. Flies to a fallen flower's body lying nearby and revives it." },
+  { id: 54, name: "Shiny Ladybug Egg", kind: "summon", color: "#fffbd1", outline: "#cfc25a", shape: "egg", radius: 10, damage: 5, health: 24, reload: 4.0, petMob: 18, dropFactor: 0.5, desc: "Hatches a friendly shiny ladybug." },
 ];
+
+/** Item id of the Yggdrasil petal — revives dead players (server-side logic). */
+export const YGGDRASIL_ITEM = 53;
+/** A dead player's body can be revived when a Yggdrasil petal comes within this range (px). */
+export const YGGDRASIL_REVIVE_RANGE = 80;
 
 /** Item ids that Oracle/Trade may hand back — never dropped by mobs, never craftable by combining. */
 export const TRINKET_ITEM = 10;
@@ -478,6 +486,10 @@ export const MOBS: MobDef[] = [
   drops: [{ item: 43, chance: 0.7 }, { item: 46, chance: 0.7 }, { item: 49, chance: 0.7 }, { item: 52, chance: 0.5 }] },
     { id: 17, name: "Spider", color: "#353535", outline: "#000000", shape: "spider", radius: 18, health: 80, damage: 22, speed: 50, xp: 18,
   drops: [{ item:51, chance: 0.7 }, { item: 45, chance: 0.7 }, { item: 50, chance: 0.7 },{ item: 48, chance: 0.01 }] },
+  // Shiny Ladybug: a very rare desert variant of the Ladybug (1/2000 spawn
+  // weight roll). Slightly tougher and harder-hitting than the garden one.
+  { id: 18, name: "Shiny Ladybug", color: "#ffff00", outline: "#CCcc00", shape: "bug", radius: 22, health: 130, damage: 14, speed: 42, xp: 40,
+  drops: [{ item: 30, chance: 0.7 }, { item: 53, chance: 0.5 }, { item: 54, chance: 0.2 }] },
 ];
 
 export interface Wall {
@@ -630,7 +642,7 @@ export const MAPS: MapDef[] = [
     accent: "#fff3c4",
     width: 8000,
     height: 8000,
-    mobs: [4, 5, 6, 2, 11],
+    mobs: [4, 5, 6, 2, 11, 18],
     mobCap: 80,
     rarityBias: 0.12,
     walls: [
@@ -1484,6 +1496,7 @@ export const SUMMON_CFG: Record<number, SummonCfg> = {
   47: { maxCount: 8, spawnCount: 8 },
   49: { maxCount: 2, spawnCount: 2 },
   51: { maxCount: 3, spawnCount: 3 },
+  54: { maxCount: 1 },                                  // Shiny Ladybug Egg
 };
 
 /** Default seconds of post-spawn invulnerability for a freshly hatched pet. */
@@ -1571,6 +1584,9 @@ export const SPAWN_WEIGHTS: Record<number, Record<number, number>> = {
     6: 50,   // Beetle
     2: 15,   // Rock
     11: 20,  // Sandstorm
+    // Shiny Ladybug — very rare: weight chosen so that
+    // 0.07754 / (155 + 0.07754) ≈ 1/2000 spawn probability.
+    18: 0.07754,
   },
   // Ocean
   2: {

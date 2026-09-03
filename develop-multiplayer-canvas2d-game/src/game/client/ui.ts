@@ -1320,6 +1320,33 @@ case 46: { // Orange — three oranges with leaves
 
       break;
     }
+    case 53: { // Yggdrasil — leaf of the world tree (user-supplied artwork)
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      ctx.moveTo(0, size);
+      ctx.quadraticCurveTo(-size, 0, 0, -size);
+      ctx.quadraticCurveTo(size * 1.3, 0, 0, size);
+      ctx.closePath();
+      ctx.fillStyle = '#735800';
+      ctx.fill();
+      ctx.lineWidth = size * 0.15;
+      ctx.strokeStyle = '#5A4500';
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(0, size * 0.7);
+      ctx.quadraticCurveTo(size * 0.2, size * 0.1, 0, -size * 0.7);
+      ctx.lineCap = 'round';
+      ctx.strokeStyle = '#5A4500';
+      ctx.stroke();
+
+      ctx.beginPath();
+      ctx.moveTo(0, size);
+      ctx.lineTo(-size / 40, size * 1.3);
+      ctx.lineWidth = size * 0.18;
+      ctx.stroke();
+      break;
+    }
     default: {
       switch (def.shape) {
         case "circle": {
@@ -2315,17 +2342,18 @@ const drawSoldierAnt = () => {
 
   ctx.restore();
 };
-  const drawLadybug = () => {
+  const drawLadybug = (shellColor?: string, outlineColor?: string) => {
     // The supplied reference draws a red crescent ladybug: a black underbody
     // topped by a 283° red shell whose notch is cut back through the centre,
     // then clipped black spots. It is adapted to this game's local space so it
     // scales with `radius`, preserves the friendly/gold palette, and uses a
     // stable per-mob seed instead of Math.random() so the spots do not flicker
-    // while the mob is moving every frame.
+    // while the mob is moving every frame. The Shiny Ladybug reuses the same
+    // artwork with a yellow shell (#ffff00 / #CCcc00) passed in.
     const R = radius;
     const BLACK = "#000000";
-    const OUTLINE = friendly ? "#B8860B" : "#AF0000";
-    const SHELL = friendly ? "#DAA520" : "#DA3232";
+    const OUTLINE = outlineColor ?? (friendly ? "#B8860B" : "#AF0000");
+    const SHELL = shellColor ?? (friendly ? "#DAA520" : "#DA3232");
 
     ctx.save();
     ctx.translate(x, y);
@@ -3025,6 +3053,9 @@ const drawCactus = () => {
     case 15: drawHiveBody(); break;
     case 16: drawHornet(); break;
     case 17: drawSpider(); break;
+    // Shiny Ladybug — same crescent-shell artwork as the Ladybug, but with
+    // the requested yellow palette (fill #ffff00, stroke #CCcc00).
+    case 18: drawLadybug("#ffff00", "#CCcc00"); break;
     default: drawRock(); break;
   }
 
@@ -3047,6 +3078,11 @@ export interface PlayerSkinState {
   spreadAnim?: number;
   contractAnim?: number;
   angle?: number;
+  /**
+   * Dead body on the ground: drawn petal-less with two 'x' eyes and a bitter
+   * (frowning) mouth, waiting for a teammate's Yggdrasil to revive it.
+   */
+  dead?: boolean;
 }
 export function drawDefaultSkin(
   ctx: CanvasRenderingContext2D,
@@ -3129,6 +3165,35 @@ export function drawDefaultSkin(
 
   const pOffX = Math.cos(angleToMouse) * pupilOffset;
   const pOffY = Math.sin(angleToMouse) * pupilOffset;
+
+  // Dead body: two 'x' eyes + a bitter (frowning) mouth, no pupils.
+  if (player.dead) {
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = Math.max(2, radius / 9);
+    ctx.lineCap = "round";
+    const xr = radius / 4.5; // half-size of each 'x'
+    eyePositions.forEach((eye) => {
+      ctx.beginPath();
+      ctx.moveTo(eye.x - xr, eye.y - xr);
+      ctx.lineTo(eye.x + xr, eye.y + xr);
+      ctx.moveTo(eye.x + xr, eye.y - xr);
+      ctx.lineTo(eye.x - xr, eye.y + xr);
+      ctx.stroke();
+    });
+    ctx.restore(); // undo translate(x, y)
+    // Bitter mouth: an upside-down (frowning) curve.
+    ctx.save();
+    ctx.strokeStyle = "#000000";
+    ctx.lineWidth = 2.5 * s;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(x - mouthWidth, y + mouthY);
+    ctx.quadraticCurveTo(x, y + mouthY - mouthFrown * 1.4, x + mouthWidth, y + mouthY);
+    ctx.stroke();
+    ctx.restore();
+    return;
+  }
 
   eyePositions.forEach((eye) => {
     ctx.save();
