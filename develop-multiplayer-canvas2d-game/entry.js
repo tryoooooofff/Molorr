@@ -40,24 +40,91 @@ let totalUpgrades = 0;
 // shows both the problem (HTTP that shouldn't exist) and where it went.
 const httpAudit = new Map(); // "METHOD path → status via … | ua=…" → count
 let httpAuditMinute = 0;
+let httpResponsesTotal = 0; // cumulative since boot, for the 20s status line
 
 function auditHttpResponse(req, statusCode, via) {
   httpAuditMinute++;
+  httpResponsesTotal++;
   const ua = String(req.headers["user-agent"] || "-").replace(/\s+/g, " ").slice(0, 80);
   const key = `${req.method} ${req.url} → ${statusCode} via ${via} | ua=${ua}`;
   httpAudit.set(key, (httpAudit.get(key) || 0) + 1);
 }
 
+// ── WebSocket (101) audit log ─────────────────────────────────────────
+// A WebSocket handshake IS an HTTP exchange: one request in, one
+// `101 Switching Protocols` response out. Any counter in front of this
+// process (Render's proxy, a CDN, an uptime service) bills it as an HTTP
+// response — but this process never builds an http.ServerResponse for it,
+// because `upgrade` events are piped straight to the C++ server as raw TCP.
+// That is exactly why handshakes were invisible in the log while the
+// platform's HTTP-response counter kept climbing: every connect, every
+// reconnect after an AFK kick / crash / spin-down, is one more 101 that the
+// old audit could not see.
+// So upgrades get the same treatment as plain HTTP: counted, attributed
+// (path + user-agent + source IP) and reported as ONE aggregated line per
+// minute, with how long each socket lived and why it ended. A socket that
+// dies young and comes straight back is reconnect churn — the thing that
+// turns "1 HTTP response per player" into hundreds per day.
+const wsAudit = new Map(); // "path | ua | ip | end" → { n, totalMs, minMs, maxMs }
+let wsAuditMinute = 0;
+let wsOpenedTotal = 0;
+let wsClosedTotal = 0;
+let wsRejectedTotal = 0;
+
+function auditWsClose(url, ua, ip, reason, lifetimeMs) {
+  wsAuditMinute++;
+  wsClosedTotal++;
+  const key = `${url || "/"} | ua=${ua} | ip=${ip} | end=${reason}`;
+  const rec = wsAudit.get(key) || { n: 0, totalMs: 0, minMs: Infinity, maxMs: 0 };
+  rec.n++;
+  rec.totalMs += lifetimeMs;
+  rec.minMs = Math.min(rec.minMs, lifetimeMs);
+  rec.maxMs = Math.max(rec.maxMs, lifetimeMs);
+  wsAudit.set(key, rec);
+}
+
+function auditWsReject(url, ua, ip, reason) {
+  wsAuditMinute++;
+  wsRejectedTotal++;
+  const key = `${url || "/"} | ua=${ua} | ip=${ip} | end=${reason}`;
+  const rec = wsAudit.get(key) || { n: 0, totalMs: 0, minMs: Infinity, maxMs: 0 };
+  rec.n++;
+  wsAudit.set(key, rec);
+}
+
 setInterval(() => {
-  if (httpAuditMinute === 0) return; // zero plain HTTP = the ideal state, stay quiet
-  const detail = [...httpAudit.entries()].map(([k, n]) => `${n}× ${k}`).join(" | ");
-  console.log(
-    `[http-audit] ⚠ ${httpAuditMinute} plain-HTTP response(s) in the last 60s — ` +
-    `gameplay is WebSocket-only, so this is external traffic; act on the sources below. ` +
-    `Where it went: ${detail}`,
-  );
-  httpAudit.clear();
-  httpAuditMinute = 0;
+  if (httpAuditMinute > 0) {
+    const detail = [...httpAudit.entries()].map(([k, n]) => `${n}× ${k}`).join(" | ");
+    console.log(
+      `[http-audit] ⚠ ${httpAuditMinute} plain-HTTP response(s) in the last 60s — ` +
+      `gameplay is WebSocket-only, so this is external traffic; act on the sources below. ` +
+      `Where it went: ${detail}`,
+    );
+    httpAudit.clear();
+    httpAuditMinute = 0;
+  }
+  if (wsAuditMinute > 0) {
+    // Each entry here is one `101` response the platform counted. `life=` is
+    // how long the socket stayed up: a low value repeated many times means
+    // clients are reconnecting in a loop (AFK kick, C++ restart, spin-down),
+    // and each of those reconnects costs another handshake.
+    const detail = [...wsAudit.entries()]
+      .map(([k, r]) =>
+        `${r.n}× ${k}` +
+        (r.totalMs > 0
+          ? ` | life=${(r.totalMs / r.n / 1000).toFixed(0)}s avg` +
+            ` (${r.minMs === Infinity ? 0 : (r.minMs / 1000).toFixed(0)}–${(r.maxMs / 1000).toFixed(0)}s)`
+          : ""),
+      )
+      .join(" | ");
+    console.log(
+      `[ws-audit] ${wsAuditMinute} WebSocket handshake(s)/close(s) in the last 60s ` +
+      `(each handshake = 1 HTTP \`101\` response, live=${activeConn}, ` +
+      `opened=${wsOpenedTotal} closed=${wsClosedTotal} rejected=${wsRejectedTotal} since boot): ${detail}`,
+    );
+    wsAudit.clear();
+    wsAuditMinute = 0;
+  }
 }, 60_000);
 
 // ── 1. Start the C++ game server on :8081 (supervised) ────────────────
@@ -253,7 +320,16 @@ const startProxy = async () => {
     // response is actually flushed. WebSocket upgrades never reach this
     // handler, so everything counted here is genuine plain-HTTP traffic.
     let proxyVia = "entry(direct answer)";
-    res.on("finish", () => auditHttpResponse(req, res.statusCode, proxyVia));
+    let httpAudited = false;
+    const auditOnce = () => {
+      if (httpAudited) return;
+      httpAudited = true;
+      auditHttpResponse(req, res.statusCode, proxyVia);
+    };
+    res.on("finish", auditOnce);
+    // A caller that hangs up mid-response (bot, `curl -m 1`, closed tab) never
+    // fires `finish` — without `close` those responses go uncounted.
+    res.on("close", auditOnce);
 
     // ── /status endpoint for debugging ────────────────────────────────
     if (req.url === "/status") {
@@ -292,6 +368,19 @@ const startProxy = async () => {
         },
         connections: { active: activeConn, max: MAX_CONN, totalUpgrades },
         requests: { total: totalRequests },
+        // Cumulative since boot, mirroring the [http-audit] / [ws-audit] lines.
+        // Render's own Metrics page counts HTTP responses at ITS proxy (per host
+        // + status code), so its number also includes the `101` handshakes and
+        // the 502/503 its edge replies with while this container is asleep —
+        // neither of which ever reaches an HTTP handler here. These counters are
+        // what THIS process actually emitted, so comparing the two tells you how
+        // much of Render's curve is your traffic and how much is the edge.
+        responses: {
+          plainHttp: httpResponsesTotal,
+          wsHandshakes: wsOpenedTotal, // each one = a `101` response
+          wsClosed: wsClosedTotal,
+          wsRejected: wsRejectedTotal,
+        },
         debug: DEBUG,
       }));
       return;
@@ -319,8 +408,19 @@ const startProxy = async () => {
 
   // WebSocket upgrade: proxy to the C++ server via raw TCP
   proxy.on("upgrade", (req, socket, head) => {
+    // Attribution for the [ws-audit] line: who is opening (and re-opening)
+    // sockets. `x-forwarded-for` is set by Render's proxy, so this is the real
+    // client IP — that is how you tell players from bots/uptime monitors.
+    const ua = String(req.headers["user-agent"] || "-").replace(/\s+/g, " ").slice(0, 80);
+    const ip =
+      String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
+      socket.remoteAddress ||
+      "-";
+    const openedAt = Date.now();
+
     if (!cppReady) {
       console.error("[entry] WebSocket upgrade rejected — C++ server not ready");
+      auditWsReject(req.url, ua, ip, "rejected(cpp-not-ready)");
       socket.destroy();
       return;
     }
@@ -328,13 +428,40 @@ const startProxy = async () => {
     // Enforce connection limit (OOM prevention)
     if (activeConn >= MAX_CONN) {
       console.error("[entry] Max connections reached, rejecting");
+      auditWsReject(req.url, ua, ip, "rejected(server-full)");
       socket.destroy();
       return;
     }
 
-    const client = net.connect(CPP_PORT, "localhost", () => {
-      activeConn++;
+    let client = null;
+    let idleTimer = null;
+    let ended = false;
+    let counted = false;
+
+    // Single guarded teardown. Previously every one of the four listeners
+    // below ran the same cleanup, so `activeConn` was decremented up to four
+    // times per connection (and the idle timer kept firing after the socket
+    // was already gone). The clamp at 0 hid it, which is why the 20s line
+    // reported `conn=0/50` even with players connected — the log looked idle
+    // while traffic was flowing.
+    const end = (reason) => {
+      if (ended) return;
+      ended = true;
+      if (idleTimer) clearTimeout(idleTimer);
+      if (counted) activeConn = Math.max(0, activeConn - 1);
+      auditWsClose(req.url, ua, ip, reason, Date.now() - openedAt);
+      try { socket.destroy(); } catch { /* ignore */ }
+      try { client?.destroy(); } catch { /* ignore */ }
+    };
+
+    client = net.connect(CPP_PORT, "localhost", () => {
+      if (ended) return;
+      if (!counted) {
+        counted = true;
+        activeConn++;
+      }
       totalUpgrades++;
+      wsOpenedTotal++;
       const reqLine = `GET ${req.url} HTTP/1.1\r\n`;
       const headers = Object.entries(req.headers)
         .map(([k, v]) => `${k}: ${v}`)
@@ -347,27 +474,23 @@ const startProxy = async () => {
       client.pipe(socket);
     });
 
-    // Shared cleanup: decrement counter and destroy both sockets
-    const cleanup = () => {
-      activeConn = Math.max(0, activeConn - 1);
-      socket.destroy();
-      client.destroy();
-    };
-
     client.on("error", (err) => {
       console.error("[entry] WebSocket proxy to C++ failed:", err.message);
-      cleanup();
+      end(`upstream-error(${err.code || "err"})`);
     });
-    socket.on("error", cleanup);
+    socket.on("error", (err) => end(`client-error(${err.code || "err"})`));
 
     // Clean up on close events too (catches remote disconnect)
-    socket.on("close", cleanup);
-    client.on("close", cleanup);
+    socket.on("close", () => end("client-close"));
+    client.on("close", () => end("upstream-close"));
 
-    // Idle timeout: kill zombie connections after 5 minutes
-    const idleTimer = setTimeout(() => {
+    // Idle timeout: kill zombie connections after 5 minutes of silence in
+    // BOTH directions. The C++ server pushes STATS/DEBUG to every connected
+    // client (even one sitting in the main menu), so a healthy socket keeps
+    // refreshing this; only a truly dead peer trips it.
+    idleTimer = setTimeout(() => {
       console.error("[entry] Idle connection timeout, closing");
-      cleanup();
+      end("idle-timeout(5m)");
     }, 5 * 60 * 1000);
     socket.on("data", () => { idleTimer.refresh(); });
     client.on("data", () => { idleTimer.refresh(); });
@@ -404,8 +527,18 @@ const startProxy = async () => {
         `uptime=${(process.uptime() / 60).toFixed(1)}min`
       );
     } else {
-      // Lightweight keepalive — minimal info
-      console.log(`[mem] rss=${rssMB}MB heap=${heapMB}MB conn=${activeConn}/${MAX_CONN}`);
+      // Lightweight keepalive — minimal info, but always with the traffic
+      // counters: `http=` is plain-HTTP responses this process emitted since
+      // boot, `ws=` is completed WebSocket handshakes (each one a `101`
+      // response that never appears in the plain-HTTP count). Watching which
+      // of the two deltas over a few minutes tells you immediately whether the
+      // platform's HTTP-response counter is being fed by external HTTP or by
+      // reconnecting sockets.
+      console.log(
+        `[mem] rss=${rssMB}MB heap=${heapMB}MB conn=${activeConn}/${MAX_CONN} ` +
+        `http=${httpResponsesTotal} ws=${wsOpenedTotal}/${wsClosedTotal}(rej ${wsRejectedTotal}) ` +
+        `req=${totalRequests}`,
+      );
     }
   }, 20000);
 };

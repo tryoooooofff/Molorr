@@ -1,5 +1,21 @@
 name: Keep game servers awake
 
+# ⚠ NOT INSTALLED, AND NOT SAFE TO INSTALL AS-IS (see the banner at the top of
+# develop-multiplayer-canvas2d-game/scripts/ws-keepalive.mjs).
+# This file lives in deliverables/ — main has no .github/workflows/ at all, so
+# nothing here runs. Before copying it into .github/workflows/, note that the
+# script's central premise ("an unjoined socket is never AFK-kicked and receives
+# no snapshots") was verified against the TypeScript server, while Render runs
+# the C++ one: server-cpp/main.cpp creates a Player in `.open` (:4643), leaves
+# `menuMode` false until JOIN (:983/:4692) so snapshots stream at 10 Hz (:5337),
+# and `updateAfk` (:4032) kicks it with code 4001 after 180+45 s. The script
+# would therefore reconnect every ~4 minutes — one fresh `101` HTTP response per
+# reconnect, ~720/day across both servers — the opposite of its stated goal.
+#
+# Also note the current decision: no external keepalive at all. Render free
+# services spin down after 15 min without an HTTP request OR a WebSocket message
+# on an existing connection, so expect ~1 min cold starts instead.
+#
 # Replaces the old "Ping Render apps" workflow, which `curl`-ed the HTTP
 # endpoints every 14 minutes (~204 HTTP responses/day, half of them to a
 # hostname that no longer exists). This job holds a WebSocket open instead,

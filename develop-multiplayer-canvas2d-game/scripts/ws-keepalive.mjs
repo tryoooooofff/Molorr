@@ -9,14 +9,36 @@
  *   • ONE WebSocket handshake per server per session (the `101` upgrade),
  *     then nothing but zero-payload PING control frames on an open socket.
  *
- * WHY IT SURVIVES INDEFINITELY
- * ----------------------------
- * The client deliberately never sends C2S.JOIN. A client is only turned into
- * a player by JOIN, and the AFK sweep explicitly skips clients with no
+ * ⚠ DO NOT ENABLE THIS AGAINST THE DEPLOYED (C++) SERVER YET
+ * ----------------------------------------------------------
+ * The claim below only holds for the TypeScript reference server. Production
+ * on Render runs server-cpp/main.cpp, which behaves differently:
+ *
+ *   • main.cpp:4643  `.open` calls `sim.add(data->id)` — a Player is created
+ *     the moment the socket opens, WITHOUT waiting for C2S.JOIN.
+ *   • main.cpp:983   `menuMode` defaults to false and is only ever set by JOIN
+ *     (main.cpp:4692), so main.cpp:5337 streams full SNAPSHOTs to this socket
+ *     at 10 Hz.
+ *   • main.cpp:4032  `updateAfk` iterates every Player, and an RFC 6455 PING
+ *     control frame never reaches `.message`, so nothing calls `markActive`:
+ *     this socket IS kicked with code 4001 at 180 s + 45 s = 225 s.
+ *
+ * Net effect if enabled as-is: it burns a player slot, pulls ~10 snapshots/s of
+ * real bandwidth, and gets kicked every ~4 minutes — then reconnects, and each
+ * reconnect is a fresh `101` HTTP response (~360/server/day, ~720/day for both).
+ * That is exactly the HTTP traffic this script exists to avoid.
+ *
+ * Fix the C++ side first (treat an unjoined/menuMode socket as a non-player:
+ * skip it in `updateAfk`, skip it in the snapshot loop, don't count it in
+ * `playerCount`), then this script becomes genuinely zero-HTTP.
+ *
+ * WHY IT *SHOULD* SURVIVE INDEFINITELY (TypeScript server)
+ * --------------------------------------------------------
+ * The client deliberately never sends C2S.JOIN. There, a client is only turned
+ * into a player by JOIN, and the AFK sweep explicitly skips clients with no
  * player:
  *
  *   src/game/shared/sim.ts:2045   if (!c.player || c.kick) continue;
- *   (server-cpp/main.cpp does the same — spawnPlayer only runs on JOIN)
  *
  * so an unjoined socket is never AFK-kicked (verified: a control run with no
  * traffic at all survived 245 s of simulated time, while a JOINed client is
