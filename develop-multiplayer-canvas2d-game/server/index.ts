@@ -59,9 +59,13 @@ let nextClientId = 1;
 // exchange is one tiny header-only response, then the socket dies.
 // Everything real (snapshots, inputs, pings) is binary WebSocket frames — no HTTP.
 const httpServer = http.createServer((req, res) => {
+  // All leftover HTTP exchanges are header‑only, then the socket dies.
+  // Explicitly set content‑length and connection: close so that no
+  // Keep‑Alive or lingering body can consume bandwidth.
   res.writeHead(req.url === "/health" ? 200 : 426, {
     "content-length": "0",
     connection: "close",
+    "content-type": "text/plain",
   });
   res.end();
 });
