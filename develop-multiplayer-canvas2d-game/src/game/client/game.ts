@@ -7464,129 +7464,159 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       break;
     }
     case S2C.SNAPSHOT: {
-      r.u32(); // skip tickCount (op byte already consumed by the dispatcher)
-      const full = r.u8();
+      r.u32();
       this.sinceSnapshot = 0;
       this.snapshotStalled = false;
       const snapshotSequence = ++this.snapshotSequence;
-
-      // Read a single entity from a full canonical record (used by full
-      // snapshots and by delta "create" records). Mirrors the server's
-      // writeCanonical() byte layout exactly.
-      const readFullEntity = (kind: number, id: number): Ent => {
+      const count = r.u16();
+      let currentPlayerId = 0;
+      for (let i = 0; i < count; i++) {
+        const kind = r.u8();
+        const id = r.u16();
         const etype = r.u8();
         const team = r.u8();
         const x = r.i16();
         const y = r.i16();
         const angle = (r.u16() / 65535) * Math.PI * 2;
+        // DROP：服务器把"正在被磁铁吸取"的状态编码在 radius 字节的最高位，
+        // 客户端只在确定被吸时才对掉落物做缩小淡出。
         let radius = kind === ENT.MOB ? r.u16() : r.u8();
         let suction = false;
-        if (kind === ENT.DROP) { suction = (radius & 0x80) !== 0; radius &= 0x7f; }
+        if (kind === ENT.DROP) {
+          suction = (radius & 0x80) !== 0;
+          radius &= 0x7f;
+        }
         const hp = r.u8() / 255;
         let name = "";
-        if (kind === ENT.PLAYER) name = r.str();
-        let rarity = 0;
-        if (kind === ENT.MOB) rarity = r.u8();
-        else if (kind === ENT.PROJECTILE) rarity = r.u8();
-        return {
-          id, kind, type: etype, team, x, y, tx: x, ty: y, angle, radius,
-          hp, displayHp: hp, rarity, suction, name,
-          seen: this.time, seenSnapshot: snapshotSequence, hurt: 0, spawn: 0,
-          dropFirstSeen: kind === ENT.DROP ? this.time : undefined,
-          suctionStartDist: undefined, _prevSuction: false,
-        };
-      };
+        if (kind === ENT.PLAYER) {
+          name = r.str();
+          currentPlayerId = id;
+          if (id === this.selfId) {
+            this.serverSelfX = x;
+            this.serverSelfY = y;
+          }
+        }
 
-      // Apply a snapshot sample to an entity: interpolation samples, local
-      // self-authority handoff, mob-angle smoothing, suction bookkeeping and the
-      // per-tick seen/seenSnapshot stamps. sx/sy/sAngle are the authoritative
-      // snapshot sample coordinates.
-      const ingest = (e: Ent, sx: number, sy: number, sAngle: number, isSelf: boolean, oldHp: number) => {
-        if (e.hp < oldHp) e.hurt = 0.22;
+        // ─── 读取 rarity ───
+        let rarity = 0;
+        if (kind === ENT.MOB) {
+          rarity = r.u8();
+        } else if (kind === ENT.PROJECTILE) {
+          // PROJECTILE 在序列化时末尾附加了 rarity (u8)
+          rarity = r.u8();
+        }
+
+        const isSelf = id === this.selfId;
+        let e = this.ents.get(id);
+        if (!e) {
+          e = {
+            id,
+            kind,
+            type: etype,
+            team,
+            x,
+            y,
+            tx: x,
+            ty: y,
+            angle,
+            radius,
+            hp,
+            displayHp: hp,
+            rarity,
+            suction,
+            name,
+            seen: this.time,
+            seenSnapshot: snapshotSequence,
+            hurt: 0,
+            spawn: 0,
+            dropFirstSeen: kind === ENT.DROP ? this.time : undefined,
+            suctionStartDist: undefined,
+            _prevSuction: false,
+          };
+          this.ents.set(id, e);
+        }
+        if (hp < e.hp) e.hurt = 0.22;
+        e.kind = kind;
+        e.type = etype;
+        e.team = team;
+        // Keep the previous server sample + arrival time for every entity
+        // (including the self player, whose server echo is also stepped).
+        // The spring / self-petal prediction then interpolates between the
+        // two latest snapshots at render rate, so a new snapshot lands as a
+        // continuous motion instead of a 50 ms step + fast catch-up.
         if (e.serverTx !== undefined) {
-          e.prevTx = e.serverTx; e.prevTy = e.serverTy; e.prevAngle = e.serverAngle; e.prevAt = e.curAt;
-        } else { e.prevTx = sx; e.prevTy = sy; e.prevAngle = sAngle; e.prevAt = this.time; }
-        e.serverTx = sx; e.serverTy = sy; e.serverAngle = sAngle; e.curAt = this.time;
+          e.prevTx = e.serverTx;
+          e.prevTy = e.serverTy;
+          e.prevAngle = e.serverAngle;
+          e.prevAt = e.curAt;
+        } else {
+          e.prevTx = x;
+          e.prevTy = y;
+          e.prevAngle = angle;
+          e.prevAt = this.time;
+        }
+        e.serverTx = x;
+        e.serverTy = y;
+        e.serverAngle = angle;
+        e.curAt = this.time;
+        if (kind === ENT.PETAL) {
+          this.petalOwners.set(id, currentPlayerId);
+        }
+        // Once the local sim is authoritative, never let a networked snapshot
+        // move the local player back — the browser's calculated position is
+        // sent on the next INPUT packet and the server mirrors it for petals.
+        // When authority is paused (spawn / map change / death respawn) the
+        // first server snapshot re-seeds the client position before handing
+        // authority back.
         const keepLocalSelf = isSelf && this.localAuthActive;
         if (!keepLocalSelf) {
-          e.tx = sx; e.ty = sy;
-          if (isSelf) { e.x = sx; e.y = sy; this.localAuthActive = true; this.clientVx = 0; this.clientVy = 0; }
+          e.tx = x;
+          e.ty = y;
+          if (isSelf) {
+            e.x = x;
+            e.y = y;
+            this.localAuthActive = true;
+            this.clientVx = 0;
+            this.clientVy = 0;
+          }
         }
-        if (e.kind !== ENT.MOB) e.angle = sAngle;
-        e.seen = this.time; e.seenSnapshot = snapshotSequence;
-        if (e.spawn < 1) e.spawn = Math.min(1, e.spawn + 0.12);
-        if (isSelf) { this.serverSelfX = sx; this.serverSelfY = sy; }
-      };
-
-      let currentPlayerId = 0;
-      const count = r.u16();
-      if (full) {
-        for (let i = 0; i < count; i++) {
-          const kind = r.u8();
-          const id = r.u16();
-          const e = readFullEntity(kind, id);
-          this.ents.set(id, e);
-          if (kind === ENT.PLAYER) currentPlayerId = id;
-          if (kind === ENT.PETAL) this.petalOwners.set(id, currentPlayerId);
-          const isSelf = id === this.selfId;
-          ingest(e, e.x, e.y, e.angle, isSelf, e.hp);
-        }
-      } else {
-        try {
-          for (let i = 0; i < count; i++) {
-            const id = r.u16();
-            const kind = r.u8();
-            const meta = r.u8();
-            if (!this.ents.has(id)) {
-              const e = readFullEntity(kind, id);
-              this.ents.set(id, e);
-              if (kind === ENT.PLAYER) currentPlayerId = id;
-              if (kind === ENT.PETAL) this.petalOwners.set(id, currentPlayerId);
-              const isSelf = id === this.selfId;
-              ingest(e, e.x, e.y, e.angle, isSelf, e.hp);
+        // Mobs turn smoothly toward the interpolated snapshot facing in the
+        // render loop (shortest-arc lerp in the entity pass); writing the raw
+        // sample here would snap their heading every 50 ms. Every other kind
+        // keeps the instant update.
+        if (e.kind !== ENT.MOB) e.angle = angle;
+        e.radius = radius;
+        e.hp = hp;
+        e.rarity = rarity;
+        // Track suction edge for drop shrink animation
+        if (kind === ENT.DROP) {
+          if (e.dropFirstSeen === undefined) e.dropFirstSeen = this.time;
+          const prev = e._prevSuction ?? false;
+          if (suction && !prev) {
+            const me = this.ents.get(this.selfId);
+            if (me) {
+              e.suctionStartDist = Math.hypot(me.x - e.x, me.y - e.y);
             } else {
-              const e = this.ents.get(id)!;
-              const isSelf = id === this.selfId;
-              let sx = e.tx !== undefined ? e.tx : e.x;
-              let sy = e.ty !== undefined ? e.ty : e.y;
-              let sAngle = e.angle;
-              if (meta & 1) e.type = r.u8();
-              if (meta & 2) e.team = r.u8();
-              if (meta & 4) { const d = r.i8(); sx = (d === -128) ? r.i16() : sx + d; }
-              if (meta & 8) { const d = r.i8(); sy = (d === -128) ? r.i16() : sy + d; }
-              if (meta & 16) sAngle = (r.u16() / 65535) * Math.PI * 2;
-              if (meta & 32) {
-                e.radius = kind === ENT.MOB ? r.u16() : r.u8();
-                if (kind === ENT.DROP) {
-                  const suction = (e.radius & 0x80) !== 0; e.radius &= 0x7f;
-                  const prev = e._prevSuction ?? false;
-                  if (suction && !prev) {
-                    const me = this.ents.get(this.selfId);
-                    if (me) e.suctionStartDist = Math.hypot(me.x - e.x, me.y - e.y);
-                    else { e.suctionStartDist = Math.max(30, Math.hypot(sx - e.x, sy - e.y) + 40); if (!e.suctionStartDist || e.suctionStartDist < 20) e.suctionStartDist = 100; }
-                  }
-                  if (!suction) e.suctionStartDist = undefined;
-                  e._prevSuction = suction; e.suction = suction;
-                }
-              }
-              let newHp = e.hp;
-              if (meta & 64) newHp = r.u8() / 255;
-              const oldHp = e.hp;
-              e.hp = newHp;
-              if (kind === ENT.PETAL) this.petalOwners.set(id, currentPlayerId);
-              ingest(e, sx, sy, sAngle, isSelf, oldHp);
+              // Fallback: use current radius as start distance or a reasonable default
+              e.suctionStartDist = Math.max(30, Math.hypot(e.tx - e.x, e.ty - e.y) + 40);
+              // If still small, use 100
+              if (!e.suctionStartDist || e.suctionStartDist < 20) e.suctionStartDist = 100;
             }
           }
-          const remCount = r.u16();
-          for (let i = 0; i < remCount; i++) this.ents.delete(r.u16());
-        } catch (err) {
-          console.warn("delta snapshot parse failed", err);
-          this.snapshotStalled = true;
+          if (!suction) {
+            e.suctionStartDist = undefined;
+          }
+          e._prevSuction = suction;
         }
+        e.suction = suction;
+        if (name) e.name = name;
+        e.seen = this.time;
+        e.seenSnapshot = snapshotSequence;
+        if (e.spawn < 1) e.spawn = Math.min(1, e.spawn + 0.12);
       }
-      // Petals are authoritative, short-lived entities. Remove one as soon as it
-      // is absent so an absorbed Rose does not sit over the player for the
-      // generic stale-entity grace period.
+      // Petals are authoritative, short-lived entities. Remove one as soon
+      // as it is absent so an absorbed Rose does not sit over the player for
+      // the generic stale-entity grace period.
       for (const [id, entity] of this.ents) {
         if (entity.kind === ENT.PETAL && entity.seenSnapshot !== snapshotSequence) this.ents.delete(id);
       }

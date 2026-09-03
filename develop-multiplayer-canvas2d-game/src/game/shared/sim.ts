@@ -990,9 +990,6 @@ export interface ClientLike {
   send(data: Uint8Array): void;
 }
 
-interface SnapBase { kind: number; a: number; b: number; x: number; y: number; angleU16: number; radius: number; hp: number; }
-interface SnapEnt { id: number; kind: number; a: number; b: number; x: number; y: number; angleU16: number; radius: number; hp: number; name: string; extraRarity: number; }
-
 interface ClientState {
   send(data: Uint8Array): void;
   player: Player | null;
@@ -1011,12 +1008,6 @@ interface ClientState {
   lastInDx: number;
   lastInDy: number;
   lastFlags: number;
-  /** Last snapshot baseline (entity state) sent to this client, for delta encoding. */
-  snapBaseline?: Map<number, SnapBase>;
-  /** Force a full (non-delta) snapshot on the next sendState. */
-  snapNeedFull?: boolean;
-  /** tickCount of the last full snapshot sent (for periodic resync). */
-  snapLastFull?: number;
 }
 
 function clamp(v: number, a: number, b: number) {
@@ -2024,9 +2015,6 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
       lastInDx: 0,
       lastInDy: 0,
       lastFlags: 0,
-      snapBaseline: new Map(),
-      snapNeedFull: true,
-      snapLastFull: -9999,
     });
   }
 
@@ -2113,7 +2101,6 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
       }
     }
     this.clients.delete(id);
-    if (c) c.snapBaseline = undefined;
   }
 
   getSave(id: number): PlayerSave | null {
@@ -2663,7 +2650,6 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
     c.send(w.bytes());
     p.dirty = true;
     p.statsDirty = true;
-    c.snapNeedFull = true;
   }
 
   /**
@@ -4930,188 +4916,93 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
     // INVENTORY / STATS / 事件数据(见下方 dirty 分支)。
     if (!p.menuMode) {
     const world = this.worlds[p.mapId];
-
-    // Per-client delta snapshots. The server remembers the last snapshot it
-    // sent to each client and only re-sends entity fields that changed. This
-    // cuts outbound bandwidth sharply (static drops cost ~4 bytes instead of
-    // ~13; moving mobs skip unchanged fields) with no change to what the
-    // player sees -- the client already keeps a persistent per-id entity map
-    // and interpolates. A full snapshot is sent on connect, after a map
-    // change, and every SNAPSHOT_FULL_INTERVAL ticks as a safety resync.
-    const SNAPSHOT_FORCE_FULL = false;
-    const SNAPSHOT_FULL_INTERVAL = 30;
-
     const w = new Writer(64);
-    const fullFlag = SNAPSHOT_FORCE_FULL || !!c.snapNeedFull ||
-      (this.tickCount - (c.snapLastFull ?? -9999)) >= SNAPSHOT_FULL_INTERVAL;
-    w.u8(S2C.SNAPSHOT).u32(this.tickCount).u8(fullFlag ? 1 : 0);
-
-    const body = new Writer(65536);
+    w.u8(S2C.SNAPSHOT).u32(this.tickCount);
+    let count = 0;
     const viewX = 1300;
     const viewY = 950;
     const inView = (x: number, y: number) => Math.abs(x - p.x) < viewX && Math.abs(y - p.y) < viewY;
-
-    const writeCanonical = (b: Writer, e: SnapEnt) => {
-      b.u8(e.a).u8(e.b).i16(Math.round(e.x)).i16(Math.round(e.y)).u16(e.angleU16);
-      if (e.kind === ENT.MOB) b.u16(Math.min(65535, Math.round(e.radius)));
-      else b.u8(Math.round(e.radius));
-      b.u8(e.hp);
-      if (e.kind === ENT.PLAYER) b.str(e.name);
-      if (e.kind === ENT.MOB || e.kind === ENT.PROJECTILE) b.u8(e.extraRarity);
-    };
-
-    const list: SnapEnt[] = [];
+    const body = new Writer(65536);
     for (const other of this.clients.values()) {
       const op = other.player;
       if (!op || op.mapId !== p.mapId || !op.alive) continue;
       if (op !== p && !inView(op.x, op.y)) continue;
       const opRadius = PLAYER_RADIUS + this.soilRadiusBonusOf(op);
-      list.push({
-        id: op.id, kind: ENT.PLAYER,
-        a: op.flags,
-        b: op === p ? TEAM.SELF : TEAM.FRIENDLY,
-        x: op.x, y: op.y,
-        angleU16: Math.round(((op.baseAngle % (Math.PI * 2)) / (Math.PI * 2)) * 65535),
-        radius: Math.round(opRadius),
-        hp: Math.round((op.hp / op.maxHp) * 255),
-        name: op.name, extraRarity: 0,
-      });
+      body.u8(ENT.PLAYER).u16(op.id).u8(op.flags).u8(op === p ? TEAM.SELF : TEAM.FRIENDLY)
+        .i16(Math.round(op.x)).i16(Math.round(op.y))
+        .u16(Math.round(((op.baseAngle % (Math.PI * 2)) / (Math.PI * 2)) * 65535))
+        .u8(Math.round(opRadius)).u8(Math.round((op.hp / op.maxHp) * 255)).str(op.name);
+      count++;
       for (let i = 0; i < SLOT_COUNT; i++) {
         const cell = op.slots[i];
         const st = op.petals[i];
         if (!cell || !st || !st.alive) continue;
         if (!orbitsAsPetal(ITEMS[cell.item].kind)) continue;
-        list.push({
-          id: st.id, kind: ENT.PETAL,
-          a: cell.item, b: cell.rarity,
-          x: st.x, y: st.y,
-          angleU16: 0,
-          radius: Math.round(petalHitRadius(cell.item, cell.rarity)),
-          hp: Math.round((st.hp / st.maxHp) * 255),
-          name: "", extraRarity: 0,
-        });
+        body.u8(ENT.PETAL).u16(st.id).u8(cell.item).u8(cell.rarity)
+          .i16(Math.round(st.x)).i16(Math.round(st.y)).u16(0)
+          .u8(Math.round(petalHitRadius(cell.item, cell.rarity)))
+          .u8(Math.round((st.hp / st.maxHp) * 255));
+        count++;
       }
     }
     for (const mob of world.mobs) {
       if (!inView(mob.x, mob.y)) continue;
-      list.push({
-        id: mob.id, kind: ENT.MOB,
-        a: mob.type,
-        b: mob.friendly ? (mob.ownerId === p.id ? TEAM.SELF : TEAM.FRIENDLY) : TEAM.HOSTILE,
-        x: mob.x, y: mob.y,
-        angleU16: Math.round((((mob.angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) / (Math.PI * 2)) * 65535),
-        radius: mob.radius,
-        hp: Math.max(0, Math.round((mob.hp / mob.maxHp) * 255)),
-        name: "", extraRarity: mob.rarity,
-      });
+      body.u8(ENT.MOB).u16(mob.id).u8(mob.type)
+        .u8(mob.friendly ? (mob.ownerId === p.id ? TEAM.SELF : TEAM.FRIENDLY) : TEAM.HOSTILE)
+        .i16(Math.round(mob.x)).i16(Math.round(mob.y))
+        .u16(Math.round((((mob.angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) / (Math.PI * 2)) * 65535))
+        .u16(Math.min(65535, Math.round(mob.radius)))
+        .u8(Math.max(0, Math.round((mob.hp / mob.maxHp) * 255))).u8(mob.rarity);
+      count++;
     }
+    // Drops: only send those the player is allowed to see/loot.
     for (const d of world.drops) {
       if (!inView(d.x, d.y)) continue;
+      // Per-player drops: skip this drop if the player is not in its allow-list.
       if (d.allowedPlayerIds !== null && d.allowedPlayerIds !== undefined && !d.allowedPlayerIds.has(p.id)) continue;
+      // 正在被磁铁吸取（suctionTimer > 0）时，radius 字节最高位置 1；
+      // 客户端据此只在"确定被吸"时才让掉落物缩小淡出。
       const dropRadius = d.suctionTimer > 0 ? (12 | 0x80) : 12;
-      list.push({
-        id: d.id, kind: ENT.DROP,
-        a: d.item, b: d.rarity,
-        x: d.x, y: d.y,
-        angleU16: 0,
-        radius: dropRadius,
-        hp: Math.min(255, d.count),
-        name: "", extraRarity: 0,
-      });
+      body.u8(ENT.DROP).u16(d.id).u8(d.item).u8(d.rarity)
+        .i16(Math.round(d.x)).i16(Math.round(d.y)).u16(0).u8(dropRadius).u8(Math.min(255, d.count));
+      count++;
     }
+    // Projectiles: send to the client so it can render them. The client
+    // filters by team (FRIENDLY for the owning player, HOSTILE for everyone).
     for (const proj of world.projectiles) {
       if (proj.mapId !== p.mapId) continue;
       if (!inView(proj.x, proj.y)) continue;
-      list.push({
-        id: proj.id, kind: ENT.PROJECTILE,
-        a: proj.sourceType, b: proj.team,
-        x: proj.x, y: proj.y,
-        angleU16: Math.round((((proj.angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2) / (Math.PI * 2)) * 65535),
-        radius: proj.radius,
-        hp: Math.max(0, Math.min(255, Math.round((proj.hp / Math.max(1, proj.maxHp)) * 255))),
-        name: "", extraRarity: proj.rarity,
-      });
+      body.u8(ENT.PROJECTILE)
+        .u16(proj.id)
+        .u8(proj.sourceType)
+        .u8(proj.team)
+        .i16(Math.round(proj.x))
+        .i16(Math.round(proj.y))
+        .u16(Math.round(((proj.angle % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) / (Math.PI * 2)) * 65535))
+        .u8(Math.round(proj.radius))
+        .u8(Math.max(0, Math.min(255, Math.round((proj.hp / Math.max(1, proj.maxHp)) * 255))))
+        .u8(proj.rarity);
+      count++;
     }
-
-    const reloadBytes: number[] = [];
-    const hpBytes: number[] = [];
     for (let i = 0; i < SLOT_COUNT; i++) {
       const cell = p.slots[i];
       const st = p.petals[i];
       const def = cell ? ITEMS[cell.item] : null;
-      if (!cell || !st || !def || !orbitsAsPetal(def.kind) || st.alive) reloadBytes.push(255);
-      else { const total = def.reload > 0 ? def.reload : 1; reloadBytes.push(Math.round((1 - Math.max(0, Math.min(1, st.timer / total))) * 255)); }
+      if (!cell || !st || !def || !orbitsAsPetal(def.kind) || st.alive) { body.u8(255); continue; }
+      const total = def.reload > 0 ? def.reload : 1;
+      body.u8(Math.round((1 - Math.max(0, Math.min(1, st.timer / total))) * 255));
     }
     for (let i = 0; i < SLOT_COUNT; i++) {
       const cell = p.slots[i];
       const st = p.petals[i];
-      if (!cell || !st || !st.alive) hpBytes.push(255);
-      else hpBytes.push(Math.max(0, Math.min(255, Math.round((st.hp / Math.max(1, st.maxHp)) * 255))));
+      if (!cell || !st || !st.alive) { body.u8(255); continue; }
+      body.u8(Math.max(0, Math.min(255, Math.round((st.hp / Math.max(1, st.maxHp)) * 255))));
     }
-
-    const sendTailAndHead = (entityCount: number) => {
-      for (const rb of reloadBytes) body.u8(rb);
-      for (const hb of hpBytes) body.u8(hb);
-      w.u16(entityCount);
-      const head = w.bytes(), tail = body.bytes();
-      const packet = new Uint8Array(head.length + tail.length);
-      packet.set(head, 0); packet.set(tail, head.length);
-      c.send(packet);
-    };
-
-    const rebuildBaseline = () => {
-      const m = new Map<number, SnapBase>();
-      for (const e of list) m.set(e.id, { kind: e.kind, a: e.a, b: e.b, x: e.x, y: e.y, angleU16: e.angleU16, radius: e.radius, hp: e.hp });
-      c.snapBaseline = m;
-    };
-
-    if (fullFlag) {
-      for (const e of list) writeCanonical(body, e);
-      sendTailAndHead(list.length);
-      c.snapNeedFull = false;
-      c.snapLastFull = this.tickCount;
-      rebuildBaseline();
-    } else {
-      const baseline = c.snapBaseline ?? new Map<number, SnapBase>();
-      const removals: number[] = [];
-      for (const id of baseline.keys()) {
-        if (!list.some((e) => e.id === id)) removals.push(id);
-      }
-      for (const e of list) {
-        const last = baseline.get(e.id);
-        body.u16(e.id).u8(e.kind);
-        if (!last) {
-          body.u8(0xff);
-          writeCanonical(body, e);
-        } else {
-          const dx = Math.round(e.x - last.x);
-          const dy = Math.round(e.y - last.y);
-          const xAbs = dx < -127 || dx > 127;
-          const yAbs = dy < -127 || dy > 127;
-          let dirty = 0;
-          if (e.a !== last.a) dirty |= 1;
-          if (e.b !== last.b) dirty |= 2;
-          if (xAbs || yAbs) dirty |= 4 | 8;
-          else { if (dx !== 0) dirty |= 4; if (dy !== 0) dirty |= 8; }
-          if (e.angleU16 !== last.angleU16) dirty |= 16;
-          if (Math.round(e.radius) !== Math.round(last.radius)) dirty |= 32;
-          if (e.hp !== last.hp) dirty |= 64;
-          body.u8(dirty);
-          if (dirty & 1) body.u8(e.a);
-          if (dirty & 2) body.u8(e.b);
-          if (dirty & 4) { if (xAbs) { body.i8(-128); body.i16(Math.round(e.x)); } else body.i8(dx); }
-          if (dirty & 8) { if (yAbs) { body.i8(-128); body.i16(Math.round(e.y)); } else body.i8(dy); }
-          if (dirty & 16) body.u16(e.angleU16);
-          if (dirty & 32) { if (e.kind === ENT.MOB) body.u16(Math.min(65535, Math.round(e.radius))); else body.u8(Math.round(e.radius)); }
-          if (dirty & 64) body.u8(e.hp);
-        }
-      }
-      body.u16(removals.length);
-      for (const id of removals) body.u16(id);
-      sendTailAndHead(list.length);
-      c.snapLastFull = this.tickCount;
-      rebuildBaseline();
-    }
+    w.u16(count);
+    const head = w.bytes(), tail = body.bytes();
+    const packet = new Uint8Array(head.length + tail.length);
+    packet.set(head, 0); packet.set(tail, head.length);
+    c.send(packet);
     }
     if (p.dirty) {
       p.dirty = false;
