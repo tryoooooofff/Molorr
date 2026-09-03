@@ -486,8 +486,9 @@ export const MOBS: MobDef[] = [
   drops: [{ item: 43, chance: 0.7 }, { item: 46, chance: 0.7 }, { item: 49, chance: 0.7 }, { item: 52, chance: 0.5 }] },
     { id: 17, name: "Spider", color: "#353535", outline: "#000000", shape: "spider", radius: 18, health: 80, damage: 22, speed: 50, xp: 18,
   drops: [{ item:51, chance: 0.7 }, { item: 45, chance: 0.7 }, { item: 50, chance: 0.7 },{ item: 48, chance: 0.01 }] },
-  // Shiny Ladybug: a very rare desert variant of the Ladybug (1/2000 spawn
-  // weight roll). Slightly tougher and harder-hitting than the garden one.
+  // Shiny Ladybug: a very rare desert variant of the Ladybug. It is a plain
+  // mob spawned through the normal weighted spawn table (SPAWN_WEIGHTS[1][18]
+  // = 0.07) — there is no dedicated roll for it.
   { id: 18, name: "Shiny Ladybug", color: "#ffff00", outline: "#CCcc00", shape: "bug", radius: 22, health: 130, damage: 14, speed: 42, xp: 40,
   drops: [{ item: 30, chance: 0.7 }, { item: 53, chance: 0.5 }, { item: 54, chance: 0.2 }] },
 ];
@@ -1520,6 +1521,30 @@ export function getSpawnProtection(itemId: number): number {
 
 export const EMPTY_ITEM = 255;
 
+/** Item id of the Moon petal (id: 17). */
+export const MOON_ITEM = 17;
+/**
+ * The Moon is rendered (and now collides) at 4× its nominal item radius, so
+ * its visual disc and its hitbox agree. Every place that needs the Moon's
+ * effective radius should go through {@link petalHitRadius}.
+ */
+export const MOON_RADIUS_MULT = 4;
+
+/** True when this item id is the Moon petal. */
+export function isMoonItem(itemId: number): boolean {
+  return itemId === MOON_ITEM || (ITEMS[itemId]?.name ?? "").toLowerCase().includes("moon");
+}
+
+/**
+ * Effective collision/render radius of a petal in a slot. Mirrors the
+ * snapshot encoder: base radius scaled by rarity, ×4 for the Moon.
+ */
+export function petalHitRadius(itemId: number, rarity: number): number {
+  const def = ITEMS[itemId];
+  if (!def) return 0;
+  return def.radius * (1 + rarity * 0.06) * (isMoonItem(itemId) ? MOON_RADIUS_MULT : 1);
+}
+
 /** Item id of the Antennae petal (id: 43). */
 export const ANTENNAE_ITEM = 43;
 /** Item id of the Third Eye petal (id: 48). */
@@ -1584,9 +1609,9 @@ export const SPAWN_WEIGHTS: Record<number, Record<number, number>> = {
     6: 50,   // Beetle
     2: 15,   // Rock
     11: 20,  // Sandstorm
-    // Shiny Ladybug — very rare: weight chosen so that
-    // 0.07754 / (155 + 0.07754) ≈ 1/2000 spawn probability.
-    18: 0.07754,
+    // Shiny Ladybug — an ordinary weighted desert spawn (no special roll):
+    // weight 0.07 out of a 155.07 desert total ≈ 1/2215 spawn probability.
+    18: 0.07,
   },
   // Ocean
   2: {

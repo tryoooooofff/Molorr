@@ -63,6 +63,8 @@ import {
   findSpawnTiles,
   thirdEyeOrbitBonus,
   pickWeightedMob,
+  isMoonItem,
+  petalHitRadius,
 } from "./defs";
 import { C2S, ENT, EVT, LOADOUT_OP, Reader, S2C, SWAP_ROW_ALL, TALENT_KEYS, TALENT_MAX_LEVELS, TEAM, Writer } from "./protocol";
 
@@ -3649,7 +3651,7 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
         const mcell = p.slots[j];
         if (!mcell) continue;
         const mdef = ITEMS[mcell.item];
-        if (!mdef || !(mdef.name ?? "").toLowerCase().includes("moon")) continue;
+        if (!mdef || !isMoonItem(mcell.item)) continue;
         const mst = p.petals[j];
         if (!mst || !mst.alive) continue;
         mst.x += vx * 0.1;
@@ -3686,7 +3688,7 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
       const cell = p.slots[i];
       if (!cell) continue;
       const def = ITEMS[cell.item];
-      if ((def.name ?? "").toLowerCase().includes("moon")) {
+      if (isMoonItem(cell.item)) {
         moonSt = p.petals[i];
         break;
       }
@@ -3712,7 +3714,7 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
       const absorbs = isAbsorbItem(cell.item) && (!!def.heal || !!def.shield);
       const staysTight = isSummon || (def.name ?? "").toLowerCase().includes("magnet") || (def.name ?? "").toLowerCase().includes("bubble");
       const orbitRadius = (absorbs || staysTight) ? Math.min(p.orbit, 62) : p.orbit;
-      const isMoon = (def.name ?? "").toLowerCase().includes("moon");
+      const isMoon = isMoonItem(cell.item);
       const cx = isMoon ? p.x : orbitCenterX;
       const cy = isMoon ? p.y : orbitCenterY;
       const tx = cx + Math.cos(slotAngle) * orbitRadius;
@@ -3728,7 +3730,7 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
           st.absorbTimer = 0;
           // 复活前检查目标轨道位置是否安全（不卡墙）
           const collider = this.wallColliders[p.mapId];
-          const petalR = def.radius * (1 + cell.rarity * 0.06);
+          const petalR = petalHitRadius(cell.item, cell.rarity);
           if (collider.isFree(tx, ty, petalR + 1)) {
             st.x = tx;
             st.y = ty;
@@ -3781,12 +3783,47 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
         const maxShield = p.maxHp;
         if (p.shield < maxShield) { p.shield = Math.min(maxShield, p.shield + def.shieldPerSec * rarityMult(cell.rarity) * dt); p.statsDirty = true; }
       }
+      // ---- Moon 实体碰撞（像生物一样把生物顶开）----
+      // The Moon is rendered at 4x its item radius; it also owns a hitbox of
+      // that size which physically blocks mobs. Mobs are pushed out of the
+      // Moon's disc (and the Moon itself is nudged a little, springing back
+      // toward its orbit over the next few frames), exactly like mob-vs-mob
+      // separation. Damage is still handled by the generic petal block below.
+      if (isMoonItem(cell.item)) {
+        const moonR = petalHitRadius(cell.item, cell.rarity);
+        for (const mob of world.mobs) {
+          if (mob.hp <= 0) continue;
+          if (mob.friendly && mob.ownerId === p.id) continue;
+          const dx = mob.x - st.x, dy = mob.y - st.y;
+          const minDist = moonR + mob.radius;
+          if (dx * dx + dy * dy >= minDist * minDist) continue;
+          this.collisionCounter.n++;
+          let d = Math.hypot(dx, dy);
+          let ux: number, uy: number;
+          if (d < 0.001) {
+            const a = Math.random() * Math.PI * 2;
+            ux = Math.cos(a); uy = Math.sin(a); d = 0.001;
+          } else {
+            ux = dx / d; uy = dy / d;
+          }
+          const overlap = minDist - d;
+          // Mob takes most of the separation; the Moon budges slightly.
+          mob.x += ux * overlap * 0.8;
+          mob.y += uy * overlap * 0.8;
+          st.x -= ux * overlap * 0.2;
+          st.y -= uy * overlap * 0.2;
+          // Bleed the mob's inward velocity so it stops burrowing into the Moon.
+          const vDot = mob.vx * ux + mob.vy * uy;
+          if (vDot < 0) { mob.vx -= ux * vDot; mob.vy -= uy * vDot; }
+        }
+      }
+
       // ---- 花瓣-生物碰撞伤害 ----
       // Optimized but visually identical: only mobs within petal reach can collide.
       // Max possible distance player->mob for collision = p.orbit + mob.radius + pr + buffer.
       // This filters 90% of mobs when they are far, but never skips a colliding pair.
       if (st.hitCd <= 0 && !isSummon) {
-        const pr = def.radius * (1 + cell.rarity * 0.06);
+        const pr = petalHitRadius(cell.item, cell.rarity);
         for (const mob of world.mobs) {
           if (mob.friendly && mob.ownerId === p.id) continue;
           if (mob.hp <= 0) continue;
@@ -4903,7 +4940,7 @@ const percentDisplay = (damagePercent * 100).toFixed(2); // "87.35" 或 "100.00"
         if (!orbitsAsPetal(ITEMS[cell.item].kind)) continue;
         body.u8(ENT.PETAL).u16(st.id).u8(cell.item).u8(cell.rarity)
           .i16(Math.round(st.x)).i16(Math.round(st.y)).u16(0)
-          .u8(Math.round(ITEMS[cell.item].radius * (1 + cell.rarity * 0.06) * ((ITEMS[cell.item].name ?? "").toLowerCase().includes("moon") ? 4 : 1)))
+          .u8(Math.round(petalHitRadius(cell.item, cell.rarity)))
           .u8(Math.round((st.hp / st.maxHp) * 255));
         count++;
       }

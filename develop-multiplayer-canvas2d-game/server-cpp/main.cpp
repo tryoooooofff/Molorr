@@ -68,6 +68,8 @@ constexpr int THIRD_EYE_ITEM = 48;
 constexpr int MISSILE_ITEM = 52;
 constexpr int YGGDRASIL_ITEM = 53;
 constexpr int SHINY_LADYBUG_TYPE = 18;
+// The Moon petal is drawn — and collides — at 4x its nominal item radius.
+constexpr float MOON_RADIUS_MULT = 4.f;
 constexpr float YGGDRASIL_REVIVE_RANGE = 80.f;
 constexpr float ROSE_HEAL_DELAY = 1.0f;
 constexpr float ROSE_ABSORB_TIME = 0.4f;
@@ -452,8 +454,8 @@ static const std::vector<std::string> ZONE_LETTERS = {"A","B","C","D","E","F","G
 
 static std::unordered_map<int, std::unordered_map<int, float>> SPAWN_WEIGHTS = {
   {0, {{0,30},{1,50},{2,10},{3,50},{10,40},{13,5},{15,5},{16,10},{17,40}}},
-  // Shiny Ladybug (18) weight tuned so 0.07754 / (155 + 0.07754) ≈ 1/2000.
-  {1, {{4,30},{5,40},{6,50},{2,15},{11,20},{18,0.07754f}}},
+  // Shiny Ladybug (18) is a normal weighted spawn: 0.07 / 155.07 ≈ 1/2215.
+  {1, {{4,30},{5,40},{6,50},{2,15},{11,20},{18,0.07f}}},
   {2, {{7,40},{8,50},{9,40},{12,30},{14,5}}},
 };
 
@@ -3381,10 +3383,41 @@ public:
         }
       }
 
+      // Moon physical hitbox: the Moon blocks mobs like another mob does.
+      // Mobs overlapping its 4x disc are pushed out (the Moon budges a
+      // little and springs back to its orbit), and their inward velocity is
+      // cancelled so they cannot burrow through it.
+      if (isMoon && st.alive) {
+        float moonR = def.radius * (1 + cell.rarity * 0.06f) * MOON_RADIUS_MULT;
+        for (auto& mob : world.mobs) {
+          if (mob.hp <= 0) continue;
+          if (mob.friendly && mob.ownerId == p.id) continue;
+          float dx = mob.x - st.x, dy = mob.y - st.y;
+          float minDist = moonR + mob.radius;
+          if (dx * dx + dy * dy >= minDist * minDist) continue;
+          collisionCounter.n++;
+          float d = std::hypot(dx, dy);
+          float ux, uy;
+          if (d < 0.001f) {
+            float a = (float)rand() / (float)RAND_MAX * 6.2831853f;
+            ux = std::cos(a); uy = std::sin(a); d = 0.001f;
+          } else {
+            ux = dx / d; uy = dy / d;
+          }
+          float overlap = minDist - d;
+          mob.x += ux * overlap * 0.8f;
+          mob.y += uy * overlap * 0.8f;
+          st.x -= ux * overlap * 0.2f;
+          st.y -= uy * overlap * 0.2f;
+          float vDot = mob.vx * ux + mob.vy * uy;
+          if (vDot < 0) { mob.vx -= ux * vDot; mob.vy -= uy * vDot; }
+        }
+      }
+
       // Petal-to-mob collision damage - optimized but visually identical
       // Pre-filter by player->mob distance <= orbit + mob.radius + pr + 50
       if (st.hitCd <= 0 && !isSummon) {
-        float pr = def.radius * (1 + cell.rarity * 0.06f);
+        float pr = def.radius * (1 + cell.rarity * 0.06f) * (isMoon ? MOON_RADIUS_MULT : 1.f);
         for (auto& mob : world.mobs) {
           if (mob.friendly && mob.ownerId == p.id) continue;
           if (mob.hp <= 0) continue;
@@ -4246,7 +4279,7 @@ public:
         if (pcell.item == EMPTY_ITEM || !pst.alive) continue;
         if (!orbitsAsPetal(ITEMS[pcell.item].kind)) continue;
         float pr = ITEMS[pcell.item].radius * (1 + pcell.rarity * 0.06f);
-        if (ITEMS[pcell.item].name == "Moon") pr *= 4;
+        if (ITEMS[pcell.item].name == "Moon") pr *= MOON_RADIUS_MULT;
         body.u8v(ENT_PETAL);
         body.u16v(pst.id);
         body.u8v(pcell.item);
