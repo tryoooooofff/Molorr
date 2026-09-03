@@ -30,6 +30,19 @@ const DEBUG = process.env.DEBUG === "true";
 let totalRequests = 0;
 let totalUpgrades = 0;
 
+/**
+ * Full user-agent, verbatim. Only whitespace is collapsed (a header may span
+ * folded lines), never truncated — an 80-char cap used to cut real browser
+ * strings in half ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537…"
+ * loses the Chrome/Safari version, which is the part you need to tell players
+ * from bots), and it made the log useless for attributing traffic. Node caps a
+ * header at --max-header-size (16 KB) anyway, and both audit maps are cleared
+ * every 60 s, so printing the whole thing cannot grow without bound.
+ */
+function normalizeUa(value) {
+  return String(value || "-").replace(/\s+/g, " ");
+}
+
 // ── HTTP audit log ────────────────────────────────────────────────────
 // Real gameplay traffic is 100% WebSocket (an upgrade + binary frames never
 // passes through the HTTP request handler). EVERY plain-HTTP response this
@@ -45,7 +58,7 @@ let httpResponsesTotal = 0; // cumulative since boot, for the 20s status line
 function auditHttpResponse(req, statusCode, via) {
   httpAuditMinute++;
   httpResponsesTotal++;
-  const ua = String(req.headers["user-agent"] || "-").replace(/\s+/g, " ").slice(0, 80);
+  const ua = normalizeUa(req.headers["user-agent"]);
   const key = `${req.method} ${req.url} → ${statusCode} via ${via} | ua=${ua}`;
   httpAudit.set(key, (httpAudit.get(key) || 0) + 1);
 }
@@ -411,7 +424,7 @@ const startProxy = async () => {
     // Attribution for the [ws-audit] line: who is opening (and re-opening)
     // sockets. `x-forwarded-for` is set by Render's proxy, so this is the real
     // client IP — that is how you tell players from bots/uptime monitors.
-    const ua = String(req.headers["user-agent"] || "-").replace(/\s+/g, " ").slice(0, 80);
+    const ua = normalizeUa(req.headers["user-agent"]);
     const ip =
       String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() ||
       socket.remoteAddress ||
