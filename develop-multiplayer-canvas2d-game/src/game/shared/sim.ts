@@ -291,11 +291,6 @@ export class Player {
   inDx = 0;
   inDy = 0;
   flags = 0;
-  /** True once a modern client sends its calculated position in C2S.INPUT. */
-  clientPosActive = false;
-  /** Latest client-reported world position; the server treats it as a target, not a bypass. */
-  clientTargetX = 0;
-  clientTargetY = 0;
   baseAngle = 0;
   orbit = 62;
   nextOracleAt = 0;
@@ -2186,14 +2181,13 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
         p.inDx = r.i8() / 100;
         p.inDy = r.i8() / 100;
         p.flags = r.u8();
-        // Newest clients append their locally simulated world position
-        // (i16 x, i16 y). The server still resolves movement and wall collision
-        // itself, but following the same target keeps both sides closely aligned.
+        // Older clients still append their locally simulated world position
+        // (i16 x, i16 y). It is consumed but intentionally IGNORED: the server
+        // calculates the player position itself (see updatePlayer), so petals
+        // never wait on a client-reported spot.
         if (r.remaining >= 4) {
-          const map = MAPS[p.mapId];
-          p.clientPosActive = true;
-          p.clientTargetX = clamp(r.i16(), 0, map.width);
-          p.clientTargetY = clamp(r.i16(), 0, map.height);
+          r.i16();
+          r.i16();
         }
         if (p.inDx !== c.lastInDx || p.inDy !== c.lastInDy || p.flags !== c.lastFlags) {
           c.lastInDx = p.inDx;
@@ -2986,9 +2980,8 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
   // --------------------------------------------------------------- spawning
   private spawnPlayer(p: Player) {
     const map = MAPS[p.mapId];
-    // A freshly spawned player starts from the server position; the next
-    // modern INPUT packet will takeover with the client-calculated spot.
-    p.clientPosActive = false;
+    // A freshly spawned player starts from the server-calculated spawn spot;
+    // the server keeps owning the position from the first input onward.
     p.vx = 0;
     p.vy = 0;
     // 出生点校验与玩家碰撞一致：凹凸多边形精确碰撞器
@@ -3004,7 +2997,7 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
         const y = tile.row * tileH + Math.random() * tileH;
         const [cx, cy] = collider.collideCircle(x, y, spawnR);
         if (Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01) {
-          p.x = x; p.y = y; p.clientTargetX = p.x; p.clientTargetY = p.y; p.hp = p.maxHp; p.alive = true; p.statsDirty = true;
+          p.x = x; p.y = y; p.hp = p.maxHp; p.alive = true; p.statsDirty = true;
           return;
         }
       }
@@ -3023,7 +3016,6 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
       fallbackX = cx; fallbackY = cy;
       p.x = fallbackX; p.y = fallbackY;
     }
-    p.clientTargetX = p.x; p.clientTargetY = p.y;
     p.hp = p.maxHp; p.alive = true; p.statsDirty = true;
   }
 
@@ -3537,17 +3529,6 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
     const moveWithServerCollision = (desiredDx: number, desiredDy: number) => {
       let stepDx = desiredDx;
       let stepDy = desiredDy;
-      if (p.clientPosActive) {
-        // Keep one delayed packet or a malicious jump from turning this tick
-        // into a huge expensive sweep; the server can catch up over later inputs.
-        const stepDist = Math.hypot(stepDx, stepDy);
-        const maxClientStep = Math.max(playerRadius, speed * dt * 2.5);
-        if (stepDist > maxClientStep && stepDist > 0.001) {
-          const scale = maxClientStep / stepDist;
-          stepDx *= scale;
-          stepDy *= scale;
-        }
-      }
 
       let targetX = clamp(p.x + stepDx, playerRadius, map.width - playerRadius);
       let targetY = clamp(p.y + stepDy, playerRadius, map.height - playerRadius);
@@ -3571,8 +3552,11 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
       p.y = clamp(targetY, playerRadius, map.height - playerRadius);
     };
 
-    if (p.clientPosActive) moveWithServerCollision(p.clientTargetX - p.x, p.clientTargetY - p.y);
-    else moveWithServerCollision(p.vx * dt, p.vy * dt);
+    // The player position is ALWAYS calculated on the server from the input
+    // direction (never from a client-reported position), so the orbiting
+    // petals stay glued to the flower and velocity effects (Bubble pop
+    // knockback, push-outs) actually move the player.
+    moveWithServerCollision(p.vx * dt, p.vy * dt);
 
     // ---- 玩家间碰撞：互相推开，不允许两个玩家重叠 ----
     // Optimized but visually identical: only check when within actual collision range.
