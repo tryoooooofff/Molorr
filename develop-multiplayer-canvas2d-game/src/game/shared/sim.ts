@@ -2940,12 +2940,23 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
   }
 
   private oracle(c: ClientState, p: Player, item: number, rarity: number) {
-    if (item >= ITEMS.length) return;
+    // Any refusal is answered with ORACLE_FAIL so the client stops its spin
+    // animation and says why, instead of silently looking like a free craft.
+    const refuse = () => this.pushEvent(c, EVT.ORACLE_FAIL, p.x, p.y, 0, item, rarity);
+    if (item >= ITEMS.length) return refuse();
     const required = oracleRequiredCount(rarity);
-    if (required === undefined || Date.now() < p.nextOracleAt) return;
+    if (required === undefined || Date.now() < p.nextOracleAt) return refuse();
     const have = this.countOf(p, item, rarity);
-    if (have < required) return;
-    this.takeFromBag(p, item, rarity, required);
+    if (have < required) return refuse();
+    // Charge first, and only mint the upgraded card when the full price was
+    // actually taken out of the bag. A partial take is rolled back so the
+    // conversion can never hand out a card for free.
+    const used = this.takeFromBag(p, item, rarity, required);
+    if (used !== required) {
+      if (used > 0) this.addItem(p, item, rarity, used);
+      p.dirty = true;
+      return refuse();
+    }
     const targetRarity = rarity + ORACLE_SKIP;
     this.addItem(p, item, targetRarity, 1);
     p.nextOracleAt = Date.now() + ORACLE_COOLDOWN_HOURS * 3600 * 1000;
@@ -2956,12 +2967,13 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
   }
 
   private trade(c: ClientState, p: Player, item: number, rarity: number, requestedCount: number) {
-    if (item >= ITEMS.length || Date.now() < p.nextTradeAt) return;
+    const refuse = () => this.pushEvent(c, EVT.TRADE_FAIL, p.x, p.y, 0, item, rarity);
+    if (item >= ITEMS.length || Date.now() < p.nextTradeAt) return refuse();
     const have = this.countOf(p, item, rarity);
     const want = requestedCount > 0 ? Math.min(requestedCount, have) : have;
-    if (want <= 0) return;
+    if (want <= 0) return refuse();
     const used = this.takeFromBag(p, item, rarity, want);
-    if (used <= 0) return;
+    if (used <= 0) return refuse();
     this.addItem(p, TRINKET_ITEM, rarity, used);
     p.nextTradeAt = Date.now() + TRADE_COOLDOWN_HOURS * 3600 * 1000;
     this.pushEvent(c, EVT.TRADE_OK, p.x, p.y, used, TRINKET_ITEM, rarity);

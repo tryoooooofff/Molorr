@@ -6661,6 +6661,12 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private keys = new Set<string>();
   private saveTimer = 0;
   private saveDirty = false;
+  /** Set while a craft/Oracle/Trade request is in flight, so the resulting
+   *  INVENTORY packet is persisted immediately (see S2C.INVENTORY). */
+  private craftTxPending = false;
+  /** Cards the in-flight Oracle request pays, so the result message can state
+   *  the price that was charged. */
+  private craftOracleCost = 0;
   /** Periodic squad level/rarity sync timer (seconds). */
   private syncLevelTimer = 0;
 
@@ -6982,6 +6988,8 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     window.addEventListener("keyup", this.onKeyUp);
     window.addEventListener("blur", this.onWindowBlur);
     document.addEventListener("visibilitychange", this.onVisibilityChange);
+    window.addEventListener("pagehide", this.onPageHide);
+    window.addEventListener("beforeunload", this.onPageHide);
     this.canvas.addEventListener("pointerdown", this.onPointerDown);
     window.addEventListener("pointermove", this.onPointerMove);
     window.addEventListener("pointerup", this.onPointerUp);
@@ -7008,6 +7016,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     window.removeEventListener("keyup", this.onKeyUp);
     window.removeEventListener("blur", this.onWindowBlur);
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    window.removeEventListener("pagehide", this.onPageHide);
+    window.removeEventListener("beforeunload", this.onPageHide);
+    this.flushSave();
     this.canvas.removeEventListener("pointerdown", this.onPointerDown);
     window.removeEventListener("pointermove", this.onPointerMove);
     window.removeEventListener("pointerup", this.onPointerUp);
@@ -7192,6 +7203,18 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       CloudStorage.instance.set(SAVE_KEY, data);
       CloudStorage.instance.set("petalia.name", this.playerName);
     }
+  }
+
+  /**
+   * Write the save out if anything the server told us about changed since the
+   * last write. Called by the periodic timer (both scenes) and whenever the
+   * page is about to go away, so a craft / Oracle / Trade that the server has
+   * already charged us for can never be rolled back by a reload.
+   */
+  private flushSave() {
+    if (!this.saveDirty) return;
+    this.saveDirty = false;
+    this.persist();
   }
 
   private async pullCloudSave() {
@@ -7650,6 +7673,13 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       this.secondary = secondary;
       this.bag = bag;
       this.saveDirty = true;
+      // A craft / Oracle / Trade is a one-shot, cooldown-gated transaction:
+      // write it out the moment the authoritative inventory lands instead of
+      // waiting for the periodic timer, so a reload can never undo the cost.
+      if (this.craftTxPending) {
+        this.craftTxPending = false;
+        this.flushSave();
+      }
       break;
     }
     case S2C.STATS: {
@@ -7672,8 +7702,22 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       const oracleSecLeft = r.u32();
       const tradeSecLeft = r.u32();
       const now = Date.now();
-      this.nextOracleAt = oracleSecLeft > 0 ? now + oracleSecLeft * 1000 : 0;
-      this.nextTradeAt = tradeSecLeft > 0 ? now + tradeSecLeft * 1000 : 0;
+      const nextOracleAt = oracleSecLeft > 0 ? now + oracleSecLeft * 1000 : 0;
+      const nextTradeAt = tradeSecLeft > 0 ? now + tradeSecLeft * 1000 : 0;
+      // The Oracle/Trade cooldowns are part of the save file and are what the
+      // next JOIN reports back to the server. A change here (an Oracle that
+      // just went through) has to be written out, otherwise a reload hands
+      // back a ready Oracle and the conversion can be repeated for free.
+      if (Math.abs(nextOracleAt - this.nextOracleAt) > 5000 || Math.abs(nextTradeAt - this.nextTradeAt) > 5000) {
+        this.nextOracleAt = nextOracleAt;
+        this.nextTradeAt = nextTradeAt;
+        // Rare event (a cooldown started or expired) — write it out at once.
+        this.saveDirty = true;
+        this.flushSave();
+      } else {
+        this.nextOracleAt = nextOracleAt;
+        this.nextTradeAt = nextTradeAt;
+      }
       if (r.remaining >= 2) this.shield = r.u16();
       break;
     }
@@ -7951,13 +7995,18 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         this.craftResolve(null);
         break;
       case EVT.ORACLE_OK:
-        this.craftMsg = `Oracle success! Created ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
+        this.craftMsg = this.craftOracleCost > 0
+          ? `Oracle success! ${this.craftOracleCost} cards → ${RARITIES[rarity].name} ${ITEMS[item].name}!`
+          : `Oracle success! Created ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
+        this.craftOracleCost = 0;
         this.craftLogCrafted += value || 1;
         this.craftLogLast = this.craftMsg;
         this.craftResolve({ item, rarity, count: value || 1 });
         this.achievements.onItemObtained(RARITIES[rarity]?.name);
         break;
       case EVT.ORACLE_FAIL:
+        this.craftOracleCost = 0;
+        this.craftTxPending = false;
         this.craftRefused("Oracle refused — check the requirement and cooldown.");
         break;
       case EVT.TRADE_OK:
@@ -7967,6 +8016,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         this.craftResolve({ item, rarity, count: value });
         break;
       case EVT.TRADE_FAIL:
+        this.craftTxPending = false;
         this.craftRefused("Trade refused — check the requirement and cooldown.");
         break;
       case EVT.HEAL: {
@@ -8280,6 +8330,18 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       this.afkSmoothSeconds = Math.max(0, this.afkSmoothSeconds - dt);
     }
 
+    // Periodic save — runs in BOTH scenes. The craft panel (Craft / Oracle /
+    // Trade) is usable from the main menu, and the server answers those with
+    // an authoritative INVENTORY packet. When this timer only ran in the game
+    // scene, a menu-side Oracle updated the live bag but never reached
+    // localStorage: reloading the page rolled the whole conversion back, so
+    // the spent cards reappeared and the upgrade looked free.
+    this.saveTimer -= dt;
+    if (this.saveTimer <= 0) {
+      this.saveTimer = 4;
+      this.flushSave();
+    }
+
     if (this.scene === "game") {
       const me = this.ents.get(this.selfId);
       if (me) {
@@ -8290,14 +8352,6 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       if (this.inputTimer <= 0) {
         this.inputTimer = 0.05;
         this.sendInput();
-      }
-      this.saveTimer -= dt;
-      if (this.saveTimer <= 0) {
-        this.saveTimer = 4;
-        if (this.saveDirty) {
-          this.saveDirty = false;
-          this.persist();
-        }
       }
       // Periodic squad level/rarity sync (every 10 s, 30 s if performance is a concern)
       this.syncLevelTimer -= dt;
@@ -9774,12 +9828,21 @@ private bagLayout() {
   private onVisibilityChange = () => {
     if (document.hidden) {
       this.releaseGameplayInput(true);
+      // A hidden tab may never come back (mobile browsers kill it outright),
+      // and rAF stops firing so the periodic save timer stalls. Write the
+      // server-confirmed inventory out now.
+      this.flushSave();
       return;
     }
     // requestAnimationFrame pauses in a hidden tab. Do not feed that elapsed
     // wall-clock gap into camera/UI animation when it resumes.
     this.last = performance.now();
     this.inputTimer = 0;
+  };
+
+  /** Last chance to persist before the page is torn down. */
+  private onPageHide = () => {
+    this.flushSave();
   };
 
   private onContext = (e: Event) => e.preventDefault();
@@ -11818,6 +11881,7 @@ private bagLayout() {
       const w = new Writer(6);
       // Send the total card count — the server calculates attempts from it.
       w.u8(C2S.CRAFT).u8(sel.item).u8(sel.rarity).u16(loaded);
+      this.craftTxPending = true;
       this.craftLogPetals += loaded;
       this.craftLogAttempts += 1;
       this.craftStartRotation();
@@ -11836,6 +11900,8 @@ private bagLayout() {
       }
       const w = new Writer(4);
       w.u8(C2S.ORACLE).u8(sel.item).u8(sel.rarity);
+      this.craftTxPending = true;
+      this.craftOracleCost = required;
       this.craftLogPetals += required;
       this.craftLogAttempts += 1;
       this.craftStartRotation();
@@ -11852,6 +11918,7 @@ private bagLayout() {
     }
     const w = new Writer(6);
     w.u8(C2S.TRADE).u8(sel.item).u8(sel.rarity).u16(0);
+    this.craftTxPending = true;
     this.craftLogPetals += 1;
     this.craftLogAttempts += 1;
     this.craftStartRotation();

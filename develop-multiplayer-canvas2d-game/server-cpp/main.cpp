@@ -1994,15 +1994,27 @@ public:
   }
 
   void oracle(ClientState& cs, Player& p, uint8_t item, uint8_t rarity) {
-    if (item >= (int)ITEMS.size()) return;
+    // Any refusal is answered with ORACLE_FAIL so the client stops its spin
+    // animation and says why, instead of silently looking like a free craft.
+    auto refuse = [&]() { pushEvent(cs, EVT_ORACLE_FAIL, p.x, p.y, 0, item, rarity); };
+    if (item >= (int)ITEMS.size()) { refuse(); return; }
     int required = oracleRequiredCount(rarity);
-    if (required < 0) return;
+    if (required < 0) { refuse(); return; }
     int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::system_clock::now().time_since_epoch()).count();
-    if (now < p.nextOracleAt) return;
+    if (now < p.nextOracleAt) { refuse(); return; }
     int have = countOf(p, item, rarity);
-    if (have < required) return;
-    takeFromBag(p, item, rarity, required);
+    if (have < required) { refuse(); return; }
+    // Charge first, and only mint the upgraded card when the full price was
+    // actually taken out of the bag. A partial take is rolled back so the
+    // conversion can never hand out a card for free.
+    int used = takeFromBag(p, item, rarity, required);
+    if (used != required) {
+      if (used > 0) addItem(p, item, rarity, (uint16_t)used);
+      p.dirty = true;
+      refuse();
+      return;
+    }
     uint8_t targetRarity = rarity + ORACLE_SKIP;
     addItem(p, item, targetRarity, 1);
     p.nextOracleAt = now + (int64_t)(ORACLE_COOLDOWN_HOURS * 3600 * 1000);
@@ -2013,15 +2025,16 @@ public:
   }
 
   void trade(ClientState& cs, Player& p, uint8_t item, uint8_t rarity, uint16_t requestedCount) {
-    if (item >= (int)ITEMS.size()) return;
+    auto refuse = [&]() { pushEvent(cs, EVT_TRADE_FAIL, p.x, p.y, 0, item, rarity); };
+    if (item >= (int)ITEMS.size()) { refuse(); return; }
     int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::system_clock::now().time_since_epoch()).count();
-    if (now < p.nextTradeAt) return;
+    if (now < p.nextTradeAt) { refuse(); return; }
     int have = countOf(p, item, rarity);
     int want = requestedCount > 0 ? std::min((int)requestedCount, have) : have;
-    if (want <= 0) return;
+    if (want <= 0) { refuse(); return; }
     int used = takeFromBag(p, item, rarity, want);
-    if (used <= 0) return;
+    if (used <= 0) { refuse(); return; }
     addItem(p, TRINKET_ITEM, rarity, used);
     p.nextTradeAt = now + (int64_t)(TRADE_COOLDOWN_HOURS * 3600 * 1000);
     pushEvent(cs, EVT_TRADE_OK, p.x, p.y, used, TRINKET_ITEM, rarity);
@@ -4820,20 +4833,15 @@ int main() {
             p->mapId = r.u8v();
             if (p->mapId >= MAP_COUNT) p->mapId = 0;
             p->xp = r.u32v();
-            for (int i = 0; i < SLOT_COUNT; i++) {
-              Cell c = readCell(r);
-              if (c.item != EMPTY_ITEM) p->slots[i] = c;
-            }
-            for (int i = 0; i < SECONDARY_SLOT_COUNT; i++) {
-              Cell c = readCell(r);
-              if (c.item != EMPTY_ITEM) p->secondary[i] = c;
-            }
+            for (int i = 0; i < SLOT_COUNT; i++) p->slots[i] = readCell(r);
+            for (int i = 0; i < SECONDARY_SLOT_COUNT; i++) p->secondary[i] = readCell(r);
             int bagCount = std::min((int)r.u16v(), BAG_MAX);
             if ((int)p->bag.size() < bagCount) p->bag.resize(bagCount);
-            for (int i = 0; i < bagCount; i++) {
-              Cell c = readCell(r);
-              if (c.item != EMPTY_ITEM) p->bag[i] = c;
-            }
+            // Apply the reported bag verbatim (mirrors sim.ts). Skipping empty
+            // cells here used to make JOIN a merge: a re-JOIN with a stale save
+            // could resurrect cards the server had already spent on an Oracle
+            // or craft, while keeping the card it handed out.
+            for (int i = 0; i < bagCount; i++) p->bag[i] = readCell(r);
             uint32_t oracleSecLeft = r.u32v();
             uint32_t tradeSecLeft = r.u32v();
             int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
