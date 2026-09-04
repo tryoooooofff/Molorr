@@ -1002,10 +1002,6 @@ struct Player {
   bool menuMode = false;
   float inDx = 0, inDy = 0;
   uint8_t flags = 0;
-  /** True once a modern client sends its calculated position in C2S_INPUT. */
-  bool clientPosActive = false;
-  /** Latest client-reported world position; treated as a target, not a bypass. */
-  float clientTargetX = 1600, clientTargetY = 1600;
   float baseAngle = 0, orbit = 62;
   float hurtCd = 0;
   float shield = 0;
@@ -2245,9 +2241,8 @@ public:
   // ---- Spawn player ----
   void spawnPlayer(Player& p) {
     const MapDef& map = MAPS[p.mapId];
-    // A freshly spawned player starts from the server position; the next
-    // modern INPUT packet will takeover with the client-calculated spot.
-    p.clientPosActive = false;
+    // A freshly spawned player starts from the server-calculated spawn spot;
+    // the server keeps owning the position from the first input onward.
     p.vx = 0;
     p.vy = 0;
     auto* collider = playerWallColliders_[p.mapId].get();
@@ -2262,7 +2257,7 @@ public:
         float y = tile.first * tileH + (float)rand() / (float)RAND_MAX * tileH;
         auto [cx, cy] = collider->collideCircle(x, y, spawnR, &collisionCounter);
         if (std::abs(cx - x) < 0.01f && std::abs(cy - y) < 0.01f) {
-          p.x = x; p.y = y; p.clientTargetX = p.x; p.clientTargetY = p.y; p.hp = p.maxHp; p.alive = true; p.statsDirty = true;
+          p.x = x; p.y = y; p.hp = p.maxHp; p.alive = true; p.statsDirty = true;
           return;
         }
       }
@@ -2279,7 +2274,6 @@ public:
       fallbackX = cx; fallbackY = cy;
       p.x = fallbackX; p.y = fallbackY;
     }
-    p.clientTargetX = p.x; p.clientTargetY = p.y;
     p.hp = p.maxHp; p.alive = true; p.statsDirty = true;
   }
 
@@ -2734,9 +2728,6 @@ public:
     target.shield = 0;
     target.x = target.deathX;
     target.y = target.deathY;
-    target.clientTargetX = target.x;
-    target.clientTargetY = target.y;
-    target.clientPosActive = false;
     target.vx = 0;
     target.vy = 0;
     target.hurtCd = 0;
@@ -3096,17 +3087,6 @@ public:
     auto moveWithServerCollision = [&](float desiredDx, float desiredDy) {
       float stepDx = desiredDx;
       float stepDy = desiredDy;
-      if (p.clientPosActive) {
-        // Keep one delayed packet or a malicious jump from turning this tick
-        // into a huge expensive sweep; the server can catch up over later inputs.
-        float stepDist = std::hypot(stepDx, stepDy);
-        float maxClientStep = std::max(playerRadius, speed * dt * 2.5f);
-        if (stepDist > maxClientStep && stepDist > 0.001f) {
-          float scale = maxClientStep / stepDist;
-          stepDx *= scale;
-          stepDy *= scale;
-        }
-      }
 
       float targetX = clampf(p.x + stepDx, playerRadius, map.width - playerRadius);
       float targetY = clampf(p.y + stepDy, playerRadius, map.height - playerRadius);
@@ -3124,8 +3104,14 @@ public:
       p.y = clampf(targetY, playerRadius, map.height - playerRadius);
     };
 
-    if (p.clientPosActive) moveWithServerCollision(p.clientTargetX - p.x, p.clientTargetY - p.y);
-    else moveWithServerCollision(p.vx * dt, p.vy * dt);
+    // The player position is ALWAYS calculated on the server from the input
+    // direction (never from a client-reported position). This is what keeps
+    // the orbiting petals glued to the flower: they are computed on the same
+    // tick around the same p.x/p.y the client is about to render, so they can
+    // no longer spin around the player like a gear or trail behind it, and
+    // velocity effects (Bubble pop knockback, push-outs) actually move the
+    // player instead of being swallowed by the client-position catch-up.
+    moveWithServerCollision(p.vx * dt, p.vy * dt);
 
     // Player-to-player push - optimized but visually identical: check only within sum radii
     for (auto* o : allPlayers) {
@@ -3314,6 +3300,16 @@ public:
 
       st.hitCd = std::max(0.f, st.hitCd - dt);
 
+      // Pre-calculate orbit parameters (needed for both revival and movement)
+      bool absorbs = isAbsorbItem(cell.item) && (def.heal > 0 || def.shield > 0);
+      bool staysTight = isSummon || def.name == "Magnet" || def.name == "Bubble";
+      float orbitRadius = (absorbs || staysTight) ? std::min(p.orbit, 62.f) : p.orbit;
+      bool isMoon = (def.name == "Moon");
+      float cx = isMoon ? p.x : orbitCenterX;
+      float cy = isMoon ? p.y : orbitCenterY;
+      float tx = cx + std::cos(slotAngle) * orbitRadius;
+      float ty = cy + std::sin(slotAngle) * orbitRadius;
+
       if (!st.alive) {
         st.timer -= dt;
         if (st.timer <= 0) {
@@ -3322,7 +3318,17 @@ public:
           st.hp = st.maxHp;
           st.specialTimer = isAbsorbItem(cell.item) ? ROSE_HEAL_DELAY : 0;
           st.absorbTimer = 0;
-          st.x = p.x; st.y = p.y;
+          // 复活前检查目标轨道位置是否安全（不卡墙）；
+          // 被墙挡住时回退到玩家身上（与 TS dev 服务器一致）
+          auto* collider = wallColliders_[p.mapId].get();
+          float petalR = def.radius * (1 + cell.rarity * 0.06f) * (isMoon ? MOON_RADIUS_MULT : 1.f);
+          if (collider && collider->isFree(tx, ty, petalR + 1.f)) {
+            st.x = tx;
+            st.y = ty;
+          } else {
+            st.x = p.x;
+            st.y = p.y;
+          }
         }
         continue;
       }
@@ -3332,15 +3338,6 @@ public:
         st.alive = false; st.hp = 0; st.timer = applyTalentReload(p, def.reload);
         continue;
       }
-
-      bool absorbs = isAbsorbItem(cell.item) && (def.heal > 0 || def.shield > 0);
-      bool staysTight = isSummon || def.name == "Magnet" || def.name == "Bubble";
-      float orbitRadius = (absorbs || staysTight) ? std::min(p.orbit, 62.f) : p.orbit;
-      bool isMoon = (def.name == "Moon");
-      float cx = isMoon ? p.x : orbitCenterX;
-      float cy = isMoon ? p.y : orbitCenterY;
-      float tx = cx + std::cos(slotAngle) * orbitRadius;
-      float ty = cy + std::sin(slotAngle) * orbitRadius;
 
       if (absorbs) {
         float missing = def.heal > 0 ? std::max(0.f, p.maxHp - p.hp) : std::max(0.f, p.maxHp - p.shield);
@@ -4972,14 +4969,13 @@ int main() {
             p->inDx = r.i8v() / 100.f;
             p->inDy = r.i8v() / 100.f;
             p->flags = r.u8v();
-            // Newest clients append their locally simulated world position
-            // (i16 x, i16 y). The server still resolves movement and wall collision
-            // itself, but following the same target keeps both sides closely aligned.
+            // Older clients still append their locally simulated world position
+            // (i16 x, i16 y). It is consumed but intentionally IGNORED: the
+            // server calculates the player position itself (see updatePlayer),
+            // so petals never wait on a client-reported spot.
             if (r.remaining() >= 4) {
-              const MapDef& map = MAPS[p->mapId];
-              p->clientPosActive = true;
-              p->clientTargetX = clampf((float)r.i16v(), 0.f, (float)map.width);
-              p->clientTargetY = clampf((float)r.i16v(), 0.f, (float)map.height);
+              r.i16v();
+              r.i16v();
             }
             if (p->inDx != cs->lastInDx || p->inDy != cs->lastInDy || p->flags != cs->lastFlags) {
               cs->lastInDx = p->inDx;

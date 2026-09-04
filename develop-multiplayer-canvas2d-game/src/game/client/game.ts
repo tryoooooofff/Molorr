@@ -109,7 +109,7 @@ interface Ent {
   y: number;
   tx: number;
   ty: number;
-  /** Server-reported target position (before local self-petal prediction). */
+  /** Server-reported position sample (kept for the two-sample interpolation). */
   serverTx?: number;
   serverTy?: number;
   /**
@@ -6431,21 +6431,13 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   /** Latest damage leaderboard for the inspected mob (remote/multiplayer only). */
   private mobDamageLeaderboard: { maxHp: number; entries: { id: number; name: string; dmg: number }[] } | null = null;
 
-  // ---- Client-authoritative movement ----
-  // The browser predicts the local player immediately for responsiveness and
-  // streams that position to the server as a movement target each C2S.INPUT.
-  // The server still performs its own wall collision and correction.
-  private localAuthActive = false;
-  private clientVx = 0;
-  private clientVy = 0;
   /**
-   * Last server-reported position of the self player. Even though the client
-   * owns the visible position, this is retained so self petals can be shifted
-   * forward by the difference (local prediction) instead of waiting for the
-   * SNAPSHOT round-trip to catch up.
+   * Server-authoritative movement: the client no longer predicts the local
+   * player's position. INPUT packets only carry the input direction/flags and
+   * the server integrates the position (wall collision included), so the
+   * player and its orbiting petals always share exactly the server's state —
+   * petals can no longer spin around or trail behind the rendered flower.
    */
-  private serverSelfX = 0;
-  private serverSelfY = 0;
   /** Maps a petal entity id to the player that owns it (from snapshot order). */
   private petalOwners = new Map<number, number>();
 
@@ -7408,9 +7400,6 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this._groundWallCacheMap = -1;
     this.ents.clear();
     this.petalOwners.clear();
-    this.localAuthActive = false;
-    this.clientVx = 0;
-    this.clientVy = 0;
   }
 
   private sendJoin() {
@@ -7549,11 +7538,6 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       this.petalOwners.clear();
       this.roseParticles.length = 0;
       this.mapFlash = 1;
-      // A new world starts from the server's next snapshot. Until that sync
-      // lands, the local player cannot claim authority over its position.
-      this.localAuthActive = false;
-      this.clientVx = 0;
-      this.clientVy = 0;
       this.chat.addMessage("Welcome! Press [Enter] to chat. type /help for help", "System", true);
       // 将本地 loadout 同步到服务器（服务器在 JOIN 时创建了空列表）
       this.syncAllLoadoutsToServer();
@@ -7587,10 +7571,6 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         if (kind === ENT.PLAYER) {
           name = r.str();
           currentPlayerId = id;
-          if (id === this.selfId) {
-            this.serverSelfX = x;
-            this.serverSelfY = y;
-          }
         }
 
         // ─── 读取 rarity ───
@@ -7602,7 +7582,6 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
           rarity = r.u8();
         }
 
-        const isSelf = id === this.selfId;
         let e = this.ents.get(id);
         if (!e) {
           e = {
@@ -7658,24 +7637,13 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         if (kind === ENT.PETAL) {
           this.petalOwners.set(id, currentPlayerId);
         }
-        // Once the local sim is authoritative, never let a networked snapshot
-        // move the local player back — the browser's calculated position is
-        // sent on the next INPUT packet and the server mirrors it for petals.
-        // When authority is paused (spawn / map change / death respawn) the
-        // first server snapshot re-seeds the client position before handing
-        // authority back.
-        const keepLocalSelf = isSelf && this.localAuthActive;
-        if (!keepLocalSelf) {
-          e.tx = x;
-          e.ty = y;
-          if (isSelf) {
-            e.x = x;
-            e.y = y;
-            this.localAuthActive = true;
-            this.clientVx = 0;
-            this.clientVy = 0;
-          }
-        }
+        // Every entity — including the self player — follows the server's
+        // position samples. The spring pass below interpolates the two latest
+        // samples at render rate, so the network step never teleports the
+        // flower and the petal orbit (computed on the server around this same
+        // position) stays locked onto the rendered body.
+        e.tx = x;
+        e.ty = y;
         // Mobs turn smoothly toward the interpolated snapshot facing in the
         // render loop (shortest-arc lerp in the entity pass); writing the raw
         // sample here would snap their heading every 50 ms. Every other kind
@@ -7765,13 +7733,6 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       this.maxHp = r.u16();
       this.mapId = r.u8();
       this.alive = r.u8() === 1;
-      // When the flower dies it stops owning its position. The next snapshot
-      // after respawn re-seeds the client position before authority resumes.
-      if (!this.alive) {
-        this.localAuthActive = false;
-        this.clientVx = 0;
-        this.clientVy = 0;
-      }
       const oracleSecLeft = r.u32();
       const tradeSecLeft = r.u32();
       const now = Date.now();
@@ -8268,9 +8229,11 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       // interpolation between the two latest server samples. Without this the
       // spring has to absorb each 50 ms step as a fast catch-up, which reads
       // as a quick shake on fast-moving entities (most visibly the petals
-      // orbiting the render-smooth local flower). The self player is skipped:
-      // its position is client-authoritative and must not fight the spring.
-      if (!(e.id === this.selfId && e.kind === ENT.PLAYER)) {
+      // orbiting the flower). The self player is sampled exactly like every
+      // other entity: the server owns its position, and sampling it with the
+      // same fixed delay as the petal samples keeps the orbit locked onto the
+      // rendered body instead of spinning around it or trailing behind.
+      {
         const isMob = e.kind === ENT.MOB;
         const sampled = this.sampleServerPos(e, this.time, isMob);
         if (sampled) {
@@ -8318,13 +8281,10 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       else if (this.time - e.seen > 0.6) this.ents.delete(e.id);
     }
 
-    // Client-authoritative local player. Run before the wall safety net so the
-    // self entity is at the position the browser calculated, then walls can
-    // still knock the flower out of a wall before it is sent to the server.
-    this.updateLocalAuthoritativePlayer(dt);
-
     // ---- 玩家与墙壁的精确碰撞 (client safety net, performance saving) ----
     // Mirrors server pushPlayerOutOfWall: broadphase skip when far, lastSafe fallback for deep penetration.
+    // The server already resolves wall collision for the self player; this is
+    // only a guard against rare one-frame penetrations in the snapshot stream.
     if (this.wallCollider) {
       const me = this.ents.get(this.selfId);
       if (me) {
@@ -8356,9 +8316,6 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       }
     }
 
-    // Predict self petals ahead of the snapshot stream so they visibly track
-    // the client-authoritative player position without a ~100ms server round-trip.
-    this.predictOwnPetals(dt);
 
     // ---- 视野扫描：最近的 Ultra+ 敌对生物（顶部血条）与最近的 Super+ 敌对生物（敌人面板） ----
     // 一次遍历同时求出两个目标。友方召唤物（team != HOSTILE）不是敌人，两个
@@ -8545,23 +8502,6 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     return { dx, dy };
   }
 
-  /** Client-side mirror of the server's move speed formula. */
-  private computeClientMoveSpeed(): number {
-    let speedBonus = 0;
-    for (let i = 0; i < SLOT_COUNT; i++) {
-      const cell = this.slots[i];
-      if (!cell) continue;
-      const def = ITEMS[cell.item];
-      if (!def) continue;
-      // Reuse the per-slot reload progress from the snapshot: a slot is only
-      // contributing its speed while the petal is alive (reload === 1).
-      const alive = orbitsAsPetal(def.kind) ? (this.slotReload[i] ?? 1) >= 1 : true;
-      if (!alive) continue;
-      if (def.speed) speedBonus += def.speed * (1 + cell.rarity * 0.12);
-    }
-    return (190 + this.level * 0.8) * (1 + speedBonus / 100) * (this.talentBonuses?.speedMult ?? 1);
-  }
-
   /**
    * Render-rate interpolation of an entity's server samples.
    *
@@ -8615,101 +8555,15 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     return { x: e.serverTx, y: e.serverTy, angle: curAngle };
   }
 
-  /**
-   * Remove most snapshot round-trip lag from self-owned petals.
-   *
-   * The server still simulates and collides the player, but the local body is
-   * rendered ahead for responsiveness. Self-owned petal targets are shifted
-   * by the (smooth) local-vs-server delta and glued straight to that target:
-   * the targets are already render-rate interpolated, so no spring lag is
-   * left to wobble against the render-smooth flower.
-   */
-  private predictOwnPetals(dt: number) {
-    if (!this.localAuthActive || this.scene !== "game") return;
-    const me = this.ents.get(this.selfId);
-    if (!me || !this.alive) return;
-    // The server echo of the self player also updates at 20 Hz. Interpolate it
-    // with the same fixed delay as the petal samples, otherwise the prediction
-    // offset dx would be a sawtooth (0 → one tick of movement → 0) and
-    // re-introduce the very jitter the interpolation is meant to remove.
-    const serverSample = this.sampleServerPos(me, this.time);
-    const serverX = serverSample?.x ?? this.serverSelfX;
-    const serverY = serverSample?.y ?? this.serverSelfY;
-    const dx = me.x - serverX;
-    const dy = me.y - serverY;
-    for (const e of this.ents.values()) {
-      if (e.kind !== ENT.PETAL) continue;
-      if (e.serverTx === undefined || e.serverTy === undefined) continue;
-      if (this.petalOwners.get(e.id) !== this.selfId) continue;
-      // Use the render-rate interpolated server sample (set in the spring
-      // pass) as the base, so the prediction offset is added on top of a
-      // continuous curve instead of a 20 Hz stepped one.
-      const bx = e.interpTx ?? e.serverTx;
-      const by = e.interpTy ?? e.serverTy;
-      e.tx = bx + dx;
-      e.ty = by + dy;
-      // The interpolated target is already smooth at render rate. Rather than
-      // gluing the petal straight to it (which snaps the orbit between the two
-      // bracketing snapshot samples and looks like a stiff, steppy rotation),
-      // ease toward it with a soft, frame-rate independent lerp. The tiny lag
-      // this leaves rounds the revolving arc so the rotation looks smooth,
-      // while the exponential form keeps it stable across frame rates so it
-      // still won't wobble against the render-smooth local flower.
-      const k = 1 - Math.exp(-PETAL_SMOOTH_RATE * dt);
-      e.x += (e.tx - e.x) * k;
-      e.y += (e.ty - e.y) * k;
-    }
-  }
-
-  /**
-   * The browser predicts the local player's world position every frame so the
-   * controls stay instant. That same position is sent to the server in INPUT as
-   * a target for the authoritative movement + wall-collision step.
-   */
-  private updateLocalAuthoritativePlayer(dt: number) {
-    if (!this.localAuthActive || this.scene !== "game") return;
-    const me = this.ents.get(this.selfId);
-    if (!me || !this.alive) return;
-
-    const { dx, dy } = this.computeInputVector();
-    const speed = this.computeClientMoveSpeed();
-    const mag = Math.hypot(dx, dy);
-    const nx = mag > 1 ? dx / mag : dx;
-    const ny = mag > 1 ? dy / mag : dy;
-    const k = Math.min(1, dt * 9);
-    this.clientVx += (nx * speed - this.clientVx) * k;
-    this.clientVy += (ny * speed - this.clientVy) * k;
-    if (this.afkPending) {
-      this.clientVx = 0;
-      this.clientVy = 0;
-    }
-    let nextX = me.x + this.clientVx * dt;
-    let nextY = me.y + this.clientVy * dt;
-    // Keep the client position inside the world the server knows about. The
-    // client wall safety net below handles precise wall collision.
-    if (this.wallCollider) {
-      nextX = Math.max(0, Math.min(this.worldW, nextX));
-      nextY = Math.max(0, Math.min(this.worldH, nextY));
-    }
-    me.x = nextX;
-    me.y = nextY;
-    me.tx = nextX;
-    me.ty = nextY;
-  }
-
   private sendInput() {
     if (!this.net || !this.connected) return;
-
-    const me = this.ents.get(this.selfId);
-    const hasPos = this.localAuthActive && !!me;
 
     // While the AFK prompt is up the world is frozen for this player: send a
     // neutral packet so a parked mouse/held key can't keep driving the flower
     // (and, since it never changes, it can't satisfy the check either).
     if (this.afkPending) {
-      const w = new Writer(12);
+      const w = new Writer(8);
       w.u8(C2S.INPUT).i8(0).i8(0).u8(0);
-      if (hasPos) w.i16(Math.round(me!.x)).i16(Math.round(me!.y));
       this.net.send(w.bytes());
       return;
     }
@@ -8723,9 +8577,11 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     // Keep mouse buttons as well for usability: left click = spread, right click = contract
     if ((this.mouseDown && !uiBusy) || isSpaceDown) flags |= 1;
     if (this.rightDown || isShiftDown) flags |= 2;
-    const w = new Writer(12);
+    // Input only — the position is calculated on the server (see
+    // updatePlayer), so the packet no longer carries a client-calculated
+    // world position for the server to chase.
+    const w = new Writer(8);
     w.u8(C2S.INPUT).i8(dx * 100).i8(dy * 100).u8(flags);
-    if (hasPos) w.i16(Math.round(me!.x)).i16(Math.round(me!.y));
     this.net.send(w.bytes());
   }
 
@@ -8926,7 +8782,10 @@ private bagLayout() {
     let w: number;
     let h: number;
     if (isMobile) {
-      w = isLandscape ? Math.min(this.w * 0.58, 470) : Math.min(this.w * 0.94, 400);
+      // Phone mode: 60px wider than the old fit-to-screen box (clamped so the
+      // panel always keeps a small margin on the screen).
+      const baseW = isLandscape ? Math.min(this.w * 0.58, 470) : Math.min(this.w * 0.94, 400);
+      w = Math.min(baseW + 60, this.w - 16);
       h = Math.min(availableH, isLandscape ? availableH : this.h * 0.76);
     } else {
       w = Math.min(800, Math.floor(this.w * 0.92));
@@ -9058,14 +8917,29 @@ private bagLayout() {
     const maxGridWidth = (columns ? p.w - leftW : p.w - pad * 2) - (compact ? 14 : 18) * scale;
     const widthLimitedSlot = Math.floor((maxGridWidth - gapSmall * (cols - 1)) / cols);
     const availableGridH = Math.max(1, gridBottom - gridTop);
-    const slotSizeSmall = Math.max(compact ? 16 : 18, Math.min(40, widthLimitedSlot, availableGridH));
+    // Phone mode shows exactly 6 card rows: each row may stretch to fill the
+    // grid height, so cards render bigger instead of packing into a wall of
+    // tiny ~18px squares that are hard to read and mis-tap. The card size is
+    // still limited by the column width (10 rarity columns) when that is
+    // tighter than the row height.
+    let slotSizeSmall: number;
+    let maxVisibleRows: number;
+    if (compact) {
+      maxVisibleRows = 6;
+      const heightLimitedSlot = Math.floor((availableGridH - gapSmall * (maxVisibleRows - 1)) / maxVisibleRows);
+      slotSizeSmall = Math.max(16, Math.min(48, widthLimitedSlot, heightLimitedSlot));
+    } else {
+      slotSizeSmall = Math.max(18, Math.min(40, widthLimitedSlot, availableGridH));
+      maxVisibleRows = Math.max(5, Math.floor(availableGridH / (slotSizeSmall + gapSmall)));
+    }
     const itemHeightSmall = slotSizeSmall + gapSmall;
     const totalGridWidth = cols * (slotSizeSmall + gapSmall) - gapSmall;
     const gridStartX = columns
       ? p.x + leftW + (p.w - leftW - pad - totalGridWidth) / 2
       : p.x + p.w / 2 - totalGridWidth / 2;
-    const gridH = availableGridH;
-    const maxVisibleRows = Math.max(5, Math.floor(gridH / itemHeightSmall));
+    // Compact grids keep their box snug around the 6 rows instead of leaving
+    // a long empty strip under the cards.
+    const gridH = compact ? Math.min(availableGridH, maxVisibleRows * itemHeightSmall) : availableGridH;
     const scrollW = (compact ? 6 : 10) * scale;
     const scrollTrack: Rect = {
       // Kept inside the panel even when the grid nearly fills its column.
