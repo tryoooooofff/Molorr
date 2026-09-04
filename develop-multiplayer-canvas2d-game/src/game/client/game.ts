@@ -3047,6 +3047,15 @@ class ChangelogPanel {
   importantNotice = "The bug on loadout seems to be fixed, but still need testing, which means it is still not safe to put your valuable stuff into loadout";
   logs: ChangelogLogGroup[] = [
       {
+      date: "13th October 2026",
+      entries: [
+        "- Oracle really costs its cards now, and the result is saved straight away",
+        "- Crafting from the main menu is no longer lost when you reload the page",
+        "- Arena map is only used inside arena mode; after a match you go back to the map you chose",
+        "- Mobile UI: arena panel now fits the screen, inventory cards have bigger gaps, craft panel is a smaller version",
+      ]
+    },
+      {
       date: "12th October 2026",
       entries: [
         "- player's data now save online once they have signed up",
