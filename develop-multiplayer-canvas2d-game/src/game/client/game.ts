@@ -26,6 +26,10 @@ import {
   MOBS,
   ORACLE_SKIP,
   RARITIES,
+  ARENA_MAP_ID,
+  SELECTABLE_MAPS,
+  isArenaMap,
+  clampPveMapId,
   ROSE_HEAL_DELAY,
   SHELL_ITEM,
   isAbsorbItem,
@@ -281,7 +285,7 @@ function angleDelta(from: number, to: number): number {
 
 // Biome names sourced straight from the map list. Each item is tagged with every
 // biome that has at least one mob capable of dropping it.
-const BIOME_LIST = ["All", ...MAPS.map((m) => m.name)];
+const BIOME_LIST = ["All", ...SELECTABLE_MAPS.map((m) => m.name)];
 
 function buildItemBiomeMap(): Map<number, Set<string>> {
   const map = new Map<number, Set<string>>();
@@ -3042,6 +3046,15 @@ class ChangelogPanel {
   /** Important notice always pinned at the top of the changelog. Empty = hidden. */
   importantNotice = "The bug on loadout seems to be fixed, but still need testing, which means it is still not safe to put your valuable stuff into loadout";
   logs: ChangelogLogGroup[] = [
+      {
+      date: "13th October 2026",
+      entries: [
+        "- Oracle really costs its cards now, and the result is saved straight away",
+        "- Crafting from the main menu is no longer lost when you reload the page",
+        "- Arena map is only used inside arena mode; after a match you go back to the map you chose",
+        "- Mobile UI: arena panel now fits the screen, inventory cards have bigger gaps, craft panel is a smaller version",
+      ]
+    },
       {
       date: "12th October 2026",
       entries: [
@@ -6369,6 +6382,8 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private arenaPanel = new ArenaPanel();
   private arenaWalls: Wall[] | null = null;
   private arenaSeed = 0;
+  /** Map the player was on before entering an Arena duel (null = not in one). */
+  private arenaPrevMapId: number | null = null;
 
   private roseParticles: Array<{
     x: number;
@@ -6661,6 +6676,12 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private keys = new Set<string>();
   private saveTimer = 0;
   private saveDirty = false;
+  /** Set while a craft/Oracle/Trade request is in flight, so the resulting
+   *  INVENTORY packet is persisted immediately (see S2C.INVENTORY). */
+  private craftTxPending = false;
+  /** Cards the in-flight Oracle request pays, so the result message can state
+   *  the price that was charged. */
+  private craftOracleCost = 0;
   /** Periodic squad level/rarity sync timer (seconds). */
   private syncLevelTimer = 0;
 
@@ -6982,6 +7003,8 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     window.addEventListener("keyup", this.onKeyUp);
     window.addEventListener("blur", this.onWindowBlur);
     document.addEventListener("visibilitychange", this.onVisibilityChange);
+    window.addEventListener("pagehide", this.onPageHide);
+    window.addEventListener("beforeunload", this.onPageHide);
     this.canvas.addEventListener("pointerdown", this.onPointerDown);
     window.addEventListener("pointermove", this.onPointerMove);
     window.addEventListener("pointerup", this.onPointerUp);
@@ -7008,6 +7031,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     window.removeEventListener("keyup", this.onKeyUp);
     window.removeEventListener("blur", this.onWindowBlur);
     document.removeEventListener("visibilitychange", this.onVisibilityChange);
+    window.removeEventListener("pagehide", this.onPageHide);
+    window.removeEventListener("beforeunload", this.onPageHide);
+    this.flushSave();
     this.canvas.removeEventListener("pointerdown", this.onPointerDown);
     window.removeEventListener("pointermove", this.onPointerMove);
     window.removeEventListener("pointerup", this.onPointerUp);
@@ -7152,7 +7178,10 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     (data.secondary || []).slice(0, SECONDARY_SLOT_COUNT).forEach((c, i) => (this.secondary[i] = c ?? null));
     savedBag.forEach((c, i) => (this.bag[i] = c ?? null));
     this.xp = data.xp || 0;
-    this.selectedMap = Math.max(0, Math.min(MAPS.length - 1, data.mapId || 0));
+    // Saves written by older builds could hold the Arena id while a duel was
+    // running; those fall back to a normal map instead of stranding the
+    // player on the empty Arena field.
+    this.selectedMap = clampPveMapId(data.mapId || 0);
     this.nextOracleAt = data.nextOracleAt || 0;
     this.nextTradeAt = data.nextTradeAt || 0;
     this.craftLogPetals = data.craftPetals || 0;
@@ -7168,7 +7197,8 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       secondary: this.secondary,
       bag: this.bag,
       xp: this.xp,
-      mapId: this.mapId,
+      // Never persist the Arena field as the player's map (see playerMapId).
+      mapId: this.playerMapId(),
       nextOracleAt: this.nextOracleAt,
       nextTradeAt: this.nextTradeAt,
       craftPetals: this.craftLogPetals,
@@ -7192,6 +7222,18 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       CloudStorage.instance.set(SAVE_KEY, data);
       CloudStorage.instance.set("petalia.name", this.playerName);
     }
+  }
+
+  /**
+   * Write the save out if anything the server told us about changed since the
+   * last write. Called by the periodic timer (both scenes) and whenever the
+   * page is about to go away, so a craft / Oracle / Trade that the server has
+   * already charged us for can never be rolled back by a reload.
+   */
+  private flushSave() {
+    if (!this.saveDirty) return;
+    this.saveDirty = false;
+    this.persist();
   }
 
   private async pullCloudSave() {
@@ -7317,9 +7359,63 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.debugBytesOutWindow = 0;
   }
 
+  /**
+   * The map the player owns: the one they picked in the main menu. While a
+   * duel is running `mapId` points at the Arena field, which is never theirs
+   * to keep — it must not end up in the save or in the next JOIN.
+   */
+  private playerMapId(): number {
+    if (this.arenaPrevMapId !== null) return clampPveMapId(this.arenaPrevMapId);
+    return clampPveMapId(isArenaMap(this.mapId) ? this.selectedMap : this.mapId);
+  }
+
+  /** Swap the client world over to the Arena battleground for a duel. */
+  private enterArenaWorld(walls: Wall[]) {
+    if (this.arenaPrevMapId === null) this.arenaPrevMapId = this.playerMapId();
+    const arena = MAPS[ARENA_MAP_ID];
+    this.mapId = ARENA_MAP_ID;
+    this.worldW = arena.width;
+    this.worldH = arena.height;
+    this.walls = walls.map((w) => ({ ...w }));
+    this.wallCollider = new PolygonWallCollider(this.walls, this.worldW, this.worldH, 256);
+    this.resetWorldCaches();
+  }
+
+  /** Leave the Arena battleground and put the player's own map back. */
+  private leaveArenaWorld() {
+    const mapId = this.playerMapId();
+    this.arenaPrevMapId = null;
+    this.arenaWalls = null;
+    this.arenaSeed = 0;
+    // The panel's 'in-game' state is what switches the renderer to the Arena
+    // battlefield; leaving it set kept the Arena visuals over the normal map.
+    if (this.arenaPanel.state === 'in-game') this.arenaPanel.state = 'closed';
+    this.selectedMap = mapId;
+    this.mapId = mapId;
+    const map = MAPS[mapId] ?? MAPS[0];
+    this.worldW = map.width;
+    this.worldH = map.height;
+    this.walls = map.walls.map((w) => ({ ...w }));
+    this.wallCollider = new PolygonWallCollider(this.walls, this.worldW, this.worldH, 256);
+    this.resetWorldCaches();
+    this.saveDirty = true;
+  }
+
+  /** Drop every cached wall/ground raster so a world swap repaints cleanly. */
+  private resetWorldCaches() {
+    this.wallPolygonsCache.clear();
+    this._wallDataCache.clear();
+    this._groundWallCacheMap = -1;
+    this.ents.clear();
+    this.petalOwners.clear();
+    this.localAuthActive = false;
+    this.clientVx = 0;
+    this.clientVy = 0;
+  }
+
   private sendJoin() {
     const w = new Writer(256);
-    w.u8(C2S.JOIN).str(this.playerName).u8(this.selectedMap).u32(this.xp);
+    w.u8(C2S.JOIN).str(this.playerName).u8(clampPveMapId(this.selectedMap)).u32(this.xp);
     for (let i = 0; i < SLOT_COUNT; i++) this.writeCell(w, this.slots[i]);
     for (let i = 0; i < SECONDARY_SLOT_COUNT; i++) this.writeCell(w, this.secondary[i]);
     // Unlimited bag: send the real (dynamic) length as u16.
@@ -7650,6 +7746,13 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       this.secondary = secondary;
       this.bag = bag;
       this.saveDirty = true;
+      // A craft / Oracle / Trade is a one-shot, cooldown-gated transaction:
+      // write it out the moment the authoritative inventory lands instead of
+      // waiting for the periodic timer, so a reload can never undo the cost.
+      if (this.craftTxPending) {
+        this.craftTxPending = false;
+        this.flushSave();
+      }
       break;
     }
     case S2C.STATS: {
@@ -7672,8 +7775,22 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       const oracleSecLeft = r.u32();
       const tradeSecLeft = r.u32();
       const now = Date.now();
-      this.nextOracleAt = oracleSecLeft > 0 ? now + oracleSecLeft * 1000 : 0;
-      this.nextTradeAt = tradeSecLeft > 0 ? now + tradeSecLeft * 1000 : 0;
+      const nextOracleAt = oracleSecLeft > 0 ? now + oracleSecLeft * 1000 : 0;
+      const nextTradeAt = tradeSecLeft > 0 ? now + tradeSecLeft * 1000 : 0;
+      // The Oracle/Trade cooldowns are part of the save file and are what the
+      // next JOIN reports back to the server. A change here (an Oracle that
+      // just went through) has to be written out, otherwise a reload hands
+      // back a ready Oracle and the conversion can be repeated for free.
+      if (Math.abs(nextOracleAt - this.nextOracleAt) > 5000 || Math.abs(nextTradeAt - this.nextTradeAt) > 5000) {
+        this.nextOracleAt = nextOracleAt;
+        this.nextTradeAt = nextTradeAt;
+        // Rare event (a cooldown started or expired) — write it out at once.
+        this.saveDirty = true;
+        this.flushSave();
+      } else {
+        this.nextOracleAt = nextOracleAt;
+        this.nextTradeAt = nextTradeAt;
+      }
       if (r.remaining >= 2) this.shield = r.u16();
       break;
     }
@@ -7839,6 +7956,11 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       this.arenaPanel.onStart(seed, walls);
       this.arenaWalls = walls;
       this.arenaSeed = seed;
+      // Duels are fought on the dedicated Arena field. Remember the map the
+      // player picked so it can be restored afterwards, then swap the whole
+      // client world (size, walls, collider) over to the Arena — otherwise the
+      // previous map's walls stayed active and blocked movement invisibly.
+      this.enterArenaWorld(walls);
       // 切换到游戏场景，进入竞技场战场
       this.sinceSnapshot = 0;
       this.stallNoticeAnim = 0;
@@ -7876,6 +7998,10 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         }
         this.saveDirty = true;
       }
+      // Duel over: drop the Arena field and go back to the player's own map
+      // before the menu save runs, so the chosen biome is never replaced by
+      // the Arena.
+      this.leaveArenaWorld();
       // 1.5s 后回主菜单
       setTimeout(() => {
         this.gotoMenu();
@@ -7951,13 +8077,18 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         this.craftResolve(null);
         break;
       case EVT.ORACLE_OK:
-        this.craftMsg = `Oracle success! Created ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
+        this.craftMsg = this.craftOracleCost > 0
+          ? `Oracle success! ${this.craftOracleCost} cards → ${RARITIES[rarity].name} ${ITEMS[item].name}!`
+          : `Oracle success! Created ${RARITIES[rarity].name} ${ITEMS[item].name}!`;
+        this.craftOracleCost = 0;
         this.craftLogCrafted += value || 1;
         this.craftLogLast = this.craftMsg;
         this.craftResolve({ item, rarity, count: value || 1 });
         this.achievements.onItemObtained(RARITIES[rarity]?.name);
         break;
       case EVT.ORACLE_FAIL:
+        this.craftOracleCost = 0;
+        this.craftTxPending = false;
         this.craftRefused("Oracle refused — check the requirement and cooldown.");
         break;
       case EVT.TRADE_OK:
@@ -7967,6 +8098,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         this.craftResolve({ item, rarity, count: value });
         break;
       case EVT.TRADE_FAIL:
+        this.craftTxPending = false;
         this.craftRefused("Trade refused — check the requirement and cooldown.");
         break;
       case EVT.HEAL: {
@@ -8280,6 +8412,18 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       this.afkSmoothSeconds = Math.max(0, this.afkSmoothSeconds - dt);
     }
 
+    // Periodic save — runs in BOTH scenes. The craft panel (Craft / Oracle /
+    // Trade) is usable from the main menu, and the server answers those with
+    // an authoritative INVENTORY packet. When this timer only ran in the game
+    // scene, a menu-side Oracle updated the live bag but never reached
+    // localStorage: reloading the page rolled the whole conversion back, so
+    // the spent cards reappeared and the upgrade looked free.
+    this.saveTimer -= dt;
+    if (this.saveTimer <= 0) {
+      this.saveTimer = 4;
+      this.flushSave();
+    }
+
     if (this.scene === "game") {
       const me = this.ents.get(this.selfId);
       if (me) {
@@ -8290,14 +8434,6 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       if (this.inputTimer <= 0) {
         this.inputTimer = 0.05;
         this.sendInput();
-      }
-      this.saveTimer -= dt;
-      if (this.saveTimer <= 0) {
-        this.saveTimer = 4;
-        if (this.saveDirty) {
-          this.saveDirty = false;
-          this.persist();
-        }
       }
       // Periodic squad level/rarity sync (every 10 s, 30 s if performance is a concern)
       this.syncLevelTimer -= dt;
@@ -8602,62 +8738,80 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     return this.quickSlot.height();
   }
 
+  /**
+   * True when the viewport is phone-sized and the panels have to switch to
+   * their compact, screen-fitted layouts. Tablets and desktop windows keep the
+   * roomy desktop layout: the trigger is a narrow window, or a touch device
+   * whose short edge is phone-sized (covers landscape phones).
+   */
+  private compactPanels(): boolean {
+    return this.w < 700 || (this.isMobile && Math.min(this.w, this.h) < 600);
+  }
+
   private bagPanelRect(): Rect {
-    // Landscape phones get a much bigger bag: width +50% and height ×2 so the
-    // inventory isn't cramped into a tiny corner. Portrait phones and desktop
-    // keep the original proportional sizing.
-    const isMobile = this.isMobile || this.w < 640;
+    // Phones get a panel that is sized to the free screen area instead of the
+    // old fixed multipliers (which produced a ~180px wide box in portrait and
+    // a panel that ran under the hotbar in landscape). The hotbar is always
+    // kept clear so cards can still be dragged from the bag onto it.
+    const isMobile = this.compactPanels();
     const isLandscape = this.w > this.h;
-    const mobileScale = isMobile ? 0.5 : 1;
-    const widthMult = isMobile && isLandscape ? 1.5 : 1;   // +50% width
-    const heightMult = isMobile && isLandscape ? 2.1 : 1;    // ×2 height
-    const w = Math.min(380, this.w * 0.92) * mobileScale * widthMult;
-    // 快捷栏在主菜单同样可见可拖拽,背包面板始终为其预留底部高度,
-    // 避免背包与快捷栏重叠遮挡(与游戏内一致)。
     const reservedHotbar = this.hotbarHeight();
-    const topGap = 18 * mobileScale;
-    const bottomGap = 26 * mobileScale;
+    const topGap = isMobile ? 12 : 18;
+    const bottomGap = isMobile ? 14 : 26;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
-    let h = Math.min(610, availableH) * mobileScale * heightMult;
+    let w: number;
+    let h: number;
+    if (isMobile) {
+      w = isLandscape ? Math.min(this.w * 0.46, 380) : Math.min(this.w * 0.94, 400);
+      h = Math.min(availableH, isLandscape ? availableH : this.h * 0.74);
+    } else {
+      w = Math.min(380, this.w * 0.92);
+      h = Math.min(610, availableH);
+    }
     const hidden = this.h + 20;
     const shown = topGap;
     const t = ease.outCubic(this.bagAnim);
-    return { x: (this.w - w) / 10, y: hidden + (shown - hidden) * t, w, h };
+    const x = isMobile ? Math.max(8, (this.w - w) / 2) : (this.w - w) / 10;
+    return { x, y: hidden + (shown - hidden) * t, w, h };
   }
 
   /** Geometry for the scrollable item grid + header widgets inside the bag panel. */
 private bagLayout() {
   const p = this.bagPanelRect();
-  const isMobile = this.isMobile || this.w < 640;
+  const isMobile = this.compactPanels();
+  const isLandscape = this.w > this.h;
   const scale = Math.min(1, p.w / 380);
 
-  // 【修改】手机端更密集：减少间距
   let gap = 10 * scale;
   let pad = 15 * scale;
   let cols = 5;
 
+  // A landscape phone leaves very little height for the bag, so its chrome is
+  // trimmed to keep at least a couple of card rows visible.
+  const shortPanel = isMobile && p.h < 340;
+
   if (isMobile) {
-    gap = 6 * scale;
-    pad = 10 * scale;
-    cols = 6;
+    // Phones: fewer, larger cards with a noticeably wider gap so neighbouring
+    // cards can't be mis-tapped and the grid reads as separate cards.
+    gap = 14 * scale;
+    pad = 12 * scale;
+    cols = isLandscape ? (shortPanel ? 7 : 5) : 4;
   }
 
   const slotSize = Math.max(28 * scale, Math.floor((p.w - pad * 2 - gap * (cols - 1)) / cols));
   const itemHeight = slotSize + gap;
-  const headerH = 44 * scale;
+  const headerH = (shortPanel ? 36 : 44) * scale;
   const barY = p.y + headerH;
-  const barH = 28 * scale;
+  const barH = (shortPanel ? 24 : 28) * scale;
   const dropW = Math.min(120, p.w * 0.3);
   const barGap = 6 * scale;
   const barW = p.w - dropW - barGap - pad * 2;
   const barX = p.x + pad;
   const dropX = barX + barW + barGap;
 
-  // 【修改】手机端降低统计面板高度
+  // Phones keep a shorter stats strip so the card grid gets the space.
   let statsH = 92 * scale;
-  if (isMobile) {
-    statsH = 72 * scale;  // 从92减小到76
-  }
+  if (isMobile) statsH = (shortPanel ? 44 : 72) * scale;
 
   const gridTop = barY + barH + 12 * scale;
   const gridBottom = p.y + p.h - statsH - 6 * scale;
@@ -8667,7 +8821,7 @@ private bagLayout() {
 
   return {
     panel: p,
-    compact: false,
+    compact: isMobile,
     scale,
     cols,
     gap,
@@ -8757,29 +8911,30 @@ private bagLayout() {
   }
 
   private craftPanelRect(): Rect {
-    // Landscape phones get a bigger craft panel: width +25% and height ×2 so
-    // the pentagon + grid aren't squished. All mobile gets an extra +10%
-    // width / +15% height bump so the craft UI is comfortably large.
-    // Portrait phones and desktop keep the original proportional sizing
-    // (desktop gets no mobile bump).
-    const isMobile = this.isMobile || this.w < 640;
+    // Phones switch to a compact panel that is always sized to the screen
+    // instead of the old fixed multipliers, which produced a ~200px wide box
+    // in portrait and a panel taller than the viewport in landscape.
+    const isMobile = this.compactPanels();
     const isLandscape = this.w > this.h;
-    const mobileScale = isMobile ? 0.5 : 1;
-    const landscapeW = isMobile && isLandscape ? 1.3 : 1;  // +25% width (landscape)
-    const landscapeH = isMobile && isLandscape ? 2 : 1;     // ×2 height (landscape)
-    const mobileBumpW = isMobile ? 1.15 : 1;                // +10% width (all mobile)
-    const mobileBumpH = isMobile ? 1.2 : 1;                // +15% height (all mobile)
-    const widthMult = landscapeW * mobileBumpW;
-    const heightMult = landscapeH * mobileBumpH;
-    const w = Math.min(800, Math.floor(this.w * 0.92)) * mobileScale * widthMult;
-    const reservedHotbar = this.scene === "game" ? this.hotbarHeight() : 0;
-    const topGap = 12 * mobileScale;
-    const bottomGap = 18 * mobileScale;
+    // The craft panel has no drag-to-hotbar interaction, so on a short
+    // landscape phone it may use the hotbar strip as well — that space is the
+    // difference between a usable card grid and a two-row sliver.
+    const reservedHotbar = this.scene === "game" && !(isMobile && isLandscape) ? this.hotbarHeight() : 0;
+    const topGap = isMobile ? 10 : 12;
+    const bottomGap = isMobile ? 12 : 18;
     const availableH = Math.max(1, this.h - reservedHotbar - topGap - bottomGap);
-    const h = Math.min(560, availableH) * mobileScale * heightMult;
+    let w: number;
+    let h: number;
+    if (isMobile) {
+      w = isLandscape ? Math.min(this.w * 0.58, 470) : Math.min(this.w * 0.94, 400);
+      h = Math.min(availableH, isLandscape ? availableH : this.h * 0.76);
+    } else {
+      w = Math.min(800, Math.floor(this.w * 0.92));
+      h = Math.min(560, availableH);
+    }
     const t = ease.outCubic(this.craftAnim);
     const hidden = this.w + 20;
-    const shown = this.w - w - 16;
+    const shown = isMobile ? Math.max(8, (this.w - w) / 2) : this.w - w - 16;
     return { x: hidden + (shown - hidden) * t, y: topGap, w, h };
   }
   /**
@@ -8791,26 +8946,50 @@ private bagLayout() {
    */
   private craftLayout() {
     const p = this.craftPanelRect();
-    // Scale factor: shrink everything proportionally on smaller panels
-    const scale = Math.min(1, p.w / 800);
-    const pad = 14 * scale;
-    const headerH = 42 * scale;
-    const tabsH = 32 * scale;
-    const barH = 26 * scale;
+    // Compact = phone-sized panel: the craft log is dropped, the pentagon is
+    // centred and the action button moves under it (portrait) so everything
+    // fits without the desktop chrome.
+    const compact = this.compactPanels();
+    // Stacked = tall enough to put the action button below the pentagon.
+    const stacked = compact && p.h >= 420;
+    // Scale factor: shrink everything proportionally on smaller panels. The
+    // compact panel measures against its own design width so labels stay
+    // readable on a phone instead of collapsing to ~6px.
+    const scale = compact ? Math.min(1, p.w / 430) : Math.min(1, p.w / 800);
+    const pad = (compact ? 10 : 14) * scale;
+    const headerH = (compact ? 36 : 42) * scale;
+    const tabsH = compact ? Math.max(30, 34 * scale) : 32 * scale;
+    const barH = (compact ? 28 : 26) * scale;
 
-    // [Change] 应用 scale 到日志区域
-    const logRect: Rect = {
-      x: p.x + pad,
-      y: p.y + 10 * scale,
-      w: Math.min(150, p.w * 0.18) * scale, // [Change] 宽度缩放
-      h: 82 * scale,
-    };
-    const tabsY = p.y + 10 * scale;
+    // The craft log is desktop-only chrome — a zero-width rect switches it off.
+    const logRect: Rect = compact
+      ? { x: p.x, y: p.y, w: 0, h: 0 }
+      : {
+          x: p.x + pad,
+          y: p.y + 10 * scale,
+          w: Math.min(150, p.w * 0.18) * scale,
+          h: 82 * scale,
+        };
+    const tabsY = p.y + (compact ? 6 : 10) * scale;
 
-    const bigSize = Math.max(30, Math.min(70, p.h * 0.13));
-    const radius = Math.max(38, Math.min(80, p.h * 0.14));
-    const cx = p.x + p.w * 0.38;
-    const cy = p.y + Math.max(82, Math.min(148, p.h * 0.29));
+    const bodyH = Math.max(1, p.h - headerH);
+    // Short compact panels (landscape phones) split into two columns: craft
+    // controls on the left, filters + card grid on the right. Stacking them
+    // there would leave the grid a single row tall.
+    const columns = compact && !stacked;
+    const leftW = columns ? p.w * 0.46 : p.w;
+    const bigSize = compact
+      ? Math.max(24, Math.min(46, bodyH * (columns ? 0.16 : 0.13)))
+      : Math.max(30, Math.min(70, p.h * 0.13));
+    const radius = compact
+      ? Math.max(26, Math.min(62, bodyH * (columns ? 0.19 : 0.16)))
+      : Math.max(38, Math.min(80, p.h * 0.14));
+    const cx = compact
+      ? (columns ? p.x + leftW / 2 : p.x + p.w * 0.5)
+      : p.x + p.w * 0.38;
+    const cy = compact
+      ? p.y + headerH + radius + bigSize / 2 + 6 * scale
+      : p.y + Math.max(82, Math.min(148, p.h * 0.29));
 
     const bigSlots: Rect[] = [];
     for (let i = 0; i < CRAFT_CARD_COUNT; i++) {
@@ -8824,60 +9003,84 @@ private bagLayout() {
     const resultSize = Math.min(66, Math.max(bigSize * 1.25, 54));
     const resultRect: Rect = { x: cx - resultSize / 2, y: cy - resultSize / 2, w: resultSize, h: resultSize };
 
-    // [Change] 应用 scale 到操作按钮
-    const actionW = Math.min(110, p.w * 0.18) * scale; // [Change] 宽度缩放
-    const actionH = Math.min(36, p.h * 0.07) * scale;  // [Change] 高度缩放
-    const actionRect: Rect = {
-      x: p.x + p.w - actionW - (14 * scale), // [Change] 右侧 padding 缩放
-      y: cy - actionH / 2,
-      w: actionW,
-      h: actionH
-    };
+    const pentagonBottom = cy + radius + bigSize / 2 + (compact ? 6 : 10) * scale;
+    // Touch-sized action button: centred under the pentagon when the compact
+    // panel is tall enough, otherwise beside it like the desktop layout.
+    const actionW = compact
+      ? Math.min(stacked ? 200 : 170, leftW * 0.8)
+      : Math.min(110, p.w * 0.18) * scale;
+    const actionH = compact
+      ? Math.max(34, Math.min(44, bodyH * (columns ? 0.14 : 0.1)))
+      : Math.min(36, p.h * 0.07) * scale;
+    // Compact: the button sits under the pentagon (in its own column when the
+    // panel is split), desktop keeps it beside the pentagon on the right.
+    const actionRect: Rect = compact
+      ? { x: cx - actionW / 2, y: pentagonBottom + 4 * scale, w: actionW, h: actionH }
+      : {
+          x: p.x + p.w - actionW - 14 * scale,
+          y: cy - actionH / 2,
+          w: actionW,
+          h: actionH,
+        };
 
     // Normal rectangle close button (matches inventory / other panels)
-    const closeRect: Rect = {
-      x: p.x + p.w - 38 * scale,
-      y: p.y + 10 * scale,
-      w: 28 * scale,
-      h: 28 * scale,
-    };
+    const closeRect: Rect = compact
+      ? { x: p.x + p.w - 36, y: p.y + 8, w: 28, h: 28 }
+      : { x: p.x + p.w - 38 * scale, y: p.y + 10 * scale, w: 28 * scale, h: 28 * scale };
 
-    // [Change 1] Reduced padding from 24 to 10 to lift the bottom bar up
-    const craftBottom = cy + radius + bigSize / 2 + 10 * scale;
+    // Bottom of the craft area: below the action button in compact layouts.
+    const craftBottom = compact ? actionRect.y + actionRect.h + 6 * scale : pentagonBottom;
     const barGap = 8 * scale;
-    const dropW = Math.min(110, p.w * 0.2) * scale; // [Change] 下拉框宽度缩放
-    const barW = Math.min(210, p.w * 0.34) * scale; // [Change] 搜索条宽度缩放
-    const dropX = p.x + pad;
-    const barY = craftBottom + 4 * scale;
+    // Filters: full width under the craft area, or the top of the right-hand
+    // column when the compact panel is split.
+    const filterW = columns ? p.w - leftW - pad : p.w - pad * 2;
+    const dropW = compact ? Math.min(120, filterW * 0.42) : Math.min(110, p.w * 0.2) * scale;
+    const barW = compact ? Math.min(230, filterW - dropW - 8 * scale) : Math.min(210, p.w * 0.34) * scale;
+    const dropX = columns ? p.x + leftW : p.x + pad;
+    const barY = columns ? p.y + headerH + 4 * scale : craftBottom + 4 * scale;
     const barX = dropX + dropW + barGap;
-    const infoY = barY + barH + 10 * scale;
+    // Info / requirement lines live under the craft column in both layouts.
+    const infoY = columns ? craftBottom + 6 * scale : barY + barH + 10 * scale;
 
-    // [Change 2] Reduced offset from 38 to 10 to expand grid height significantly
-    const gridTop = infoY + 10 * scale;
+    // Compact panels reserve room for the requirement / result lines that are
+    // drawn under `infoY`, so they never sit on top of the card grid.
+    const gridTop = columns
+      ? barY + barH + 8 * scale
+      : infoY + (compact ? 46 : 10) * scale;
 
-    const gridBottom = p.y + p.h - 10 * scale;
+    // Compact panels keep a finger-sized Cr/Or/Tr tab row pinned to the bottom
+    // edge, so the card grid stops above it. In the split layout the tabs sit
+    // under the craft column, clear of the grid.
+    const gridBottom = compact && !columns ? p.y + p.h - tabsH - 14 : p.y + p.h - 10 * scale;
 
     const cols = RARITIES.length;
-    const gapSmall = 6 * scale;
-    const maxGridWidth = p.w - pad * 2 - (18 * scale); // [Change] 边距缩放
+    const gapSmall = (compact ? 4 : 6) * scale;
+    const maxGridWidth = (columns ? p.w - leftW : p.w - pad * 2) - (compact ? 14 : 18) * scale;
     const widthLimitedSlot = Math.floor((maxGridWidth - gapSmall * (cols - 1)) / cols);
     const availableGridH = Math.max(1, gridBottom - gridTop);
-    const slotSizeSmall = Math.max(18, Math.min(40, widthLimitedSlot, availableGridH));
+    const slotSizeSmall = Math.max(compact ? 16 : 18, Math.min(40, widthLimitedSlot, availableGridH));
     const itemHeightSmall = slotSizeSmall + gapSmall;
     const totalGridWidth = cols * (slotSizeSmall + gapSmall) - gapSmall;
-    const gridStartX = p.x + p.w / 2 - totalGridWidth / 2;
+    const gridStartX = columns
+      ? p.x + leftW + (p.w - leftW - pad - totalGridWidth) / 2
+      : p.x + p.w / 2 - totalGridWidth / 2;
     const gridH = availableGridH;
     const maxVisibleRows = Math.max(5, Math.floor(gridH / itemHeightSmall));
+    const scrollW = (compact ? 6 : 10) * scale;
     const scrollTrack: Rect = {
-      x: gridStartX + totalGridWidth + (10 * scale), // [Change] 滚动条间距缩放
+      // Kept inside the panel even when the grid nearly fills its column.
+      x: Math.min(gridStartX + totalGridWidth + 6 * scale, p.x + p.w - pad - scrollW),
       y: gridTop,
-      w: 10 * scale, // [Change] 滚动条宽度缩放
-      h: gridH
+      w: scrollW,
+      h: gridH,
     };
 
     return {
       panel: p,
-      compact: false,
+      compact,
+      stacked,
+      columns,
+      leftW,
       scale,
       cols,
       gap: gapSmall,
@@ -8914,12 +9117,16 @@ private bagLayout() {
 
   private craftModeRects(): { mode: "normal" | "oracle" | "trade"; rect: Rect; label: string; color: string }[] {
     const layout = this.craftLayout();
-    const gap = 6;
+    const gap = layout.compact ? 8 : 6;
     const h = layout.tabsH;
     const w = h;
-    const y = layout.tabsY;
+    const y = layout.compact ? layout.panel.y + layout.panel.h - h - 6 : layout.tabsY;
     const modeCount = 3;
-    const x0 = layout.closeRect.x - 10 - (w + gap) * modeCount;
+    // Compact: the tab row sits on the panel's left edge under the title so it
+    // never collides with the ✕, and is finger-sized.
+    const x0 = layout.compact
+      ? layout.panel.x + 10
+      : layout.closeRect.x - 10 - (w + gap) * modeCount;
     return [
       { mode: "normal", rect: { x: x0, y, w, h }, label: "Cr", color: "#c9762b" },
       { mode: "oracle", rect: { x: x0 + w + gap, y, w, h }, label: "Or", color: "#6a3fb0" },
@@ -9774,12 +9981,21 @@ private bagLayout() {
   private onVisibilityChange = () => {
     if (document.hidden) {
       this.releaseGameplayInput(true);
+      // A hidden tab may never come back (mobile browsers kill it outright),
+      // and rAF stops firing so the periodic save timer stalls. Write the
+      // server-confirmed inventory out now.
+      this.flushSave();
       return;
     }
     // requestAnimationFrame pauses in a hidden tab. Do not feed that elapsed
     // wall-clock gap into camera/UI animation when it resumes.
     this.last = performance.now();
     this.inputTimer = 0;
+  };
+
+  /** Last chance to persist before the page is torn down. */
+  private onPageHide = () => {
+    this.flushSave();
   };
 
   private onContext = (e: Event) => e.preventDefault();
@@ -10039,7 +10255,10 @@ private bagLayout() {
     }
     if (this.scene === "menu" && this.mobGallery.visible) this.mobGallery.handleMouseMove(p.x, p.y);
     if (this.settings.panelOpen) this.settings.handleMouseMove(p.x, p.y);
-    if (this.arenaPanel.panelOpen) this.arenaPanel.handleMouseMove(p.x, p.y);
+    if (this.arenaPanel.panelOpen) {
+      this.arenaPanel.setViewport(this.w, this.h);
+      this.arenaPanel.handleMouseMove(p.x, p.y);
+    }
     // 天赋面板：鼠标 hover 节点提示 + 触摸拖动旋转。
     if (this.talent.isOpen) {
       this.talent.handleMouseMove([p.x, p.y]);
@@ -10898,11 +11117,13 @@ private bagLayout() {
     const buttons: Record<number, { x: number; y: number; w: number; h: number }> = {};
 
     const COLS = layout.COLS;
-    const totalRows = Math.ceil(MAPS.length / COLS);
+    // The Arena field is duel-only and never shows up as a pickable biome.
+    const maps = SELECTABLE_MAPS;
+    const totalRows = Math.ceil(maps.length / COLS);
 
-    MAPS.forEach((map, i) => {
+    maps.forEach((map, i) => {
       const row = Math.floor(i / COLS);
-      const itemsInRow = row === totalRows - 1 ? MAPS.length - row * COLS : COLS;
+      const itemsInRow = row === totalRows - 1 ? maps.length - row * COLS : COLS;
       const rowOffset = (COLS - itemsInRow) * (layout.BIOME_W + layout.BIOME_GAP) / 2;
       const col = i % COLS;
 
@@ -10972,7 +11193,7 @@ private bagLayout() {
       return;
     }
     // Arena 面板：面板打开时截获点击
-    if (this.arenaPanel.panelOpen && this.arenaPanel.handleClick(mx, my)) {
+    if (this.arenaPanel.panelOpen && (this.arenaPanel.setViewport(this.w, this.h), this.arenaPanel.handleClick(mx, my))) {
       return;
     }
 
@@ -11319,6 +11540,9 @@ private bagLayout() {
 
   private gotoMenu() {
     this.currentRunDrops = [];
+    // A duel that ended with a disconnect/kick never ran leaveArenaWorld —
+    // make sure the Arena field is dropped before the save is written.
+    if (this.arenaPrevMapId !== null || this.arenaWalls) this.leaveArenaWorld();
     this.persist();
     this.pendingScene = () => {
       this.scene = "menu";
@@ -11362,7 +11586,7 @@ private bagLayout() {
       return;
     }
     // Arena 面板：面板打开时截获点击
-    if (this.arenaPanel.panelOpen && this.arenaPanel.handleClick(mx, my)) {
+    if (this.arenaPanel.panelOpen && (this.arenaPanel.setViewport(this.w, this.h), this.arenaPanel.handleClick(mx, my))) {
       return;
     }
     // After an AFK kick the only thing left to do is go back to the menu.
@@ -11818,6 +12042,7 @@ private bagLayout() {
       const w = new Writer(6);
       // Send the total card count — the server calculates attempts from it.
       w.u8(C2S.CRAFT).u8(sel.item).u8(sel.rarity).u16(loaded);
+      this.craftTxPending = true;
       this.craftLogPetals += loaded;
       this.craftLogAttempts += 1;
       this.craftStartRotation();
@@ -11836,6 +12061,8 @@ private bagLayout() {
       }
       const w = new Writer(4);
       w.u8(C2S.ORACLE).u8(sel.item).u8(sel.rarity);
+      this.craftTxPending = true;
+      this.craftOracleCost = required;
       this.craftLogPetals += required;
       this.craftLogAttempts += 1;
       this.craftStartRotation();
@@ -11852,6 +12079,7 @@ private bagLayout() {
     }
     const w = new Writer(6);
     w.u8(C2S.TRADE).u8(sel.item).u8(sel.rarity).u16(0);
+    this.craftTxPending = true;
     this.craftLogPetals += 1;
     this.craftLogAttempts += 1;
     this.craftStartRotation();
@@ -12674,6 +12902,7 @@ private bagLayout() {
 
     // Arena 面板（主菜单 Arena 图标入口）
     this.arenaPanel.setBag(this.bag);
+    this.arenaPanel.setViewport(this.w, this.h);
     this.arenaPanel.draw(ctx);
 
     // ─── "Coming soon" toast（未实现按钮的点击反馈）───
@@ -13002,6 +13231,7 @@ private bagLayout() {
 
     // Arena 面板（游戏内也可显示）
     this.arenaPanel.setBag(this.bag);
+    this.arenaPanel.setViewport(this.w, this.h);
     this.arenaPanel.draw(ctx);
 
 if (this.drag) {
@@ -15098,14 +15328,15 @@ if (me) {
     ctx.strokeStyle = panelBorder;
     ctx.stroke();
 
-    text(ctx, this.craftMode === "normal" ? "Craft" : this.craftMode === "oracle" ? "Oracle" : "Trade", p.x + p.w * 0.38, p.y + 24 * layout.scale, 22 * layout.scale, "#ffffff");
+    const titleSize = layout.compact ? Math.max(15, 20 * layout.scale) : 22 * layout.scale;
+    text(ctx, this.craftMode === "normal" ? "Craft" : this.craftMode === "oracle" ? "Oracle" : "Trade", layout.cx, p.y + (layout.compact ? 20 : 24 * layout.scale), titleSize, "#ffffff");
     // close button — normal rectangle one (matches inventory / other panels)
     this.drawCloseButton(ctx, layout.closeRect, layout.scale);
 
     // Action button centered beside the pentagon.
     const btn = layout.actionRect;
     const label = this.craftActionLabel();
-    button(ctx, btn, label.text, accent, hit(btn, this.mx, this.my), 15 * layout.scale, label.enabled);
+    button(ctx, btn, label.text, accent, hit(btn, this.mx, this.my), layout.compact ? Math.max(13, 15 * layout.scale) : 15 * layout.scale, label.enabled);
     // small cooldown hint next to button if Oracle/Trade
     if (this.craftMode !== "normal") {
       const cd = this.craftCooldownLeft(this.craftMode as "oracle" | "trade");
@@ -15124,8 +15355,8 @@ if (me) {
     dropdownField(ctx, layout.dropRect, this.craftBiome, this.craftBiomeOpen);
     searchField(ctx, layout.barRect, this.craftSearchText, this.craftSearchActive, "Search cards...");
 
-    // Craft log (top-left compact)
-    this.drawCraftLogPanel(ctx, layout);
+    // Craft log (desktop only — the compact panel has no room for it)
+    if (!layout.compact) this.drawCraftLogPanel(ctx, layout);
 
     // Five big slots + particles behind
     this.drawCraftParticles(ctx);
@@ -15146,7 +15377,8 @@ if (me) {
       ctx.save();
       ctx.globalAlpha = Math.min(1, this.craftMsgLife);
       const bad = /fail|cooldown|need|cannot|refused|nothing|first|max/i.test(this.craftMsg);
-      text(ctx, this.craftMsg, p.x + p.w * 0.38, layout.infoY + 14 * layout.scale, 12 * layout.scale, bad ? "#ffbcbc" : "#c9ffd6");
+      const msgSize = layout.compact ? Math.max(10, 12 * layout.scale) : 12 * layout.scale;
+      text(ctx, this.craftMsg, layout.cx, layout.infoY + 14 * layout.scale, msgSize, bad ? "#ffbcbc" : "#c9ffd6");
       ctx.restore();
     }
 

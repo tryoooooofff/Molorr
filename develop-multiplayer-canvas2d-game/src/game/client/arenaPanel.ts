@@ -27,8 +27,17 @@ export class ArenaPanel {
   // 网络回调（由 GameClient 注入）
   sendPacket: ((data: Uint8Array) => void) | null = null;
 
-  // 面板布局
+  // Panel layout. Everything inside the panel is authored in a fixed "design"
+  // space (panelW x panelH) and the whole thing is scaled to the viewport in
+  // draw(), so the arena UI fits phones without every widget needing its own
+  // responsive maths. `scale` converts design px -> screen px.
   panelX = 0; panelY = 0; panelW = 520; panelH = 700;
+  /** Uniform design -> screen factor applied by draw() and the hit tests. */
+  scale = 1;
+  /** Phone-sized viewport: narrower design box, fewer/larger bag columns. */
+  compact = false;
+  private viewW = 0;
+  private viewH = 0;
   searchFieldRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
   createBtnRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
   quickJoinBtnRect: Rect = { x: 0, y: 0, w: 0, h: 0 };
@@ -65,12 +74,45 @@ export class ArenaPanel {
 
   update(dt: number) {}
 
+  /**
+   * Fit the panel to the canvas. Called every frame before draw() (and before
+   * the hit tests) so rotating a phone or resizing a window re-lays it out.
+   */
+  setViewport(viewW: number, viewH: number) {
+    this.viewW = viewW;
+    this.viewH = viewH;
+    // Phones and short landscape windows get a narrower design box: the same
+    // widgets, but a layout that does not need to be shrunk into oblivion.
+    const compact = viewW < 760 || viewH < 780;
+    this.compact = compact;
+    this.panelW = compact ? 400 : 520;
+    this.panelH = compact ? 640 : 700;
+    const marginX = compact ? 8 : 10;
+    const marginTop = compact ? 10 : 60;
+    const marginBottom = compact ? 10 : 20;
+    const availW = Math.max(1, viewW - marginX * 2);
+    const availH = Math.max(1, viewH - marginTop - marginBottom);
+    this.scale = Math.min(1, availW / this.panelW, availH / this.panelH);
+    this.panelX = Math.max(marginX, (viewW - this.panelW * this.scale) / 2);
+    this.panelY = compact ? marginTop : Math.min(60, Math.max(marginTop, (viewH - this.panelH * this.scale) / 2));
+  }
+
+  /** Vertical design factor — the compact box is shorter than the 700px one. */
+  private get vs(): number {
+    return this.panelH / 700;
+  }
+
+  /** Convert a screen point into panel-design space. */
+  private toLocal(mx: number, my: number): { x: number; y: number } {
+    const s = this.scale || 1;
+    return { x: (mx - this.panelX) / s, y: (my - this.panelY) / s };
+  }
+
   draw(ctx: CanvasRenderingContext2D) {
     if (!this.panelOpen) return;
-
-    // 面板居中
-    this.panelX = 10;
-    this.panelY = 60;
+    if (!this.viewW || !this.viewH) {
+      this.setViewport(ctx.canvas?.width || 1280, ctx.canvas?.height || 720);
+    }
 
     // NOTE: deliberately no full-screen scrim here. Every other panel (bag,
     // craft, gallery, changelog…) draws straight over the scene without
@@ -78,10 +120,15 @@ export class ArenaPanel {
     // darkened the whole game behind it. Keeping it undimmed makes it match.
 
     // 不透明面板：完全实心的深色背景 + 黑色描边（不再使用默认的半透明填充）
-    panel(ctx, { x: this.panelX, y: this.panelY, w: this.panelW, h: this.panelH }, "#1c242e");
+    panel(
+      ctx,
+      { x: this.panelX, y: this.panelY, w: this.panelW * this.scale, h: this.panelH * this.scale },
+      "#1c242e",
+    );
 
     ctx.save();
     ctx.translate(this.panelX, this.panelY);
+    ctx.scale(this.scale, this.scale);
 
     // 标题
     text(ctx, 'Arena', this.panelW / 2, 28, 22, '#ffffff', 'center');
@@ -222,7 +269,7 @@ export class ArenaPanel {
 
     // 房间列表
     const listY = 175;
-    const itemH = 42;
+    const itemH = this.compact ? 48 : 42;
     this.roomListRects = [];
     ctx.save();
     ctx.beginPath(); ctx.rect(10, listY, this.panelW - 20, this.panelH - listY - 20); ctx.clip();
@@ -251,15 +298,16 @@ export class ArenaPanel {
     const seats = this.currentRoom.seats;
     const team0 = seats.filter(s => s.team === 0);
     const team1 = seats.filter(s => s.team === 1);
+    const vs = this.vs;
 
     // 队伍面板
-    this.drawTeamPanel(ctx, 10, 50, this.panelW / 2 - 15, team0, 0);
-    this.drawTeamPanel(ctx, this.panelW / 2 + 5, 50, this.panelW / 2 - 15, team1, 1);
+    this.drawTeamPanel(ctx, 10, 50 * vs, this.panelW / 2 - 15, team0, 0);
+    this.drawTeamPanel(ctx, this.panelW / 2 + 5, 50 * vs, this.panelW / 2 - 15, team1, 1);
 
     // 中央 Wheel 圆盘
     this.wheelCenterX = this.panelW / 2;
-    this.wheelCenterY = 260;
-    this.wheelRadius = 95;
+    this.wheelCenterY = 260 * vs;
+    this.wheelRadius = 95 * Math.min(vs, this.panelW / 520);
 
     // wheel 圆盘背景
     ctx.save();
@@ -281,7 +329,7 @@ export class ArenaPanel {
       const angle = (i / totalSeats) * Math.PI * 2 - Math.PI / 2;
       const cx = this.wheelCenterX + Math.cos(angle) * (this.wheelRadius - 28);
       const cy = this.wheelCenterY + Math.sin(angle) * (this.wheelRadius - 28);
-      const slotR = 20;
+      const slotR = Math.max(15, 20 * Math.min(vs, this.panelW / 520));
       const isMine = seats[i] && seats[i].id === this.currentRoom!.mySeat;
       // 用 drawCard 渲染槽位小卡片
       const cardRect: Rect = { x: cx - slotR, y: cy - slotR, w: slotR * 2, h: slotR * 2 };
@@ -295,10 +343,10 @@ export class ArenaPanel {
       });
     }
 
-    // 配装槽
-    const loadoutY = 375;
-    const loadoutW = 42;
-    const loadoutGap = 6;
+    // 配装槽 — width-derived so the 10 slots always fit the design box.
+    const loadoutY = 375 * vs;
+    const loadoutGap = this.compact ? 4 : 6;
+    const loadoutW = Math.min(42, Math.floor((this.panelW - 24 - loadoutGap * 9) / 10));
     const totalLoadoutW = 10 * loadoutW + 9 * loadoutGap;
     const loadoutStartX = (this.panelW - totalLoadoutW) / 2;
     for (let i = 0; i < 10; i++) {
@@ -309,7 +357,7 @@ export class ArenaPanel {
     }
 
     // 准备按钮（用户按钮风格）
-    this.readyBtnRect = { x: this.panelW / 2 - 65, y: 440, w: 130, h: 42 };
+    this.readyBtnRect = { x: this.panelW / 2 - 70, y: 440 * vs, w: 140, h: 44 };
     const readyHovered = this.hoveredBtn === 'ready';
     this.styledButton(
       ctx,
@@ -322,7 +370,7 @@ export class ArenaPanel {
 
     // 离开按钮 — sits to the LEFT of the ✕ (which occupies panelW-42 .. panelW-12)
     // so the two no longer overlap. "leave" exits the room; "✕" just hides the panel.
-    this.leaveBtnRect = { x: this.panelW - 130, y: 12, w: 70, h: 32 };
+    this.leaveBtnRect = { x: this.panelW - 130, y: 12, w: 74, h: 34 };
     const leaveHovered = this.hoveredBtn === 'leave';
     this.styledButton(ctx, this.leaveBtnRect, 'leave', [192, 57, 43], leaveHovered, 14);
 
@@ -331,7 +379,7 @@ export class ArenaPanel {
   }
 
   private drawBagGrid(ctx: CanvasRenderingContext2D) {
-    const bagY = 495;
+    const bagY = 495 * this.vs;
     const padX = 10;
     this.bagStartX = padX;
     this.bagStartY = bagY;
@@ -340,10 +388,11 @@ export class ArenaPanel {
     // 标题
     text(ctx, 'Backpack', this.panelW / 2, bagY - 8, 14, '#aaa', 'center');
 
-    // 计算网格
-    const cols = this.bagCols;
-    const size = this.bagCardSize;
+    // Grid: phones use fewer columns so each card stays tappable, and the card
+    // size is derived from the design width instead of a fixed 38px.
+    const cols = this.compact ? 7 : this.bagCols;
     const gap = this.bagCardGap;
+    const size = Math.floor((this.panelW - padX * 2 - gap * (cols - 1)) / cols);
 
     this.bagStartX = padX;
     this.bagStartY = bagY + 4;
@@ -376,8 +425,9 @@ export class ArenaPanel {
   }
 
   private drawTeamPanel(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, players: PlayerBrief[], team: number) {
+    const h = 140 * this.vs;
     ctx.save();
-    roundRect(ctx, x, y, w, 140, 5);
+    roundRect(ctx, x, y, w, h, 5);
     ctx.fillStyle = team === 0 ? 'rgba(231,76,60,0.15)' : 'rgba(41,128,185,0.15)';
     ctx.fill();
     ctx.lineWidth = 2;
@@ -403,8 +453,7 @@ export class ArenaPanel {
   }
 
   handleMouseMove(mx: number, my: number) {
-    const px = mx - this.panelX;
-    const py = my - this.panelY;
+    const { x: px, y: py } = this.toLocal(mx, my);
     this.hoveredBtn = null;
     this.hoveredBagSlot = -1;
     this.hoveredLoadoutSlot = -1;
@@ -433,8 +482,7 @@ export class ArenaPanel {
 
   handleClick(mx: number, my: number): string | null {
     if (!this.panelOpen) return null;
-    const px = mx - this.panelX;
-    const py = my - this.panelY;
+    const { x: px, y: py } = this.toLocal(mx, my);
     if (px < 0 || px > this.panelW || py < 0 || py > this.panelH) return null;
 
     // ✕ closes the panel from any state, and is tested first so it can never be

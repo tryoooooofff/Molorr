@@ -16,6 +16,7 @@ import {
   ITEMS,
   MAPS,
   MAX_CRAFT_RARITY,
+  clampPveMapId,
   MAX_RARITY,
   MOBS,
   CLOVER_ITEM,
@@ -2131,7 +2132,8 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
     switch (type) {
       case C2S.JOIN: {
         const name = r.str().slice(0, 14) || "flower";
-        const mapId = clamp(r.u8(), 0, MAPS.length - 1);
+        // The Arena field is reserved for duels — a PvE join never lands there.
+        const mapId = clampPveMapId(r.u8());
         const xp = r.u32();
         const p = new Player(this.nextId++);
         p.name = name;
@@ -2276,7 +2278,7 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
       case C2S.CHANGE_MAP: {
         const p = c.player;
         if (!p) return;
-        const mapId = clamp(r.u8(), 0, MAPS.length - 1);
+        const mapId = clampPveMapId(r.u8());
         if (mapId === p.mapId) return;
         const oldWorld = this.worlds[p.mapId];
         oldWorld.mobs = oldWorld.mobs.filter((m) => m.ownerId !== p.id);
@@ -2940,12 +2942,23 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
   }
 
   private oracle(c: ClientState, p: Player, item: number, rarity: number) {
-    if (item >= ITEMS.length) return;
+    // Any refusal is answered with ORACLE_FAIL so the client stops its spin
+    // animation and says why, instead of silently looking like a free craft.
+    const refuse = () => this.pushEvent(c, EVT.ORACLE_FAIL, p.x, p.y, 0, item, rarity);
+    if (item >= ITEMS.length) return refuse();
     const required = oracleRequiredCount(rarity);
-    if (required === undefined || Date.now() < p.nextOracleAt) return;
+    if (required === undefined || Date.now() < p.nextOracleAt) return refuse();
     const have = this.countOf(p, item, rarity);
-    if (have < required) return;
-    this.takeFromBag(p, item, rarity, required);
+    if (have < required) return refuse();
+    // Charge first, and only mint the upgraded card when the full price was
+    // actually taken out of the bag. A partial take is rolled back so the
+    // conversion can never hand out a card for free.
+    const used = this.takeFromBag(p, item, rarity, required);
+    if (used !== required) {
+      if (used > 0) this.addItem(p, item, rarity, used);
+      p.dirty = true;
+      return refuse();
+    }
     const targetRarity = rarity + ORACLE_SKIP;
     this.addItem(p, item, targetRarity, 1);
     p.nextOracleAt = Date.now() + ORACLE_COOLDOWN_HOURS * 3600 * 1000;
@@ -2956,12 +2969,13 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
   }
 
   private trade(c: ClientState, p: Player, item: number, rarity: number, requestedCount: number) {
-    if (item >= ITEMS.length || Date.now() < p.nextTradeAt) return;
+    const refuse = () => this.pushEvent(c, EVT.TRADE_FAIL, p.x, p.y, 0, item, rarity);
+    if (item >= ITEMS.length || Date.now() < p.nextTradeAt) return refuse();
     const have = this.countOf(p, item, rarity);
     const want = requestedCount > 0 ? Math.min(requestedCount, have) : have;
-    if (want <= 0) return;
+    if (want <= 0) return refuse();
     const used = this.takeFromBag(p, item, rarity, want);
-    if (used <= 0) return;
+    if (used <= 0) return refuse();
     this.addItem(p, TRINKET_ITEM, rarity, used);
     p.nextTradeAt = Date.now() + TRADE_COOLDOWN_HOURS * 3600 * 1000;
     this.pushEvent(c, EVT.TRADE_OK, p.x, p.y, used, TRINKET_ITEM, rarity);

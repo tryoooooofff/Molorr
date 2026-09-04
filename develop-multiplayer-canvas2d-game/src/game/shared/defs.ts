@@ -892,6 +892,32 @@ export const MAPS: MapDef[] = [
   },
 ];
 
+/**
+ * The Arena battleground is the last entry in MAPS. It exists only for Arena
+ * duels: it is never selectable in the main menu, never stored as the player's
+ * chosen map, and a PvE join/change-map request that points at it is clamped
+ * back to a normal map.
+ */
+export const ARENA_MAP_ID = MAPS.length - 1;
+
+/** The maps a player can actually pick and play in (everything but the Arena). */
+export const SELECTABLE_MAPS: MapDef[] = MAPS.filter((m) => m.id !== ARENA_MAP_ID);
+
+export function isArenaMap(mapId: number): boolean {
+  return mapId === ARENA_MAP_ID;
+}
+
+/**
+ * Clamp any stored / received map id to a playable (non-Arena) map. Saves
+ * written while a duel was running used to hold the Arena id, which left the
+ * player stuck on the empty Arena field after leaving Arena mode.
+ */
+export function clampPveMapId(mapId: number): number {
+  if (!Number.isFinite(mapId)) return 0;
+  const id = Math.floor(mapId);
+  return id >= 0 && id < ARENA_MAP_ID ? id : 0;
+}
+
 // =====================================================================
 // Block rarity system — each map tile belongs to a zone (A-G) that
 // determines the rarity distribution of mobs spawning there.
@@ -1131,8 +1157,6 @@ export const MAP_GRIDS: string[][] = [
     '2222222222222222222222222222222222222222',
   ],
 ];
-
-export const ARENA_MAP_ID = 3;
 
 /** Number of columns/rows in each block grid. */
 export const BLOCK_GRID_COLS = 40;
