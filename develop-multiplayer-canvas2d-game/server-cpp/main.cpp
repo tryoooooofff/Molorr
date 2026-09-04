@@ -222,6 +222,13 @@ struct MapDef {
 static std::vector<MapDef> makeMaps();
 static const std::vector<MapDef> MAPS = makeMaps();
 static const int MAP_COUNT = static_cast<int>(MAPS.size());
+// The last map is the Arena battleground. It is reserved for duels: players
+// never join it or change into it from the main menu, and leaving a duel puts
+// them back on the map they picked (see Player::preArenaMapId).
+static const int ARENA_MAP_ID = MAP_COUNT - 1;
+static inline uint8_t clampPveMapId(int mapId) {
+  return (uint8_t)(mapId >= 0 && mapId < ARENA_MAP_ID ? mapId : 0);
+}
 
 // =====================================================================
 // Rarity definitions
@@ -1023,6 +1030,8 @@ struct Player {
   bool arenaWheelReady = false;
   Cell arenaLoadout[10]{}; // 锁死配装
   int64_t arenaLastInputAt = 0;
+  /** Map the player was on before the duel — restored when the Arena ends. */
+  uint8_t preArenaMapId = 0;
   Mode mode = Mode::Pve;
 
   Cell slots[SLOT_COUNT];
@@ -1073,7 +1082,9 @@ static void savePlayerData(const Player& p) {
     std::ofstream f(savePathFor(p.name), std::ios::binary);
     if (!f) return;
     uint32_t xp = p.xp;
-    uint8_t mapId = p.mapId;
+    // A duel in progress must not leak the Arena field into the save — the
+    // player's own map is what they come back to.
+    uint8_t mapId = p.mode == Mode::Arena ? clampPveMapId(p.preArenaMapId) : clampPveMapId(p.mapId);
     f.write((const char*)&xp, sizeof(xp));
     f.write((const char*)&mapId, sizeof(mapId));
     f.write((const char*)p.slots, sizeof(Cell) * SLOT_COUNT);
@@ -2872,7 +2883,11 @@ public:
       p->y = 4000 + sin(angle) * 1500;
       p->hp = p->maxHp;
       p->alive = true;
-      p->mapId = MAP_COUNT - 1;
+      // Remember where the player came from so the duel does not overwrite
+      // the map they picked in the main menu, then move them onto the
+      // dedicated Arena field for the fight.
+      p->preArenaMapId = clampPveMapId(p->mapId);
+      p->mapId = (uint8_t)ARENA_MAP_ID;
       p->statsDirty = true;
       p->dirty = true;
 
@@ -2964,11 +2979,17 @@ public:
             }
             cs->events.push_back(w.b);
 
-            // 传送回主地图
-            p->mapId = 0;
-            p->x = 1600; p->y = 1600;
+            // Back to the map the player chose before the duel (never the
+            // Arena field, and never a hardcoded map 0), at a proper spawn
+            // point for it. WELCOME re-sends that map's walls/size so the
+            // client leaves the Arena battleground behind.
+            p->mapId = clampPveMapId(p->preArenaMapId);
+            p->preArenaMapId = 0;
             p->hp = p->maxHp;
             p->alive = true;
+            spawnPlayer(*p);
+            rebuildPetals(*p);
+            cs->events.push_back(welcomeFor(*p).b);
             p->dirty = true;
             p->statsDirty = true;
             break;
@@ -4401,6 +4422,28 @@ public:
     return w;
   }
 
+  // ---- Welcome writer ----
+  // Map handshake: id, world size and the wall list of the player's current
+  // map. Sent on join, on a map change and when a duel hands the player back
+  // to their own map.
+  Writer welcomeFor(Player& p) {
+    const MapDef& map = MAPS[p.mapId < MAP_COUNT ? p.mapId : 0];
+    Writer w;
+    w.u8v(S2C_WELCOME);
+    w.u16v(p.id);
+    w.u8v(p.mapId);
+    w.u16v((uint16_t)map.width);
+    w.u16v((uint16_t)map.height);
+    w.u16v((uint16_t)map.walls.size());
+    for (auto& wall : map.walls) {
+      w.u16v((uint16_t)wall.x);
+      w.u16v((uint16_t)wall.y);
+      w.u16v((uint16_t)wall.w);
+      w.u16v((uint16_t)wall.h);
+    }
+    return w;
+  }
+
   // ---- Inventory writer ----
   Writer inventoryFor(Player& p) {
     Writer w;
@@ -4830,8 +4873,10 @@ int main() {
             sim.markActive(*cs);
             p->name = r.str().substr(0, 14);
             if (p->name.empty()) p->name = "flower";
-            p->mapId = r.u8v();
-            if (p->mapId >= MAP_COUNT) p->mapId = 0;
+            // Arena is duel-only; a stale save that still names it (older
+            // clients wrote the Arena id while a duel was running) falls back
+            // to the first normal map instead of stranding the player there.
+            p->mapId = clampPveMapId(r.u8v());
             p->xp = r.u32v();
             for (int i = 0; i < SLOT_COUNT; i++) p->slots[i] = readCell(r);
             for (int i = 0; i < SECONDARY_SLOT_COUNT; i++) p->secondary[i] = readCell(r);
@@ -4870,7 +4915,7 @@ int main() {
               for (int i = 0; i < SLOT_COUNT; i++) if (saved.slots[i].item != EMPTY_ITEM) { hasSaved = true; break; }
               if (hasSaved) {
                 p->xp = saved.xp;
-                p->mapId = saved.mapId;
+                p->mapId = clampPveMapId(saved.mapId);
                 for (int i = 0; i < SLOT_COUNT; i++) p->slots[i] = saved.slots[i];
                 for (int i = 0; i < SECONDARY_SLOT_COUNT; i++) p->secondary[i] = saved.secondary[i];
                 p->bag = saved.bag;
@@ -4994,8 +5039,9 @@ int main() {
           }
 
           case C2S_CHANGE_MAP: {
-            uint8_t mapId = r.u8v();
-            if (mapId >= MAP_COUNT) mapId = 0;
+            // Arena is duel-only: a normal map change can never target it.
+            uint8_t mapId = clampPveMapId(r.u8v());
+            if (p->mode == Mode::Arena) break;
             if (mapId == p->mapId) break;
             // Remove pets
             for (int i = 0; i < SLOT_COUNT; i++) sim.despawnPets(*p, i);
@@ -5004,20 +5050,7 @@ int main() {
             sim.rebuildPetals(*p);
             // Send WELCOME
             {
-              const MapDef& map = MAPS[p->mapId];
-              Writer w;
-              w.u8v(S2C_WELCOME);
-              w.u16v(p->id);
-              w.u8v(p->mapId);
-              w.u16v((uint16_t)map.width);
-              w.u16v((uint16_t)map.height);
-              w.u16v((uint16_t)map.walls.size());
-              for (auto& wall : map.walls) {
-                w.u16v((uint16_t)wall.x);
-                w.u16v((uint16_t)wall.y);
-                w.u16v((uint16_t)wall.w);
-                w.u16v((uint16_t)wall.h);
-              }
+              Writer w = sim.welcomeFor(*p);
               ws->send(w.view(), uWS::OpCode::BINARY);
               p->dirty = true;
               p->statsDirty = true;

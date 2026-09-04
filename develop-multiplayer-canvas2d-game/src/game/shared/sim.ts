@@ -16,6 +16,7 @@ import {
   ITEMS,
   MAPS,
   MAX_CRAFT_RARITY,
+  clampPveMapId,
   MAX_RARITY,
   MOBS,
   CLOVER_ITEM,
@@ -2131,7 +2132,8 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
     switch (type) {
       case C2S.JOIN: {
         const name = r.str().slice(0, 14) || "flower";
-        const mapId = clamp(r.u8(), 0, MAPS.length - 1);
+        // The Arena field is reserved for duels — a PvE join never lands there.
+        const mapId = clampPveMapId(r.u8());
         const xp = r.u32();
         const p = new Player(this.nextId++);
         p.name = name;
@@ -2276,7 +2278,7 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
       case C2S.CHANGE_MAP: {
         const p = c.player;
         if (!p) return;
-        const mapId = clamp(r.u8(), 0, MAPS.length - 1);
+        const mapId = clampPveMapId(r.u8());
         if (mapId === p.mapId) return;
         const oldWorld = this.worlds[p.mapId];
         oldWorld.mobs = oldWorld.mobs.filter((m) => m.ownerId !== p.id);
