@@ -1270,192 +1270,129 @@ private:
   mutable std::vector<std::vector<const Wall*>> grid_;
 };
 
-// PolygonWallCollider
-struct WallEdge {
-  float x1, y1, x2, y2, nx, ny, len;
-};
+// =====================================================================
+// Shared irregular-wall geometry — C++ port of wallGeometry.ts.
+// ---------------------------------------------------------------------
+// MUST match src/game/shared/wallGeometry.ts step for step: rasterize ->
+// trace contour loops -> drop collinear points -> deterministic noise.
+// The canvas renderer, the TS server, and this C++ server all build from
+// the same algorithm, so visuals and collision can never drift apart.
+//
+// Parity-critical details (do not "simplify"):
+//  - wallNoise() reproduces the JS float64 semantics EXACTLY: the multiply
+//    rounds in float64 and only then truncates to int32 (a wraparound
+//    uint32 multiply gives DIFFERENT values). All shifts are arithmetic.
+//  - The noise walks every simplified loop BACKWARDS (i = n-1 .. 0 toward
+//    the previous vertex), like the client. Forward traversal yields
+//    different bumps.
+//  - Loop discovery starts are sorted ascending (JS Map preserves insertion
+//    order; a hash map would not). Only loop rotation depends on it.
+//  - No cap on noise subdivision steps (every grid cell gets its point).
+//  - Hash inputs and interpolation run in double: identical IEEE-754 ops to
+//    the TS side, so every input to wallNoise() is bit-identical.
+//  - Final edge coordinates are stored as float (the C++ world runs in
+//    float, like the TS Float32Array edge store) — sub-0.001px rounding vs
+//    TS doubles, far inside the 0.01px collision tolerance.
+// =====================================================================
 
-struct AABB {
-  float minX = 1e30f, minY = 1e30f, maxX = -1e30f, maxY = -1e30f;
-};
+/** Noise knobs. MUST match wallGeometry.ts on every implementation. */
+static constexpr double WALL_NOISE_PTS_PER_CELL = 1.0;
+static constexpr double WALL_NOISE_BIG_AMP = 0.4;
+static constexpr double WALL_NOISE_FINE_AMP = 0.2;
+static constexpr double WALL_NOISE_BIG_FREQ = 0.08;
+static constexpr double WALL_NOISE_FINE_FREQ = 1.8;
 
-struct BVHNode {
-  AABB aabb;
-  BVHNode* left = nullptr;
-  BVHNode* right = nullptr;
-  std::vector<WallEdge>* edges = nullptr;
-};
+/**
+ * Deterministic 2D hash noise in [0, 1). Bit-identical to TS wallNoise():
+ * JS computes `(h ^ (h >> 13)) * 1274126177` in float64 (which ROUNDS for
+ * large products) and then applies ToInt32 (low 32 bits) — so this port
+ * multiplies in double and truncates, instead of wrapping in uint32.
+ * `>>` on negative int32 is arithmetic (well-defined since C++20).
+ */
+static double wallNoise(int x, int y) {
+  int64_t h0 = (int64_t)x * 374761393 + (int64_t)y * 668265263;
+  int32_t h = (int32_t)h0;                    // == ToInt32 (exact: |h0| < 2^53)
+  int32_t m = h ^ (h >> 13);                  // arithmetic shift
+  double t = (double)m * 1274126177.0;        // float64 rounding, exactly like JS
+  int32_t h2 = (int32_t)(int64_t)t;           // == ToInt32: low 32 bits
+  h2 = h2 ^ (h2 >> 16);
+  return (double)(h2 & 0x7fffffff) / 2147483647.0;
+}
 
-class PolygonWallCollider {
-public:
-  float wallMaxJitterPx = 0;
-  int bvhNodeCount = 0, bvhLeafCount = 0, bvhMaxDepth = 0;
+/** Max noise displacement in px for a map (both amplitudes stacked). */
+static double computeWallMaxJitter(double mapWidth, double mapHeight, int size = 256) {
+  return (WALL_NOISE_BIG_AMP + WALL_NOISE_FINE_AMP) *
+         std::min(mapWidth / (double)size, mapHeight / (double)size);
+}
 
-  PolygonWallCollider(const std::vector<Wall>& walls, float mapWidth, float mapHeight, int gridResolution = 256)
-    : mapWidth_(mapWidth), mapHeight_(mapHeight)
-  {
-    gridCellSize_ = std::max(mapWidth, mapHeight) / static_cast<float>(gridResolution);
-    gridCols_ = (int)std::ceil(mapWidth / gridCellSize_);
-    gridRows_ = (int)std::ceil(mapHeight / gridCellSize_);
+using WallPoint = std::pair<double, double>;
 
-    auto grid = rasterizeWalls(walls, gridResolution);
-    auto loops = extractContours(grid, gridResolution);
-    for (auto& loop : loops) loop = simplifyLoop(loop);
+/**
+ * Rasterize AABB walls -> trace contour loops -> simplify -> deterministic
+ * noise -> world-space polygons (each a closed loop, implicitly closed).
+ */
+static std::vector<std::vector<WallPoint>> buildWallPolygons(
+    const std::vector<Wall>& walls, double mapWidth, double mapHeight, int size = 256) {
+  double cellW = mapWidth / (double)size;
+  double cellH = mapHeight / (double)size;
 
-    float cellW = mapWidth / gridResolution;
-    float cellH = mapHeight / gridResolution;
-    polygons_.reserve(loops.size());
-    for (auto& loop : loops) {
-      polygons_.push_back(addNoise(loop, cellW, cellH));
-    }
-
-    for (const auto& poly : polygons_) {
-      size_t n = poly.size();
-      for (size_t i = 0; i < n; i++) {
-        float x1 = poly[i].first, y1 = poly[i].second;
-        float x2 = poly[(i + 1) % n].first, y2 = poly[(i + 1) % n].second;
-        float dx = x2 - x1, dy = y2 - y1;
-        float len = std::hypot(dx, dy);
-        if (len < 0.001f) continue;
-        float nx = -dy / len, ny = dx / len;
-        edges_.push_back({x1, y1, x2, y2, nx, ny, len});
+  // 1. Rasterize wall rects into a binary grid.
+  std::vector<uint8_t> grid((size_t)size * (size_t)size, 0);
+  for (const auto& w : walls) {
+    int x0 = std::max(0, (int)std::floor((double)w.x / cellW));
+    int y0 = std::max(0, (int)std::floor((double)w.y / cellH));
+    int x1 = std::min(size - 1, (int)std::floor((double)(w.x + w.w) / cellW));
+    int y1 = std::min(size - 1, (int)std::floor((double)(w.y + w.h) / cellH));
+    for (int y = y0; y <= y1; y++) {
+      for (int x = x0; x <= x1; x++) {
+        grid[(size_t)y * (size_t)size + (size_t)x] = 1;
       }
     }
-
-    bvh_ = buildBVH(edges_);
-    buildSpatialGrid();
-
-    printf("[PolygonWallCollider] Preprocessed %zu walls => %zu edges, %d BVH nodes\n",
-           walls.size(), edges_.size(), bvhNodeCount);
   }
 
-  ~PolygonWallCollider() {
-    freeBVH(bvh_);
-  }
+  // 2. Trace directed boundary edges into closed loops.
+  auto W = [&](int x, int y) -> bool {
+    return x >= 0 && y >= 0 && x < size && y < size &&
+           grid[(size_t)y * (size_t)size + (size_t)x] == 1;
+  };
+  auto keyOf = [&](int x, int y) { return x * (size + 1) + y; };
 
-  std::pair<float, float> collideCircle(float x, float y, float r, CollisionCounter* counter = nullptr) const {
-    if (!bvh_) return {x, y};
-    if (!circleNeedsPreciseCheck(x, y, r)) return {x, y};
-    if (counter) counter->n++;
-    for (int pass = 0; pass < 2; pass++) {
-      bool moved = false;
-      auto candidates = queryBVH(bvh_, x, y, r);
-      for (const auto& e : candidates) {
-        auto result = circleSegmentCollide(x, y, r, e);
-        if (result.has_value()) {
-          moved = true;
-          x = result->first;
-          y = result->second;
-        }
-      }
-      if (!moved) break;
+  using IPoint = std::pair<int, int>;
+  std::map<int, IPoint> edgeMap;  // ordered: iteration == TS sorted starts
+  for (int y = 0; y < size; y++) {
+    for (int x = 0; x < size; x++) {
+      if (!W(x, y)) continue;
+      if (!W(x, y - 1)) edgeMap[keyOf(x, y)] = {x + 1, y};
+      if (!W(x + 1, y)) edgeMap[keyOf(x + 1, y)] = {x + 1, y + 1};
+      if (!W(x, y + 1)) edgeMap[keyOf(x + 1, y + 1)] = {x, y + 1};
+      if (!W(x - 1, y)) edgeMap[keyOf(x, y + 1)] = {x, y};
     }
-    return {x, y};
   }
 
-  bool isFree(float x, float y, float r) const {
-    auto [cx, cy] = collideCircle(x, y, r);
-    return std::abs(cx - x) < 0.01f && std::abs(cy - y) < 0.01f;
-  }
-
-  std::pair<float, float> moveCircle(float x, float y, float dx, float dy, float r, CollisionCounter* counter = nullptr) const {
-    float dist = std::hypot(dx, dy);
-    float maxStep = std::max(4.f, r * 0.45f);
-    int steps = std::max(1, (int)std::ceil(dist / maxStep));
-    float sx = dx / steps, sy = dy / steps;
-    for (int i = 0; i < steps; i++) {
-      x += sx; y += sy;
-      auto [nx, ny] = collideCircle(x, y, r, counter);
-      x = nx; y = ny;
+  std::vector<std::vector<IPoint>> rawLoops;
+  std::unordered_set<int> visited;
+  for (const auto& [startKey, _] : edgeMap) {
+    if (visited.count(startKey)) continue;
+    std::vector<IPoint> loop;
+    int curKey = startKey;
+    int guard = 0;
+    while (!visited.count(curKey) && guard++ < size * size * 4) {
+      visited.insert(curKey);
+      loop.push_back({curKey / (size + 1), curKey % (size + 1)});
+      auto it = edgeMap.find(curKey);
+      if (it == edgeMap.end()) break;
+      curKey = keyOf(it->second.first, it->second.second);
     }
-    return {x, y};
+    if (loop.size() >= 3) rawLoops.push_back(std::move(loop));
   }
 
-  bool circleNeedsPreciseCheck(float x, float y, float r) const {
-    if (spatialGrid_.empty()) return false;
-    int cx = (int)std::floor(x / gridCellSize_);
-    int cy = (int)std::floor(y / gridCellSize_);
-    for (int dy = -1; dy <= 1; dy++) {
-      for (int dx = -1; dx <= 1; dx++) {
-        auto it = spatialGrid_.find(key(cx + dx, cy + dy));
-        if (it == spatialGrid_.end()) continue;
-        for (const auto& e : it->second) {
-          float minX = std::min(e.x1, e.x2), maxX = std::max(e.x1, e.x2);
-          float minY = std::min(e.y1, e.y2), maxY = std::max(e.y1, e.y2);
-          float closestX = std::max(minX, std::min(x, maxX));
-          float closestY = std::max(minY, std::min(y, maxY));
-          float ddx = x - closestX, ddy = y - closestY;
-          if (ddx * ddx + ddy * ddy <= r * r) return true;
-        }
-      }
-    }
-    return false;
-  }
-
-private:
-  static float noise(int x, int y) {
-    int h = x * 374761393 + y * 668265263;
-    h = (h ^ (h >> 13)) * 1274126177;
-    h = h ^ (h >> 16);
-    return (float)(h & 0x7fffffff) / (float)0x7fffffff;
-  }
-
-  std::vector<uint8_t> rasterizeWalls(const std::vector<Wall>& walls, int size) const {
-    std::vector<uint8_t> grid(size * size, 0);
-    float cellW = mapWidth_ / size;
-    float cellH = mapHeight_ / size;
-    for (const auto& w : walls) {
-      int x0 = std::max(0, (int)std::floor(w.x / cellW));
-      int y0 = std::max(0, (int)std::floor(w.y / cellH));
-      int x1 = std::min(size - 1, (int)std::floor((w.x + w.w) / cellW));
-      int y1 = std::min(size - 1, (int)std::floor((w.y + w.h) / cellH));
-      for (int y = y0; y <= y1; y++)
-        for (int x = x0; x <= x1; x++)
-          grid[y * size + x] = 1;
-    }
-    return grid;
-  }
-
-  using Point = std::pair<int, int>;
-  static std::vector<std::vector<Point>> extractContours(const std::vector<uint8_t>& grid, int size) {
-    auto W = [&](int x, int y) -> bool {
-      return x >= 0 && y >= 0 && x < size && y < size && grid[y * size + x] == 1;
-    };
-    auto keyOf = [&](int x, int y) { return x * (size + 1) + y; };
-
-    std::unordered_map<int, Point> edgeMap;
-    for (int y = 0; y < size; y++) {
-      for (int x = 0; x < size; x++) {
-        if (!W(x, y)) continue;
-        if (!W(x, y - 1)) edgeMap[keyOf(x, y)] = {x + 1, y};
-        if (!W(x + 1, y)) edgeMap[keyOf(x + 1, y)] = {x + 1, y + 1};
-        if (!W(x, y + 1)) edgeMap[keyOf(x + 1, y + 1)] = {x, y + 1};
-        if (!W(x - 1, y)) edgeMap[keyOf(x, y + 1)] = {x, y};
-      }
-    }
-
-    std::vector<std::vector<Point>> rawLoops;
-    std::unordered_set<int> visited;
-    for (const auto& [startKey, _] : edgeMap) {
-      if (visited.count(startKey)) continue;
-      std::vector<Point> loop;
-      int curKey = startKey;
-      int guard = 0;
-      while (!visited.count(curKey) && guard++ < size * size * 4) {
-        visited.insert(curKey);
-        loop.push_back({curKey / (size + 1), curKey % (size + 1)});
-        auto it = edgeMap.find(curKey);
-        if (it == edgeMap.end()) break;
-        curKey = keyOf(it->second.first, it->second.second);
-      }
-      if (loop.size() >= 3) rawLoops.push_back(std::move(loop));
-    }
-    return rawLoops;
-  }
-
-  static std::vector<Point> simplifyLoop(const std::vector<Point>& loop) {
+  // 3. Simplify: drop collinear middle points.
+  std::vector<std::vector<IPoint>> simplified;
+  simplified.reserve(rawLoops.size());
+  for (const auto& loop : rawLoops) {
     size_t n = loop.size();
-    std::vector<Point> out;
+    std::vector<IPoint> out;
+    out.reserve(n);
     for (size_t i = 0; i < n; i++) {
       const auto& p0 = loop[(i - 1 + n) % n];
       const auto& p1 = loop[i];
@@ -1464,163 +1401,566 @@ private:
                        (p1.second - p0.second) * (p2.first - p1.first);
       if (!collinear) out.push_back(p1);
     }
-    if (out.size() >= 3) return out;
-    return loop;
+    simplified.push_back(out.size() >= 3 ? std::move(out) : loop);
   }
 
-  std::vector<std::pair<float, float>> addNoise(const std::vector<Point>& loop, float cellW, float cellH) {
-    const float BIG_AMP = 0.4f, FINE_AMP = 0.2f;
-    const float BIG_FREQ = 0.08f, FINE_FREQ = 1.8f;
-    const float PTS_PER_CELL = 1.f;
+  // 4. Deterministic noise, walking each loop backwards (client-identical).
+  std::vector<std::vector<WallPoint>> result;
+  result.reserve(simplified.size());
+  for (const auto& loop : simplified) {
+    std::vector<WallPoint> pts;
+    int n = (int)loop.size();
+    for (int i = n - 1; i >= 0; i--) {
+      const auto& p1 = loop[i];
+      const auto& p2 = loop[(i - 1 + n) % n];
 
-    std::vector<std::pair<float, float>> pts;
-    size_t n = loop.size();
-    for (size_t i = 0; i < n; i++) {
-      int p1x = loop[i].first, p1y = loop[i].second;
-      int p2x = loop[(i + 1) % n].first, p2y = loop[(i + 1) % n].second;
-      bool horizontal = (p1y == p2y);
-      int len = horizontal ? std::abs(p2x - p1x) : std::abs(p2y - p1y);
-      int steps = std::max(1, std::min((int)std::round(len * PTS_PER_CELL), 200));
+      bool horizontal = (p1.second == p2.second);
+      int len = horizontal ? std::abs(p2.first - p1.first) : std::abs(p2.second - p1.second);
+      int steps = std::max(1, (int)std::round((double)len * WALL_NOISE_PTS_PER_CELL));
 
       for (int s = 0; s < steps; s++) {
-        float t = (float)s / (float)steps;
-        float wx = p1x + (p2x - p1x) * t;
-        float wy = p1y + (p2y - p1y) * t;
-        float j = 0;
+        double t = (double)s / (double)steps;
+        double wx = (double)p1.first + (double)(p2.first - p1.first) * t;
+        double wy = (double)p1.second + (double)(p2.second - p1.second) * t;
+
+        double j = 0;
         if (s != 0) {
-          float big = (noise((int)std::floor(wx * BIG_FREQ * 1000), (int)std::floor(wy * BIG_FREQ * 1000)) - 0.5f) * 2.0f * BIG_AMP;
-          float fine = (noise((int)std::floor(wx * FINE_FREQ * 1000), (int)std::floor(wy * FINE_FREQ * 1000)) - 0.5f) * 2.0f * FINE_AMP;
+          // Corners stay sharp (s == 0 keeps j = 0 at every vertex).
+          double big = (wallNoise((int)std::floor(wx * WALL_NOISE_BIG_FREQ * 1000.0),
+                                  (int)std::floor(wy * WALL_NOISE_BIG_FREQ * 1000.0)) -
+                        0.5) *
+                       2.0 * WALL_NOISE_BIG_AMP;
+          double fine = (wallNoise((int)std::floor(wx * WALL_NOISE_FINE_FREQ * 1000.0),
+                                   (int)std::floor(wy * WALL_NOISE_FINE_FREQ * 1000.0)) -
+                         0.5) *
+                        2.0 * WALL_NOISE_FINE_AMP;
           j = big + fine;
         }
+
         pts.push_back({
-          (wx + (horizontal ? 0 : j)) * cellW,
-          (wy + (horizontal ? j : 0)) * cellH
+            (wx + (horizontal ? 0.0 : j)) * cellW,
+            (wy + (horizontal ? j : 0.0)) * cellH,
         });
       }
     }
-    wallMaxJitterPx = std::max(wallMaxJitterPx, (BIG_AMP + FINE_AMP) * std::min(cellW, cellH));
-    return pts;
+    result.push_back(std::move(pts));
   }
+  return result;
+}
 
-  BVHNode* buildBVH(std::vector<WallEdge>& edges) {
-    if (edges.empty()) return nullptr;
-    return buildBVHRecursive(edges, 0, 0, (int)edges.size());
-  }
+// =====================================================================
+// Polygon-based Wall Collider (detailed irregular walls, flat-grid queries)
+// 多边形噪声墙壁碰撞 —— 用于【玩家】精确碰撞（与客户端渲染的凹凸视觉墙一致）
+// =====================================================================
+//
+// C++ port of sim.ts PolygonWallCollider — same algorithm, same comments:
+// 轮廓形状来自上面的 buildWallPolygons（栅格化 → 轮廓提取 → 去共线 →
+// 确定性噪声），与客户端渲染用的是同一套几何，视觉与碰撞天然一致。
+//
+// 碰撞分两条路径：
+//  - 外部（实际上的 100%）：圆 vs 噪声轮廓边推挤，像素级贴合视觉凹凸；
+//  - 内部（安全网）：圆心若落在墙体 AABB 内（正常移动不可能发生：
+//    步长远小于墙厚，出生点也在墙外），用 AABB 最近面弹出，保证出生兜底 /
+//    异常位置永远不会把玩家留在墙里。
+//
+// 相对旧实现（BVH + unordered_map 网格 + 每查询分配）的优化：
+//  - 单层扁平均匀网格（plain vector），边按中点登记，一次查询只扫 ~3×3 格；
+//  - 边数据为 struct-of-arrays，查询零分配、缓存友好；
+//  - 无 BVH 遍历、无候选数组分配；
+//  - moveCircle 步长放宽到一个身位（墙厚 ≥200px、玩家每 tick 只走 ~10px，
+//    不可能穿墙），常规移动每 tick 只有 1 次碰撞查询。
+// 远离墙时一次 collideCircle 只有几次空桶检查；贴墙时也只有十几条边的投影测试。
+//
+// 精度说明：边坐标存 float（C++ 世界是 float 制，与 TS 的 Float32Array 边存
+// 储一致）；网格覆盖范围计算用 double，与 TS 的 float64 范围逐位一致，保证
+// 两种服务器测试完全相同的候选边集合。
 
-  BVHNode* buildBVHRecursive(std::vector<WallEdge>& edges, int start, int end, int depth) {
-    auto* node = new BVHNode();
-    bvhNodeCount++;
-    bvhMaxDepth = std::max(bvhMaxDepth, depth);
+/** 单条有向墙边（仅 getWallsNear 调试接口使用；热路径走下面的类型数组）。 */
+struct WallEdge {
+  float x1, y1, x2, y2, nx, ny, len;
+};
 
-    node->aabb = computeEdgesAABB(edges, start, end);
+class PolygonWallCollider {
+public:
+  /** 有向碰撞边的总数（无墙地图如 Arena 为 0，所有查询直接返回）。 */
+  int edgeCount = 0;
+  /** 噪声最大位移（px），凹凸幅度上界；弹出安全余量用。 */
+  float wallMaxJitterPx = 0;
 
-    const int maxEdgesPerLeaf = 8;
-    int count = end - start;
-    if (count <= maxEdgesPerLeaf) {
-      bvhLeafCount++;
-      node->edges = new std::vector<WallEdge>(edges.begin() + start, edges.begin() + end);
-      return node;
+  PolygonWallCollider(const std::vector<Wall>& walls, float mapWidth, float mapHeight, int gridResolution = 256)
+    : walls_(walls)
+  {
+    auto t0 = std::chrono::steady_clock::now();
+    cell_ = std::max(mapWidth, mapHeight) / (float)gridResolution;
+    cols_ = std::max(1, (int)std::ceil((double)mapWidth / (double)cell_));
+    rows_ = std::max(1, (int)std::ceil((double)mapHeight / (double)cell_));
+    wallMaxJitterPx = (float)computeWallMaxJitter((double)mapWidth, (double)mapHeight, gridResolution);
+
+    // —— 轮廓边：与客户端渲染同一套几何 ——
+    auto polys = buildWallPolygons(walls, (double)mapWidth, (double)mapHeight, gridResolution);
+    size_t cap = 0;
+    for (const auto& poly : polys) cap += poly.size();
+    ex1_.resize(cap); ey1_.resize(cap); ex2_.resize(cap); ey2_.resize(cap);
+    enx_.resize(cap); eny_.resize(cap);
+    eminX_.resize(cap); eminY_.resize(cap); emaxX_.resize(cap); emaxY_.resize(cap);
+
+    int ei = 0;
+    double pad = 0;
+    for (const auto& poly : polys) {
+      size_t m = poly.size();
+      for (size_t i = 0; i < m; i++) {
+        double p1x = poly[i].first, p1y = poly[i].second;
+        double p2x = poly[(i + 1) % m].first, p2y = poly[(i + 1) % m].second;
+        double dx = p2x - p1x;
+        double dy = p2y - p1y;
+        double len = std::hypot(dx, dy);
+        if (len < 0.001) continue;
+        // 外法线：轮廓为逆时针，(-dy, dx) 朝外（只在圆心正压边上时用）。
+        ex1_[ei] = (float)p1x;
+        ey1_[ei] = (float)p1y;
+        ex2_[ei] = (float)p2x;
+        ey2_[ei] = (float)p2y;
+        enx_[ei] = (float)(-dy / len);
+        eny_[ei] = (float)(dx / len);
+        double minX = std::min(p1x, p2x);
+        double minY = std::min(p1y, p2y);
+        double maxX = std::max(p1x, p2x);
+        double maxY = std::max(p1y, p2y);
+        eminX_[ei] = (float)minX;
+        eminY_[ei] = (float)minY;
+        emaxX_[ei] = (float)maxX;
+        emaxY_[ei] = (float)maxY;
+        double halfDiag = std::hypot(maxX - minX, maxY - minY) * 0.5;
+        if (halfDiag > pad) pad = halfDiag;
+        ei++;
+      }
+    }
+    if ((size_t)ei != cap) {
+      // 极罕见：存在退化边，裁掉尾部空位。
+      ex1_.resize(ei); ey1_.resize(ei); ex2_.resize(ei); ey2_.resize(ei);
+      enx_.resize(ei); eny_.resize(ei);
+      eminX_.resize(ei); eminY_.resize(ei); emaxX_.resize(ei); emaxY_.resize(ei);
+    }
+    edgeCount = ei;
+    queryPad_ = pad;
+
+    // —— 边网格：每条边只登记在中点所在格，查询零去重 ——
+    size_t cells = (size_t)cols_ * (size_t)rows_;
+    grid_.resize(cells);
+    int usedCells = 0;
+    for (int k = 0; k < ei; k++) {
+      double mx = ((double)ex1_[k] + (double)ex2_[k]) * 0.5;
+      double my = ((double)ey1_[k] + (double)ey2_[k]) * 0.5;
+      int gx = std::max(0, std::min(cols_ - 1, (int)std::floor(mx / (double)cell_)));
+      int gy = std::max(0, std::min(rows_ - 1, (int)std::floor(my / (double)cell_)));
+      size_t idx = (size_t)gy * (size_t)cols_ + (size_t)gx;
+      if (grid_[idx].empty()) usedCells++;
+      grid_[idx].push_back(k);
     }
 
-    float extentX = node->aabb.maxX - node->aabb.minX;
-    float extentY = node->aabb.maxY - node->aabb.minY;
-    int axis = extentX >= extentY ? 0 : 1;
-
-    std::sort(edges.begin() + start, edges.begin() + end, [axis](const WallEdge& a, const WallEdge& b) {
-      float ca = axis == 0 ? (a.x1 + a.x2) * 0.5f : (a.y1 + a.y2) * 0.5f;
-      float cb = axis == 0 ? (b.x1 + b.x2) * 0.5f : (b.y1 + b.y2) * 0.5f;
-      return ca < cb;
-    });
-
-    int mid = start + count / 2;
-    node->left = buildBVHRecursive(edges, start, mid, depth + 1);
-    node->right = buildBVHRecursive(edges, mid, end, depth + 1);
-    return node;
-  }
-
-  static AABB computeEdgesAABB(const std::vector<WallEdge>& edges, int start, int end) {
-    AABB aabb;
-    for (int i = start; i < end; i++) {
-      const auto& e = edges[i];
-      aabb.minX = std::min(aabb.minX, std::min(e.x1, e.x2));
-      aabb.minY = std::min(aabb.minY, std::min(e.y1, e.y2));
-      aabb.maxX = std::max(aabb.maxX, std::max(e.x1, e.x2));
-      aabb.maxY = std::max(aabb.maxY, std::max(e.y1, e.y2));
-    }
-    return aabb;
-  }
-
-  void buildSpatialGrid() {
-    for (const auto& e : edges_) {
-      int x0 = (int)std::floor(std::min(e.x1, e.x2) / gridCellSize_);
-      int y0 = (int)std::floor(std::min(e.y1, e.y2) / gridCellSize_);
-      int x1 = (int)std::floor(std::max(e.x1, e.x2) / gridCellSize_);
-      int y1 = (int)std::floor(std::max(e.y1, e.y2) / gridCellSize_);
+    // —— 实心网格：圆心内外判定用（墙 rect 登记到覆盖的所有格） ——
+    solidGrid_.resize(cells);
+    for (size_t wi = 0; wi < walls.size(); wi++) {
+      const auto& w = walls[wi];
+      if (w.w <= 0 || w.h <= 0) continue;
+      int x0 = std::max(0, (int)std::floor((double)w.x / (double)cell_));
+      int y0 = std::max(0, (int)std::floor((double)w.y / (double)cell_));
+      int x1 = std::min(cols_ - 1, (int)std::floor((double)(w.x + w.w) / (double)cell_));
+      int y1 = std::min(rows_ - 1, (int)std::floor((double)(w.y + w.h) / (double)cell_));
       for (int gy = y0; gy <= y1; gy++) {
         for (int gx = x0; gx <= x1; gx++) {
-          spatialGrid_[key(gx, gy)].push_back(e);
+          solidGrid_[(size_t)gy * (size_t)cols_ + (size_t)gx].push_back((int)wi);
         }
       }
     }
+
+    double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t0).count();
+    printf("[PolygonWallCollider] %zu walls => %d detail edges, "
+           "%d grid cells, pad %.1fpx. Took %.2fms\n",
+           walls.size(), ei, usedCells, pad, ms);
   }
 
-  static int64_t key(int gx, int gy) { return (int64_t)gx * 100000 + gy; }
+  /**
+   * 圆 vs 细节墙碰撞（主 API，零分配）。
+   *  - 圆心在墙 AABB 内 → AABB 弹出（安全网），再走一遍边解算贴合凹凸；
+   *  - 否则走轮廓边解算：每趟只解“最近穿透边”，最多 3 趟（直边 1 趟、角落 2-3 趟）。
+   *
+   * 边解算是内外侧感知的：以外法线点积判圆心在边的外侧还是内侧
+   * （噪声凸起可伸出 AABB，圆心可能“在 AABB 外却在真墙内”，此时必须沿外法线
+   * 向外推，否则会越推越深）。最近边优先保证角落处约束最紧的边先生效。
+   */
+  std::pair<float, float> collideCircle(float x, float y, float r, CollisionCounter* counter = nullptr) const {
+    if (edgeCount == 0) return {x, y};
+    // 安全网：圆心在实心内（出生兜底/异常位置）—— AABB 弹出后再贴边。
+    // 弹出落点可能仍压着外凸的噪声边，所以必须链式走一遍边解算。
+    if (isInsideSolid(x, y)) {
+      if (counter) counter->n++;
+      auto ejected = ejectFromSolid(x, y, r);
+      x = ejected.first; y = ejected.second;
+      if (isInsideSolid(x, y)) return {x, y};
+      return resolveEdges(x, y, r, nullptr);
+    }
+    return resolveEdges(x, y, r, counter);
+  }
 
-  std::vector<WallEdge> queryBVH(BVHNode* node, float x, float y, float r) const {
-    std::vector<WallEdge> results;
-    if (!node) return results;
-    std::vector<BVHNode*> stack;
-    stack.push_back(node);
-    while (!stack.empty()) {
-      auto* cur = stack.back(); stack.pop_back();
-      if (!circleAABBOverlap(x, y, r, cur->aabb)) continue;
-      if (cur->edges) {
-        results.insert(results.end(), cur->edges->begin(), cur->edges->end());
-      } else {
-        if (cur->left) stack.push_back(cur->left);
-        if (cur->right) stack.push_back(cur->right);
+  /**
+   * 圆是否与墙无交叠（出生点/复活点校验用；首个穿透即返回，无需解算）。
+   * 穿透 < 0.01px 视为无交叠：collideCircle 的解算位置在浮点精度下与边界相切，
+   * 必须容忍这点误差，否则“刚解算完的位置”会被判为卡墙（与旧 AABB 版语义一致）。
+   */
+  bool isFree(float x, float y, float r) const {
+    if (edgeCount == 0) return true;
+    if (isInsideSolid(x, y)) return false;
+    double rr = (double)r + queryPad_;
+    int gx0 = (int)std::floor(((double)x - rr) / (double)cell_);
+    int gy0 = (int)std::floor(((double)y - rr) / (double)cell_);
+    int gx1 = (int)std::floor(((double)x + rr) / (double)cell_);
+    int gy1 = (int)std::floor(((double)y + rr) / (double)cell_);
+    if (gx0 < 0) gx0 = 0;
+    if (gy0 < 0) gy0 = 0;
+    if (gx1 >= cols_) gx1 = cols_ - 1;
+    if (gy1 >= rows_) gy1 = rows_ - 1;
+    double r2 = (double)r * (double)r;
+    for (int gy = gy0; gy <= gy1; gy++) {
+      size_t row = (size_t)gy * (size_t)cols_;
+      for (int gx = gx0; gx <= gx1; gx++) {
+        const auto& bucket = grid_[row + (size_t)gx];
+        if (bucket.empty()) continue;
+        for (int e : bucket) {
+          if (x < eminX_[e] - r || x > emaxX_[e] + r ||
+              y < eminY_[e] - r || y > emaxY_[e] + r) continue;
+          float x1 = ex1_[e];
+          float y1 = ey1_[e];
+          float dx = ex2_[e] - x1;
+          float dy = ey2_[e] - y1;
+          float len2 = dx * dx + dy * dy;
+          float t = len2 == 0 ? 0 : ((x - x1) * dx + (y - y1) * dy) / len2;
+          if (t < 0) t = 0;
+          else if (t > 1) t = 1;
+          float px = x1 + t * dx;
+          float py = y1 + t * dy;
+          float ddx = x - px;
+          float ddy = y - py;
+          double dist2 = (double)ddx * (double)ddx + (double)ddy * (double)ddy;
+          if (dist2 < r2) {
+            // 只有穿透深度 ≥ 0.01px 才算卡墙（sqrt 只在穿透时执行一次）。
+            if ((double)r - std::sqrt(dist2) >= 0.01) return false;
+          }
+        }
       }
     }
-    return results;
+    return true;
   }
 
-  static bool circleAABBOverlap(float cx, float cy, float r, const AABB& aabb) {
-    float closestX = std::max(aabb.minX, std::min(cx, aabb.maxX));
-    float closestY = std::max(aabb.minY, std::min(cy, aabb.maxY));
-    float dx = cx - closestX, dy = cy - closestY;
-    return dx * dx + dy * dy <= r * r;
+  /**
+   * 带步进的圆移动。步长放宽到一个身位：墙厚 ≥200px 而玩家每 tick 只走 ~10px，
+   * 单步 + 两趟推挤即可正确滑墙，不可能穿墙。
+   */
+  std::pair<float, float> moveCircle(
+      float x, float y, float dx, float dy, float r, CollisionCounter* counter = nullptr) const {
+    double dist = std::hypot((double)dx, (double)dy);
+    if (dist < 0.0001) return collideCircle(x, y, r, counter);
+    double maxStep = std::max(8.0, (double)r);
+    int steps = std::max(1, (int)std::ceil(dist / maxStep));
+    if (steps == 1) return collideCircle(x + dx, y + dy, r, counter);
+    float sx = dx / (float)steps;
+    float sy = dy / (float)steps;
+    for (int i = 0; i < steps; i++) {
+      x += sx;
+      y += sy;
+      auto resolved = collideCircle(x, y, r, counter);
+      x = resolved.first; y = resolved.second;
+    }
+    return {x, y};
   }
 
-  static std::optional<std::pair<float, float>> circleSegmentCollide(float cx, float cy, float r, const WallEdge& e) {
-    float dx = e.x2 - e.x1, dy = e.y2 - e.y1;
-    float len2 = dx * dx + dy * dy;
-    float t = len2 == 0 ? 0 : ((cx - e.x1) * dx + (cy - e.y1) * dy) / len2;
-    t = std::max(0.f, std::min(1.f, t));
-    float closestX = e.x1 + t * dx, closestY = e.y1 + t * dy;
-    float dcx = cx - closestX, dcy = cy - closestY;
-    float dist2 = dcx * dcx + dcy * dcy;
-    if (dist2 >= r * r) return std::nullopt;
-    if (dist2 < 0.0001f) return std::make_pair(cx + e.nx * r, cy + e.ny * r);
-    float dist = std::sqrt(dist2);
-    float push = r - dist;
-    return std::make_pair(cx + (dcx / dist) * push, cy + (dcy / dist) * push);
+  /**
+   * 粗筛：圆附近是否存在墙（边格非空，或圆心在实心内）。纯格占用检查，
+   * 不遍历边；保守（偶尔误报）但绝不漏报。
+   */
+  bool circleNeedsPreciseCheck(float x, float y, float r) const {
+    if (edgeCount == 0) return false;
+    if (isInsideSolid(x, y)) return true;
+    double rr = (double)r + queryPad_;
+    int gx0 = (int)std::floor(((double)x - rr) / (double)cell_);
+    int gy0 = (int)std::floor(((double)y - rr) / (double)cell_);
+    int gx1 = (int)std::floor(((double)x + rr) / (double)cell_);
+    int gy1 = (int)std::floor(((double)y + rr) / (double)cell_);
+    if (gx0 < 0) gx0 = 0;
+    if (gy0 < 0) gy0 = 0;
+    if (gx1 >= cols_) gx1 = cols_ - 1;
+    if (gy1 >= rows_) gy1 = rows_ - 1;
+    for (int gy = gy0; gy <= gy1; gy++) {
+      size_t row = (size_t)gy * (size_t)cols_;
+      for (int gx = gx0; gx <= gx1; gx++) {
+        if (!grid_[row + (size_t)gx].empty()) return true;
+      }
+    }
+    return false;
   }
 
-  void freeBVH(BVHNode* node) {
-    if (!node) return;
-    if (node->edges) delete node->edges;
-    freeBVH(node->left);
-    freeBVH(node->right);
-    delete node;
+  /** 兼容接口：返回附近墙边（调试/巡检用；游戏热路径不调用）。 */
+  std::vector<WallEdge> getWallsNear(float x, float y, float radius) const {
+    std::vector<WallEdge> out;
+    if (edgeCount == 0) return out;
+    double rr = (double)radius + queryPad_;
+    int gx0 = (int)std::floor(((double)x - rr) / (double)cell_);
+    int gy0 = (int)std::floor(((double)y - rr) / (double)cell_);
+    int gx1 = (int)std::floor(((double)x + rr) / (double)cell_);
+    int gy1 = (int)std::floor(((double)y + rr) / (double)cell_);
+    if (gx0 < 0) gx0 = 0;
+    if (gy0 < 0) gy0 = 0;
+    if (gx1 >= cols_) gx1 = cols_ - 1;
+    if (gy1 >= rows_) gy1 = rows_ - 1;
+    for (int gy = gy0; gy <= gy1; gy++) {
+      size_t row = (size_t)gy * (size_t)cols_;
+      for (int gx = gx0; gx <= gx1; gx++) {
+        const auto& bucket = grid_[row + (size_t)gx];
+        if (bucket.empty()) continue;
+        for (int e : bucket) {
+          // 每条边只登记在一个格内，无需去重。
+          out.push_back({ex1_[e], ey1_[e], ex2_[e], ey2_[e], enx_[e], eny_[e],
+                         std::hypot(ex2_[e] - ex1_[e], ey2_[e] - ey1_[e])});
+        }
+      }
+    }
+    return out;
   }
 
-  float mapWidth_, mapHeight_;
-  float gridCellSize_;
-  int gridCols_, gridRows_;
-  std::vector<std::vector<std::pair<float, float>>> polygons_;
-  std::vector<WallEdge> edges_;
-  BVHNode* bvh_ = nullptr;
-  std::unordered_map<int64_t, std::vector<WallEdge>> spatialGrid_;
+private:
+  /** 圆心是否落在某面墙的 AABB 内（单格桶扫描，无分配）。 */
+  bool isInsideSolid(float x, float y) const {
+    int gx = (int)std::floor((double)x / (double)cell_);
+    if (gx < 0 || gx >= cols_) return false;
+    int gy = (int)std::floor((double)y / (double)cell_);
+    if (gy < 0 || gy >= rows_) return false;
+    const auto& bucket = solidGrid_[(size_t)gy * (size_t)cols_ + (size_t)gx];
+    if (bucket.empty()) return false;
+    for (int bi : bucket) {
+      const auto& w = walls_[(size_t)bi];
+      if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 把压在实心墙里的圆心弹到开阔处（安全网：只服务出生兜底/异常位置，
+   * 正常游玩中圆心永远在墙外，走不到这里，所以允许用稍贵的搜索换取必达）。
+   * 三级策略：
+   *  1. 直接 AABB 弹出（快路径：孤立矩形一次到位）；
+   *  2. 若仍在墙里（贴合/叠加重叠的墙并集，逐矩形推会来回震荡），
+   *     试所在矩形的 4 个面落点（由近到远，验证必须完全脱离并集且不压噪声边）；
+   *  3. 仍失败则以当前位置为圆心做环形开放空间搜索（最远 ~768px）。
+   * 全部失败时返回原位置（调用方/上层兜底：出生重试、安全点回退）。
+   */
+  std::pair<float, float> ejectFromSolid(float x, float y, float r) const {
+    double rr = (double)r + (double)cell_;
+    int gx0 = (int)std::floor(((double)x - rr) / (double)cell_);
+    int gy0 = (int)std::floor(((double)y - rr) / (double)cell_);
+    int gx1 = (int)std::floor(((double)x + rr) / (double)cell_);
+    int gy1 = (int)std::floor(((double)y + rr) / (double)cell_);
+    if (gx0 < 0) gx0 = 0;
+    if (gy0 < 0) gy0 = 0;
+    if (gx1 >= cols_) gx1 = cols_ - 1;
+    if (gy1 >= rows_) gy1 = rows_ - 1;
+    double r2 = (double)r * (double)r;
+    for (int pass = 0; pass < 2; pass++) {
+      bool moved = false;
+      for (int gy = gy0; gy <= gy1; gy++) {
+        size_t row = (size_t)gy * (size_t)cols_;
+        for (int gx = gx0; gx <= gx1; gx++) {
+          const auto& bucket = solidGrid_[row + (size_t)gx];
+          if (bucket.empty()) continue;
+          for (int bi : bucket) {
+            const auto& w = walls_[(size_t)bi];
+            float closestX = x < w.x ? w.x : x > w.x + w.w ? w.x + w.w : x;
+            float closestY = y < w.y ? w.y : y > w.y + w.h ? w.y + w.h : y;
+            float dx = x - closestX;
+            float dy = y - closestY;
+            double dist2 = (double)dx * (double)dx + (double)dy * (double)dy;
+            if (dist2 >= r2) continue;
+            if (dist2 < 0.0001) {
+              // 圆心在矩形内：沿最近面推出。
+              float left = x - w.x;
+              float right = w.x + w.w - x;
+              float top = y - w.y;
+              float bottom = w.y + w.h - y;
+              float m = std::min(std::min(left, right), std::min(top, bottom));
+              if (m == left) x = w.x - r;
+              else if (m == right) x = w.x + w.w + r;
+              else if (m == top) y = w.y - r;
+              else y = w.y + w.h + r;
+            } else {
+              double d = std::sqrt(dist2);
+              double push = ((double)r - d) / d;
+              x += (float)((double)dx * push);
+              y += (float)((double)dy * push);
+            }
+            moved = true;
+          }
+        }
+      }
+      if (!moved) break;
+    }
+    if (!isInsideSolid(x, y)) return {x, y};
+    // 第 2 级：所在矩形的 4 个面落点，由近到远验证（必须脱离整个并集）。
+    // 落点离面 r + 最大噪声 + 1px：噪声凸起可伸出平面近 19px，
+    // 只留 r 会落在噪声带里被 isFree 否决。
+    int wi = findContainingWall(x, y);
+    if (wi >= 0) {
+      const auto& w = walls_[(size_t)wi];
+      float clr = r + wallMaxJitterPx + 1;
+      float dists[4] = {x - w.x, w.x + w.w - x, y - w.y, w.y + w.h - y};
+      int tried = 0;
+      for (int k = 0; k < 4; k++) {
+        int best = -1;
+        for (int f = 0; f < 4; f++) {
+          if ((tried & (1 << f)) == 0 && (best < 0 || dists[f] < dists[best])) best = f;
+        }
+        tried |= 1 << best;
+        float lx = best == 0 ? w.x - clr : best == 1 ? w.x + w.w + clr : x;
+        float ly = best == 2 ? w.y - clr : best == 3 ? w.y + w.h + clr : y;
+        if (isFree(lx, ly, r)) return {lx, ly};
+      }
+    }
+    // 第 3 级：环形开放空间搜索（旋转偏移避免与轴对齐死角共振，最远 ~768px）。
+    float ox = x;
+    float oy = y;
+    double step = std::max(24.0, (double)r);
+    for (int ring = 1; ring <= 32; ring++) {
+      double rad = (double)ring * step;
+      int n = 8 + ring * 2;
+      double off = (double)ring * 0.7;
+      for (int i = 0; i < n; i++) {
+        double a = off + ((double)i / (double)n) * M_PI * 2;
+        float cx = (float)((double)ox + std::cos(a) * rad);
+        float cy = (float)((double)oy + std::sin(a) * rad);
+        if (isFree(cx, cy, r)) return {cx, cy};
+      }
+    }
+    return {ox, oy};
+  }
+
+  /** 返回包含点的第一面墙的下标（冷路径用），不在墙内返回 -1。 */
+  int findContainingWall(float x, float y) const {
+    int gx = (int)std::floor((double)x / (double)cell_);
+    if (gx < 0 || gx >= cols_) return -1;
+    int gy = (int)std::floor((double)y / (double)cell_);
+    if (gy < 0 || gy >= rows_) return -1;
+    const auto& bucket = solidGrid_[(size_t)gy * (size_t)cols_ + (size_t)gx];
+    if (bucket.empty()) return -1;
+    for (int bi : bucket) {
+      const auto& w = walls_[(size_t)bi];
+      if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return bi;
+    }
+    return -1;
+  }
+
+  /**
+   * 轮廓边推挤：调用者保证圆心不在任何墙 AABB 内。
+   * 每趟扫描覆盖格找最近穿透边并解算，最多 3 趟；无穿透则提前返回。
+   */
+  std::pair<float, float> resolveEdges(float x, float y, float r, CollisionCounter* counter) const {
+    double r2 = (double)r * (double)r;
+    bool counted = false;
+    for (int pass = 0; pass < 3; pass++) {
+      // 每趟按最新圆心重算覆盖格（上一趟的推挤可能跨格）。
+      double rr = (double)r + queryPad_;
+      int gx0 = (int)std::floor(((double)x - rr) / (double)cell_);
+      int gy0 = (int)std::floor(((double)y - rr) / (double)cell_);
+      int gx1 = (int)std::floor(((double)x + rr) / (double)cell_);
+      int gy1 = (int)std::floor(((double)y + rr) / (double)cell_);
+      if (gx0 < 0) gx0 = 0;
+      if (gy0 < 0) gy0 = 0;
+      if (gx1 >= cols_) gx1 = cols_ - 1;
+      if (gy1 >= rows_) gy1 = rows_ - 1;
+      if (gx0 > gx1 || gy0 > gy1) return {x, y};
+      // 找最近穿透边（距离平方比较，全程无 sqrt）。
+      int best = -1;
+      double bestDist2 = r2;
+      float bestPx = 0;
+      float bestPy = 0;
+      for (int gy = gy0; gy <= gy1; gy++) {
+        size_t row = (size_t)gy * (size_t)cols_;
+        for (int gx = gx0; gx <= gx1; gx++) {
+          const auto& bucket = grid_[row + (size_t)gx];
+          if (bucket.empty()) continue;
+          if (!counted) {
+            counted = true;
+            if (counter) counter->n++;
+          }
+          for (int e : bucket) {
+            // AABB 快拒（边包围盒外扩 r）。
+            if (x < eminX_[e] - r || x > emaxX_[e] + r ||
+                y < eminY_[e] - r || y > emaxY_[e] + r) continue;
+            float x1 = ex1_[e];
+            float y1 = ey1_[e];
+            float dx = ex2_[e] - x1;
+            float dy = ey2_[e] - y1;
+            float len2 = dx * dx + dy * dy;
+            float t = len2 == 0 ? 0 : ((x - x1) * dx + (y - y1) * dy) / len2;
+            if (t < 0) t = 0;
+            else if (t > 1) t = 1;
+            float px = x1 + t * dx;
+            float py = y1 + t * dy;
+            float ddx = x - px;
+            float ddy = y - py;
+            double dist2 = (double)ddx * (double)ddx + (double)ddy * (double)ddy;
+            if (dist2 < bestDist2) {
+              bestDist2 = dist2;
+              best = e;
+              bestPx = px;
+              bestPy = py;
+            }
+          }
+        }
+      }
+      if (best < 0) return {x, y};
+      // 解算最近边：内外侧感知推出。
+      if (bestDist2 < 0.0001) {
+        // 圆心正好压在边上：沿外法线推出一个身位。
+        x += enx_[best] * r;
+        y += eny_[best] * r;
+      } else {
+        float ddx = x - bestPx;
+        float ddy = y - bestPy;
+        double d = std::sqrt(bestDist2);
+        // s >= 0 外侧：沿 (圆心-最近点) 推到相切；s < 0 内侧（陷在外凸噪声里）：
+        // 沿外法线推到符号距离 +r，一次到位（小步会 Zeno 收敛失败）。
+        double s = ((double)ddx * (double)enx_[best] + (double)ddy * (double)eny_[best]) / d;
+        if (s >= 0) {
+          double push = ((double)r - d) / d;
+          x += (float)((double)ddx * push);
+          y += (float)((double)ddy * push);
+        } else {
+          double push = (double)r - s * d;
+          x += (float)((double)enx_[best] * push);
+          y += (float)((double)eny_[best] * push);
+        }
+      }
+    }
+    return {x, y};
+  }
+
+  float cell_ = 0;
+  int cols_ = 0;
+  int rows_ = 0;
+  /**
+   * 查询 padding = 所有边 AABB 半对角线的最大值。因为边只登记在中点所在格，
+   * 查询圆必须扩大 queryPad 才能保证不漏边（中点距圆心 ≤ r + 半对角线）。
+   */
+  double queryPad_ = 0;
+  std::vector<Wall> walls_;
+  /** 边网格：grid[gy * cols + gx] = 中点落在此格的边下标数组（空 = 空格）。 */
+  std::vector<std::vector<int>> grid_;
+  /** 实心网格：同一划分下“覆盖此格”的墙体 AABB 下标，只做圆心内外判定。 */
+  std::vector<std::vector<int>> solidGrid_;
+
+  // 边 struct-of-arrays：端点 / 外法线（退化情形用）/ AABB（快速拒绝）。
+  std::vector<float> ex1_, ey1_, ex2_, ey2_;
+  std::vector<float> enx_, eny_;
+  std::vector<float> eminX_, eminY_, emaxX_, emaxY_;
 };
 
 // =====================================================================
@@ -1741,7 +2081,7 @@ public:
     zoneMobCounts.resize(MAP_COUNT);
     for (int i = 0; i < MAP_COUNT; i++) {
       playerWallColliders_.push_back(
-        std::make_unique<ArrayWallCollider>(MAPS[i].walls, MAPS[i].width, MAPS[i].height, 256));
+        std::make_unique<PolygonWallCollider>(MAPS[i].walls, MAPS[i].width, MAPS[i].height, 256));
       wallColliders_.push_back(
         std::make_unique<ArrayWallCollider>(MAPS[i].walls, MAPS[i].width, MAPS[i].height, 256));
     }
@@ -4717,7 +5057,7 @@ public:
   }
 
 private:
-  std::vector<std::unique_ptr<ArrayWallCollider>> playerWallColliders_;
+  std::vector<std::unique_ptr<PolygonWallCollider>> playerWallColliders_;
   std::vector<std::unique_ptr<ArrayWallCollider>> wallColliders_;
 };
 
