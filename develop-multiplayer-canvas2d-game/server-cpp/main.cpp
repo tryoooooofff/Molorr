@@ -991,6 +991,17 @@ struct TalentTreeLevels {
 };
 
 static const int TALENT_MAX_LEVELS[] = {7, 7, 7, 7, 7, 7, 7};
+// TP costs: branch base cost for level 1, multiplied by the level factor.
+static const int TALENT_BASE_COSTS[] = {6, 5, 4, 3, 4, 4, 3};
+static const int TALENT_LEVEL_FACTORS[] = {1, 3, 6, 10, 15, 22, 30};
+
+static int talentCostToLevel(int branch, int level) {
+  if (branch < 0 || branch >= 7) return 0;
+  level = std::max(0, std::min(7, level));
+  int total = 0;
+  for (int i = 0; i < level; i++) total += TALENT_BASE_COSTS[branch] * TALENT_LEVEL_FACTORS[i];
+  return total;
+}
 
 static const float TALENT_BRANCH_EFFECT[] = {0.05f, 0.05f, 0.05f, 0.05f, 0.05f, 0.05f, 0.04f};
 

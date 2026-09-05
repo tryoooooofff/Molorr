@@ -273,18 +273,42 @@ export class TalentSystem {
   // ──────────────────────────────────────────────────
   // Cost 逻辑与 Save / Load
   // ──────────────────────────────────────────────────
-  getCostToLevel(lv: number): number {
-    let t = 0;
-    for (let i = 1; i <= lv; i++) t += 2 * i - 1;
-    return t;
+  /**
+   * TP cost is branch-specific for the first point, then follows the shared
+   * tier multipliers. `lv` is the number of points already invested.
+   */
+  private readonly TALENT_BASE_COSTS: Readonly<Record<string, number>> = {
+    reload: 6,
+    petalDamage: 5,
+    summonDamage: 4,
+    summonHealth: 3,
+    health: 4,
+    speed: 4,
+    bodyDamage: 3,
+  };
+
+  private readonly TALENT_LEVEL_FACTORS = [1, 3, 6, 10, 15, 22, 30];
+
+  getCostToLevel(lv: number, key = "reload"): number {
+    const base = this.TALENT_BASE_COSTS[key] ?? 1;
+    const cappedLevel = Math.max(0, Math.min(lv, this.TALENT_LEVEL_FACTORS.length));
+    let total = 0;
+    for (let i = 0; i < cappedLevel; i++) {
+      total += base * this.TALENT_LEVEL_FACTORS[i];
+    }
+    return total;
   }
 
-  getNextLevelCost(lv: number): number {
-    return lv >= 10 ? 0 : 2 * (lv + 1) - 1;
+  getNextLevelCost(lv: number, key = "reload"): number {
+    if (lv < 0 || lv >= this.TALENT_LEVEL_FACTORS.length) return 0;
+    return (this.TALENT_BASE_COSTS[key] ?? 1) * this.TALENT_LEVEL_FACTORS[lv];
   }
 
   getTotalSpent(): number {
-    return Object.values(this.trees).reduce((s, t) => s + this.getCostToLevel(t.level), 0);
+    return Object.entries(this.trees).reduce(
+      (spent, [key, tree]) => spent + this.getCostToLevel(tree.level, key),
+      0,
+    );
   }
 
   getMaxTalentPointsForLevel(): number {
@@ -381,9 +405,9 @@ export class TalentSystem {
     if (spent <= target) return;
     let refund = spent - target;
     const sorted = Object.entries(this.trees).sort((a, b) => b[1].level - a[1].level);
-    for (const [, tree] of sorted) {
+    for (const [key, tree] of sorted) {
       while (tree.level > 0 && refund > 0) {
-        const cost = this.getCostToLevel(tree.level) - this.getCostToLevel(tree.level - 1);
+        const cost = this.getCostToLevel(tree.level, key) - this.getCostToLevel(tree.level - 1, key);
         if (refund >= cost) {
           tree.level--;
           refund -= cost;
@@ -401,7 +425,7 @@ export class TalentSystem {
     if (requestedLevel !== tree.level + 1) return false;
     if (tree.level >= tree.maxLevel) return false;
 
-    const cost = this.getNextLevelCost(tree.level);
+    const cost = this.getNextLevelCost(tree.level, key);
     if (this.talentPoints < cost) return false;
     if (this.getTotalSpent() + cost > this.getMaxTalentPointsForLevel()) return false;
 
@@ -845,7 +869,7 @@ export class TalentSystem {
     this.drawStrokedText(ctx, `Level: ${tree.level} / ${tree.maxLevel}`, tx + tw / 2, ty + 32, 10, "center", "#b085e6");
     this.drawStrokedText(ctx, tree.desc, tx + tw / 2, ty + 48, 9, "center", "#aaaaaa");
     if (tree.level < tree.maxLevel) {
-      const cost = this.getNextLevelCost(tree.level);
+      const cost = this.getNextLevelCost(tree.level, nd.key);
       this.drawStrokedText(ctx, `Next: ${cost} TP`, tx + tw / 2, ty + 60, 10, "center", "#ffffff");
     } else {
       this.drawStrokedText(ctx, "MAXED", tx + tw / 2, ty + 60, 10, "center", "#ffffff");
