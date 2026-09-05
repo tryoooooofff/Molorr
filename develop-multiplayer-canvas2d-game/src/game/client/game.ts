@@ -8758,7 +8758,9 @@ private bagLayout() {
     // cards can't be mis-tapped and the grid reads as separate cards.
     gap = 14 * scale;
     pad = 12 * scale;
-    cols = isLandscape ? (shortPanel ? 7 : 5) : 4;
+    // Use half as many columns in portrait so each mobile inventory card
+    // gets roughly twice the width of the old four-column layout.
+    cols = isLandscape ? (shortPanel ? 7 : 5) : 2;
   }
 
   const slotSize = Math.max(28 * scale, Math.floor((p.w - pad * 2 - gap * (cols - 1)) / cols));
@@ -11492,7 +11494,10 @@ private bagLayout() {
     const isMobileLayout = this.isMobile || this.w < 640;
     const cols = layout.COLS;
     const totalRows = Math.ceil(MAPS.length / cols);
-    const playBtnY = layout.gridY + totalRows * (layout.BIOME_H + layout.BIOME_GAP) + (isMobileLayout ? 12 : 30);
+    // Keep the Play button visually close to the map choices on phones. The
+    // tighter gap leaves the name field/title stack more breathing room on
+    // short mobile viewports instead of pushing the whole menu upward.
+    const playBtnY = layout.gridY + totalRows * (layout.BIOME_H + layout.BIOME_GAP) + (isMobileLayout ? 4 : 30);
     const playBtnW = isMobileLayout ? Math.min(260, this.w * 0.8) : 180;
     const playBtnH = isMobileLayout ? 48 : 52;
     return { x: this.w / 2 - playBtnW / 2, y: playBtnY, w: playBtnW, h: playBtnH };

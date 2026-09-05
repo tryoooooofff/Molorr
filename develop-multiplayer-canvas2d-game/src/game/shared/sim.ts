@@ -59,6 +59,8 @@ import {
   getSummonBatch,
   getSummonCount,
   levelFromXp,
+  ENEMY_XP_BY_NAME,
+  ENEMY_XP_RARITY_MULTIPLIERS,
   rarityMult,
   rollZoneRarity,
   findSpawnTiles,
@@ -276,8 +278,9 @@ export class Player {
   y = 0;
   vx = 0;
   vy = 0;
-  hp = 120;
-  maxHp = 120;
+  // Level 1 baseline from the new progression curve.
+  hp = 400;
+  maxHp = 400;
   xp = 0;
   level = 1;
   alive = true;
@@ -3607,8 +3610,9 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
 
   private applyLevel(p: Player) {
     const lvl = levelFromXp(p.xp);
-    const maxHp = Math.round(
-      (110 + lvl * 16 + this.healthBonusOf(p)) * p.talentBonuses.healthMult,
+    const basicHp = Math.floor(400 * Math.pow(1.018, lvl - 1));
+    const maxHp = Math.floor(
+      (basicHp + this.healthBonusOf(p)) * p.talentBonuses.healthMult,
     );
     if (maxHp !== p.maxHp) {
       const ratio = p.hp / p.maxHp;
@@ -4796,8 +4800,14 @@ private updateWorld(mapId: number, dt: number, players: Player[]) {
     const killerClient = mob.lastHitBy ? this.clientOf(mob.lastHitBy) : null;
     const killer = killerClient?.player ?? null;
     if (killer) {
-      const xp = Math.round(def.xp * (1 + mob.rarity * 0.9));
-      killer.xp += xp; this.applyLevel(killer); killer.statsDirty = true;
+      const enemyName = def?.name ?? "";
+      const baseXp = ENEMY_XP_BY_NAME[enemyName] ?? def.xp ?? 1;
+      const rarityName = RARITIES[Math.max(0, Math.min(MAX_RARITY, mob.rarity))]?.name ?? "Common";
+      const rarityMultiplier = ENEMY_XP_RARITY_MULTIPLIERS[rarityName] ?? 1;
+      const xp = Math.floor(baseXp * rarityMultiplier * 100) / 100;
+      killer.xp += xp;
+      this.applyLevel(killer);
+      killer.statsDirty = true;
       this.pushEvent(killerClient!, EVT.XP, mob.x, mob.y, xp);
       this.pushEvent(killerClient!, EVT.KILL, mob.x, mob.y, mob.type, EMPTY_ITEM, mob.rarity);
     }
