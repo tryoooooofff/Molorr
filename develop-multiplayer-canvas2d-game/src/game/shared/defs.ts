@@ -1271,15 +1271,47 @@ export function craftChanceFor(r: number): number | undefined {
 }
 
 
+/** Experience required to advance from `level` to the next level. */
+export function xpNeededForLevel(level: number): number {
+  if (level <= 0) return 0;
+  if (level <= 4) return level * 20;
+  if (level <= 8) return 120 + (level - 5) * 40;
+  if (level <= 12) return 240 + (level - 9) * 60;
+  if (level <= 16) return 500 + (level - 13) * 80;
+  if (level <= 20) return 760 + (level - 17) * 120;
+  return Math.floor(1700 * Math.pow(1.092, level - 20));
+}
+
+/** Total XP at the start of a level (the save format stores total XP). */
 export function xpForLevel(level: number): number {
-  return Math.floor(18 * Math.pow(level, 1.7));
+  let total = 0;
+  for (let current = 1; current < Math.max(1, level); current++) {
+    total += xpNeededForLevel(current);
+  }
+  return total;
 }
 
 export function levelFromXp(xp: number): number {
-  let lvl = 1;
-  while (lvl < 90 && xp >= xpForLevel(lvl + 1)) lvl++;
-  return lvl;
+  let level = 1;
+  // Keep the guard against corrupt saves while allowing the intended curve to
+  // continue well beyond the old level-90 cap.
+  while (level < 10000 && xp >= xpForLevel(level + 1)) level++;
+  return level;
 }
+
+/** Basic enemy XP before rarity scaling. */
+export const ENEMY_XP_BY_NAME: Readonly<Record<string, number>> = {
+  "Worker Ant": 2, Scorpion: 5, Beetle: 7, "Soldier Ant": 3, Spider: 3,
+  Crab: 7, Cactus: 12, QueenBee: 30, Bee: 5, "Queen Ant": 10,
+  Ladybug: 3, Hive: 230, Hornet: 12, Scallop: 5, Starfish: 4,
+  Jellyfish: 5, CrabHole: 130, Anthill: 60, Sandstorm: 8, Rock: 15,
+};
+
+export const ENEMY_XP_RARITY_MULTIPLIERS: Readonly<Record<string, number>> = {
+  Common: 1, Unusual: 5.43, Rare: 28.64, Epic: 163.27,
+  Legendary: 1443.13, Mythic: 10884.35, Ultra: 156666.67,
+  Super: 1925438.78, Omega: 27619047.62, Eternal: 1226258503.40,
+};
 
 // =====================================================================
 // Mob-rarity drop table. The row is selected by the killed mob's rarity, then

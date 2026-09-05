@@ -378,14 +378,50 @@ static float craftChanceFor(int r) {
   return RARITIES[r].craftChance;
 }
 
-static int xpForLevel(int level) {
-  return (int)std::floor(18 * std::pow(level, 1.7));
+static uint64_t xpNeededForLevel(int level) {
+  if (level <= 0) return 0;
+  if (level <= 4) return (uint64_t)level * 20;
+  if (level <= 8) return 120 + (uint64_t)(level - 5) * 40;
+  if (level <= 12) return 240 + (uint64_t)(level - 9) * 60;
+  if (level <= 16) return 500 + (uint64_t)(level - 13) * 80;
+  if (level <= 20) return 760 + (uint64_t)(level - 17) * 120;
+  return (uint64_t)std::floor(1700.0 * std::pow(1.092, level - 20));
+}
+
+// Saves contain total XP; each level's threshold is cumulative.
+static uint64_t xpForLevel(int level) {
+  uint64_t total = 0;
+  for (int current = 1; current < std::max(1, level); current++) {
+    total += xpNeededForLevel(current);
+  }
+  return total;
 }
 
 static int levelFromXp(uint32_t xp) {
   int lvl = 1;
-  while (lvl < 90 && xp >= (uint32_t)xpForLevel(lvl + 1)) lvl++;
+  while (lvl < 10000 && (uint64_t)xp >= xpForLevel(lvl + 1)) lvl++;
   return lvl;
+}
+
+static float enemyBaseXp(const std::string& name, float fallback) {
+  static const std::unordered_map<std::string, float> XP = {
+    {"Worker Ant", 2}, {"Scorpion", 5}, {"Beetle", 7}, {"Soldier Ant", 3},
+    {"Spider", 3}, {"Crab", 7}, {"Cactus", 12}, {"QueenBee", 30},
+    {"Bee", 5}, {"Queen Ant", 10}, {"Ladybug", 3}, {"Hive", 230},
+    {"Hornet", 12}, {"Scallop", 5}, {"Starfish", 4}, {"Jellyfish", 5},
+    {"CrabHole", 130}, {"Anthill", 60}, {"Sandstorm", 8}, {"Rock", 15},
+  };
+  auto it = XP.find(name);
+  return it == XP.end() ? fallback : it->second;
+}
+
+static float enemyXpRarityMult(int rarity) {
+  static const float MULTS[] = {
+    1.f, 5.43f, 28.64f, 163.27f, 1443.13f, 10884.35f,
+    156666.67f, 1925438.78f, 27619047.62f, 1226258503.40f, 1.f,
+  };
+  int idx = std::max(0, std::min(MAX_RARITY, rarity));
+  return MULTS[idx];
 }
 
 // =====================================================================
@@ -955,6 +991,17 @@ struct TalentTreeLevels {
 };
 
 static const int TALENT_MAX_LEVELS[] = {7, 7, 7, 7, 7, 7, 7};
+// TP costs: branch base cost for level 1, multiplied by the level factor.
+static const int TALENT_BASE_COSTS[] = {6, 5, 4, 3, 4, 4, 3};
+static const int TALENT_LEVEL_FACTORS[] = {1, 3, 6, 10, 15, 22, 30};
+
+static int talentCostToLevel(int branch, int level) {
+  if (branch < 0 || branch >= 7) return 0;
+  level = std::max(0, std::min(7, level));
+  int total = 0;
+  for (int i = 0; i < level; i++) total += TALENT_BASE_COSTS[branch] * TALENT_LEVEL_FACTORS[i];
+  return total;
+}
 
 static const float TALENT_BRANCH_EFFECT[] = {0.05f, 0.05f, 0.05f, 0.05f, 0.05f, 0.05f, 0.04f};
 
@@ -1129,7 +1176,7 @@ struct Player {
   std::string name = "flower";
   uint8_t mapId = 0;
   float x = 1600, y = 1600, vx = 0, vy = 0;
-  float hp = 120, maxHp = 120;
+  float hp = 400, maxHp = 400;
   uint32_t xp = 0;
   uint16_t level = 1;
   bool alive = true;
@@ -2564,7 +2611,8 @@ public:
       p.talentBonuses = TalentBonuses{};
     }
     int lvl = levelFromXp(p.xp);
-    float maxHp = std::round((110 + lvl * 16 + healthBonusOf(p)) * p.talentBonuses.healthMult);
+    float basicHp = std::floor(400.0f * std::pow(1.018f, lvl - 1));
+    float maxHp = std::floor((basicHp + healthBonusOf(p)) * p.talentBonuses.healthMult);
     if ((int)maxHp != (int)p.maxHp) {
       float ratio = p.hp / p.maxHp;
       p.maxHp = maxHp;
@@ -3071,7 +3119,11 @@ public:
     if (mob.lastHitBy) {
       Player* killer = get(mob.lastHitBy);
       if (killer) {
-        int xp = std::round(def.xp * (1 + mob.rarity * 0.9f));
+        const float baseXp = enemyBaseXp(def.name, (float)def.xp);
+        const float calculatedXp = baseXp * enemyXpRarityMult(mob.rarity);
+        // The wire/save format stores XP as uint32, so preserve the exact
+        // curve's fractional calculation by flooring at the protocol boundary.
+        const uint32_t xp = (uint32_t)std::floor(calculatedXp);
         killer->xp += xp;
         applyLevel(*killer);
         killer->statsDirty = true;
