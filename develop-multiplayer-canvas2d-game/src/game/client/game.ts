@@ -56,7 +56,7 @@ import {
 } from "../shared/defs";
 import { C2S, ENT, EVT, LOADOUT_OP, Reader, S2C, SWAP_ROW_ALL, TEAM, Writer } from "../shared/protocol";
 import type { Cell, LoadoutConfig } from "../shared/sim";
-import { PLAYER_RADIUS, ArrayWallCollider, PolygonWallCollider } from "../shared/sim";
+
 import { createTransport, Transport } from "./transport";
 import {
   button,
@@ -3046,6 +3046,13 @@ class ChangelogPanel {
   /** Important notice always pinned at the top of the changelog. Empty = hidden. */
   importantNotice = "The bug on loadout seems to be fixed, but still need testing, which means it is still not safe to put your valuable stuff into loadout";
   logs: ChangelogLogGroup[] = [
+      {
+      date: "5th September 2026",
+      entries: [
+        "- Your flower now only uses the position sent by the server, still moving smoothly",
+        "- Removed the client-side wall push, so the server fully owns where you stand",
+      ]
+    },
       {
       date: "13th October 2026",
       entries: [
@@ -6432,11 +6439,11 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private mobDamageLeaderboard: { maxHp: number; entries: { id: number; name: string; dmg: number }[] } | null = null;
 
   /**
-   * Server-authoritative movement: the client no longer predicts the local
-   * player's position. INPUT packets only carry the input direction/flags and
-   * the server integrates the position (wall collision included), so the
-   * player and its orbiting petals always share exactly the server's state —
-   * petals can no longer spin around or trail behind the rendered flower.
+   * Server-authoritative movement: the owning player renders ONLY from
+   * positions sent by the server. INPUT packets carry just the input
+   * direction/flags, the server integrates the position (wall collision
+   * included), and the client merely lerps between those server snapshots —
+   * no position prediction and no client-side collision of its own.
    */
   /** Maps a petal entity id to the player that owns it (from snapshot order). */
   private petalOwners = new Map<number, number>();
@@ -6498,11 +6505,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private worldW = 3200;
   private worldH = 3200;
   private walls: Wall[] = [];
-  private wallCollider: PolygonWallCollider | null = null;
-  // Client-side wall safety net (mirrors server pushPlayerOutOfWall, with performance saving)
-  private clientLastSafeX = 0;
-  private clientLastSafeY = 0;
-  private readonly CLIENT_PUSH_THRESHOLD = 6;
+  // NOTE: no client-side wall collider. The server owns wall collision and the
+  // owning player renders at exactly the server-sent position, so the client
+  // keeps no collider or last-safe fallback of its own.
   private ents = new Map<number, Ent>();
   private snapshotSequence = 0;
   private camX = 0;
@@ -7369,7 +7374,6 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.worldW = arena.width;
     this.worldH = arena.height;
     this.walls = walls.map((w) => ({ ...w }));
-    this.wallCollider = new PolygonWallCollider(this.walls, this.worldW, this.worldH, 256);
     this.resetWorldCaches();
   }
 
@@ -7388,7 +7392,6 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.worldW = map.width;
     this.worldH = map.height;
     this.walls = map.walls.map((w) => ({ ...w }));
-    this.wallCollider = new PolygonWallCollider(this.walls, this.worldW, this.worldH, 256);
     this.resetWorldCaches();
     this.saveDirty = true;
   }
@@ -7533,7 +7536,6 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       for (let i = 0; i < wallCount; i++) {
         this.walls.push({ x: r.u16(), y: r.u16(), w: r.u16(), h: r.u16() });
       }
-      this.wallCollider = new PolygonWallCollider(this.walls, this.worldW, this.worldH, 256);
       this.ents.clear();
       this.petalOwners.clear();
       this.roseParticles.length = 0;
@@ -7637,11 +7639,12 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         if (kind === ENT.PETAL) {
           this.petalOwners.set(id, currentPlayerId);
         }
-        // Every entity — including the self player — follows the server's
-        // position samples. The spring pass below interpolates the two latest
-        // samples at render rate, so the network step never teleports the
-        // flower and the petal orbit (computed on the server around this same
-        // position) stays locked onto the rendered body.
+        // Every entity — including the self player — follows ONLY the server's
+        // position samples. The lerp + spring pass below interpolates the two
+        // latest samples at render rate, so the network step never teleports
+        // the flower and the petal orbit (computed on the server around this
+        // same position) stays locked onto the rendered body. No prediction,
+        // no client-side collision: the source is always the server snapshot.
         e.tx = x;
         e.ty = y;
         // Mobs turn smoothly toward the interpolated snapshot facing in the
@@ -8229,10 +8232,11 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       // interpolation between the two latest server samples. Without this the
       // spring has to absorb each 50 ms step as a fast catch-up, which reads
       // as a quick shake on fast-moving entities (most visibly the petals
-      // orbiting the flower). The self player is sampled exactly like every
-      // other entity: the server owns its position, and sampling it with the
-      // same fixed delay as the petal samples keeps the orbit locked onto the
-      // rendered body instead of spinning around it or trailing behind.
+      // orbiting the flower). The self player lerps exactly like every other
+      // entity — its only position source is the server snapshot stream, and
+      // sampling it with the same fixed delay as the petal samples keeps the
+      // orbit locked onto the rendered body instead of spinning around it or
+      // trailing behind.
       {
         const isMob = e.kind === ENT.MOB;
         const sampled = this.sampleServerPos(e, this.time, isMob);
@@ -8281,40 +8285,10 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       else if (this.time - e.seen > 0.6) this.ents.delete(e.id);
     }
 
-    // ---- 玩家与墙壁的精确碰撞 (client safety net, performance saving) ----
-    // Mirrors server pushPlayerOutOfWall: broadphase skip when far, lastSafe fallback for deep penetration.
-    // The server already resolves wall collision for the self player; this is
-    // only a guard against rare one-frame penetrations in the snapshot stream.
-    if (this.wallCollider) {
-      const me = this.ents.get(this.selfId);
-      if (me) {
-        const r = PLAYER_RADIUS; // 客户端不追踪 soil radius bonus，使用基础半径
-        // Performance: O(1) broadphase — skip collideCircle when far from any wall (99% of frames)
-        if (!this.wallCollider.circleNeedsPreciseCheck(me.x, me.y, r)) {
-          this.clientLastSafeX = me.x;
-          this.clientLastSafeY = me.y;
-        } else {
-          const [nx, ny] = this.wallCollider.collideCircle(me.x, me.y, r);
-          const disp = Math.abs(nx - me.x) + Math.abs(ny - me.y);
-          if (disp < this.CLIENT_PUSH_THRESHOLD) {
-            me.x = nx;
-            me.y = ny;
-            this.clientLastSafeX = me.x;
-            this.clientLastSafeY = me.y;
-          } else {
-            // Deep wall penetration — fallback to last safe (prevents visible wall entry)
-            if (this.clientLastSafeX !== 0 || this.clientLastSafeY !== 0) {
-              me.x = this.clientLastSafeX;
-              me.y = this.clientLastSafeY;
-            } else {
-              // No safe yet, keep server-corrected position
-              me.x = nx;
-              me.y = ny;
-            }
-          }
-        }
-      }
-    }
+    // NOTE: no client-side wall correction for the owning player. The server
+    // owns wall collision (see sim.ts pushPlayerOutOfWall / updatePlayer) and
+    // the flower above already renders at exactly the server-sent position, so
+    // any client push-out here would move it away from the authoritative spot.
 
 
     // ---- 视野扫描：最近的 Ultra+ 敌对生物（顶部血条）与最近的 Super+ 敌对生物（敌人面板） ----
@@ -8446,8 +8420,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   }
 
   /**
-   * Local player input vector used both by the client-authoritative position
-   * simulator and by the INPUT packet. Mirrors the previous sendInput logic.
+   * Local player input vector sent in the INPUT packet. The client never
+   * integrates a position from it — the server owns movement, and the flower
+   * only renders the server-sent snapshot position.
    */
   private computeInputVector(): { dx: number; dy: number } {
     if (this.afkPending) return { dx: 0, dy: 0 };
