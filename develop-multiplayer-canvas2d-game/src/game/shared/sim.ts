@@ -68,6 +68,7 @@ import {
   petalHitRadius,
 } from "./defs";
 import { C2S, ENT, EVT, LOADOUT_OP, Reader, S2C, SWAP_ROW_ALL, TALENT_KEYS, TALENT_MAX_LEVELS, TEAM, Writer } from "./protocol";
+import { buildWallPolygons, wallMaxJitterPx as computeWallMaxJitter } from "./wallGeometry";
 
 // =====================================================================
 // Squad system
@@ -1157,364 +1158,487 @@ class SpatialGrid<T> {
 }
 
 // =====================================================================
-// Polygon-based Wall Collider with BVH (O(log n) queries)
-// 多边形噪声墙壁 + 层次包围盒碰撞系统
-// —— 用于【玩家】精确碰撞（与客户端渲染的凹凸视觉墙一致）
+// Polygon-based Wall Collider (detailed irregular walls, flat-grid queries)
+// 多边形噪声墙壁碰撞 —— 用于【玩家】精确碰撞（与客户端渲染的凹凸视觉墙一致）
 // =====================================================================
+//
+// 轮廓形状来自共享模块 wallGeometry.buildWallPolygons（栅格化 → 轮廓提取 →
+// 去共线 → 确定性噪声），与客户端渲染用的是同一套几何，视觉与碰撞天然一致。
+//
+// 碰撞分两条路径：
+//  - 外部（实际上的 100%）：圆 vs 噪声轮廓边推挤，像素级贴合视觉凹凸；
+//  - 内部（安全网）：圆心若落在墙体 AABB 内（正常移动不可能发生：
+//    步长远小于墙厚，出生点也在墙外），用 AABB 最近面弹出，保证出生兜底 /
+//    异常位置永远不会把玩家留在墙里。
+//
+// 相对旧实现（BVH + Map<string, cell> + 每查询分配）的优化：
+//  - 单层扁平均匀网格（plain array），边按中点登记，一次查询只扫 ~3×3 格；
+//  - 边数据为 struct-of-arrays Float32Array，查询零分配、缓存友好；
+//  - 无 BVH 遍历、无字符串 key、无候选数组/Set 分配；
+//  - moveCircle 步长放宽到一个身位（墙厚 ≥200px、玩家每 tick 只走 ~10px，
+//    不可能穿墙），常规移动每 tick 只有 1 次碰撞查询。
+// 远离墙时一次 collideCircle 只有几次空桶检查；贴墙时也只有十几条边的投影测试。
 
-interface WallEdge {
+/** 单条有向墙边（仅 getWallsNear 调试接口使用；热路径走下面的类型数组）。 */
+export interface WallEdge {
   x1: number; y1: number;
   x2: number; y2: number;
-  nx: number; ny: number;   // 预计算外法线（单位向量）
+  nx: number; ny: number;
   len: number;
 }
 
-interface AABB {
-  minX: number; minY: number;
-  maxX: number; maxY: number;
-}
-
-interface BVHNode {
-  aabb: AABB;
-  left: BVHNode | null;
-  right: BVHNode | null;
-  edges: WallEdge[] | null;  // 仅叶子节点存储边
-}
-
-interface GridCell {
-  edges: WallEdge[];
-}
-
 export class PolygonWallCollider {
-  private polygons: { x: number; y: number }[][] = [];
-  private edges: WallEdge[] = [];
-  private bvh: BVHNode | null = null;
-  private spatialGrid: Map<string, GridCell> = new Map();
-  private gridCellSize: number;
-  private mapWidth: number;
-  private mapHeight: number;
-  private gridCols: number;
-  private gridRows: number;
+  /** 有向碰撞边的总数（无墙地图如 Arena 为 0，所有查询直接返回）。 */
+  readonly edgeCount: number;
+  /** 噪声最大位移（px），凹凸幅度上界；保留供调试与兼容。 */
   wallMaxJitterPx = 0;
 
-  // 调试统计
-  bvhNodeCount = 0;
-  bvhLeafCount = 0;
-  bvhMaxDepth = 0;
+  private readonly cell: number;
+  private readonly cols: number;
+  private readonly rows: number;
+  /** 边网格：grid[gy * cols + gx] = 中点落在此格的边下标数组（null = 空格）。 */
+  private readonly grid: (number[] | null)[];
+  /** 实心网格：同一划分下“覆盖此格”的墙体 AABB 下标（null = 空格），只做圆心内外判定。 */
+  private readonly solidGrid: (number[] | null)[];
+  /**
+   * 查询 padding = 所有边 AABB 半对角线的最大值。因为边只登记在中点所在格，
+   * 查询圆必须扩大 queryPad 才能保证不漏边（中点距圆心 ≤ r + 半对角线）。
+   */
+  private readonly queryPad: number;
+  private readonly walls: Wall[];
 
-  constructor(
-    walls: Wall[],
-    mapWidth: number,
-    mapHeight: number,
-    gridResolution: number = 256,
-    private maxEdgesPerLeaf: number = 8
-  ) {
-    this.mapWidth = mapWidth;
-    this.mapHeight = mapHeight;
-    this.gridCellSize = Math.max(mapWidth, mapHeight) / gridResolution;
-    this.gridCols = Math.ceil(mapWidth / this.gridCellSize);
-    this.gridRows = Math.ceil(mapHeight / this.gridCellSize);
+  // 边 struct-of-arrays：端点 / 外法线（退化情形用）/ AABB（快速拒绝）。
+  private ex1: Float32Array;
+  private ey1: Float32Array;
+  private ex2: Float32Array;
+  private ey2: Float32Array;
+  private enx: Float32Array;
+  private eny: Float32Array;
+  private eminX: Float32Array;
+  private eminY: Float32Array;
+  private emaxX: Float32Array;
+  private emaxY: Float32Array;
 
-    // =========================
-    // 预处理阶段（服务器启动一次性完成）
-    // =========================
+  constructor(walls: Wall[], mapWidth: number, mapHeight: number, gridResolution = 256) {
     const t0 = performance.now();
+    this.walls = walls;
+    this.cell = Math.max(mapWidth, mapHeight) / gridResolution;
+    this.cols = Math.max(1, Math.ceil(mapWidth / this.cell));
+    this.rows = Math.max(1, Math.ceil(mapHeight / this.cell));
+    this.wallMaxJitterPx = computeWallMaxJitter(mapWidth, mapHeight, gridResolution);
 
-    // 1. AABB 墙壁栅格化为二进制网格
-    const grid = this.rasterizeWalls(walls, gridResolution);
+    // —— 轮廓边：与客户端渲染同一套几何 ——
+    const polys = buildWallPolygons(walls, mapWidth, mapHeight, gridResolution);
+    let cap = 0;
+    for (const poly of polys) cap += poly.length;
+    this.ex1 = new Float32Array(cap);
+    this.ey1 = new Float32Array(cap);
+    this.ex2 = new Float32Array(cap);
+    this.ey2 = new Float32Array(cap);
+    this.enx = new Float32Array(cap);
+    this.eny = new Float32Array(cap);
+    this.eminX = new Float32Array(cap);
+    this.eminY = new Float32Array(cap);
+    this.emaxX = new Float32Array(cap);
+    this.emaxY = new Float32Array(cap);
 
-    // 2. 提取有向轮廓边（逆时针闭合多边形）
-    const loops = this.extractContours(grid, gridResolution);
-
-    // 3. 简化：剔除共线中间点
-    const simplified = loops.map(l => this.simplifyLoop(l));
-
-    // 4. 加噪声并转换到世界坐标
-    const cellW = mapWidth / gridResolution;
-    const cellH = mapHeight / gridResolution;
-    this.polygons = simplified.map((loop, idx) =>
-      this.addNoise(loop, idx, cellW, cellH)
-    );
-
-    // 5. 构建带预计算法线的边表
-    for (const poly of this.polygons) {
-      const n = poly.length;
-      for (let i = 0; i < n; i++) {
+    let ei = 0;
+    let pad = 0;
+    for (const poly of polys) {
+      const m = poly.length;
+      for (let i = 0; i < m; i++) {
         const p1 = poly[i];
-        const p2 = poly[(i + 1) % n];
+        const p2 = poly[(i + 1) % m];
         const dx = p2.x - p1.x;
         const dy = p2.y - p1.y;
         const len = Math.hypot(dx, dy);
         if (len < 0.001) continue;
-        // 外法线：轮廓为逆时针，(-dy, dx) 朝外
-        const nx = -dy / len;
-        const ny = dx / len;
-        this.edges.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, nx, ny, len });
+        // 外法线：轮廓为逆时针，(-dy, dx) 朝外（只在圆心正压边上时用）。
+        this.ex1[ei] = p1.x;
+        this.ey1[ei] = p1.y;
+        this.ex2[ei] = p2.x;
+        this.ey2[ei] = p2.y;
+        this.enx[ei] = -dy / len;
+        this.eny[ei] = dx / len;
+        const minX = Math.min(p1.x, p2.x);
+        const minY = Math.min(p1.y, p2.y);
+        const maxX = Math.max(p1.x, p2.x);
+        const maxY = Math.max(p1.y, p2.y);
+        this.eminX[ei] = minX;
+        this.eminY[ei] = minY;
+        this.emaxX[ei] = maxX;
+        this.emaxY[ei] = maxY;
+        const halfDiag = Math.hypot(maxX - minX, maxY - minY) * 0.5;
+        if (halfDiag > pad) pad = halfDiag;
+        ei++;
       }
     }
+    if (ei !== cap) {
+      // 极罕见：存在退化边，裁掉尾部空位。
+      this.ex1 = this.ex1.slice(0, ei);
+      this.ey1 = this.ey1.slice(0, ei);
+      this.ex2 = this.ex2.slice(0, ei);
+      this.ey2 = this.ey2.slice(0, ei);
+      this.enx = this.enx.slice(0, ei);
+      this.eny = this.eny.slice(0, ei);
+      this.eminX = this.eminX.slice(0, ei);
+      this.eminY = this.eminY.slice(0, ei);
+      this.emaxX = this.emaxX.slice(0, ei);
+      this.emaxY = this.emaxY.slice(0, ei);
+    }
+    this.edgeCount = ei;
+    this.queryPad = pad;
 
-    // 6. 构建 BVH 层次包围盒
-    this.bvh = this.buildBVH(this.edges);
-
-    // 7. 构建空间网格（作为 broad-phase 备选/兼容层）
-    this.buildSpatialGrid();
-
-    const t1 = performance.now();
-    console.log(
-      `[PolygonWallCollider] Preprocessed ${walls.length} walls => ` +
-      `${this.edges.length} edges, ${this.bvhNodeCount} BVH nodes ` +
-      `(${this.bvhLeafCount} leaves, depth ${this.bvhMaxDepth}), ` +
-      `${this.spatialGrid.size} grid cells. ` +
-      `Took ${(t1 - t0).toFixed(2)}ms`
-    );
-  }
-
-  // 1. 栅格化：将 AABB 墙壁填充到二进制网格
-  private rasterizeWalls(walls: Wall[], size: number): Uint8Array {
-    const grid = new Uint8Array(size * size);
-    const cellW = this.mapWidth / size;
-    const cellH = this.mapHeight / size;
-
-    for (const w of walls) {
-      const x0 = Math.max(0, Math.floor(w.x / cellW));
-      const y0 = Math.max(0, Math.floor(w.y / cellH));
-      const x1 = Math.min(size - 1, Math.floor((w.x + w.w) / cellW));
-      const y1 = Math.min(size - 1, Math.floor((w.y + w.h) / cellH));
-      for (let y = y0; y <= y1; y++) {
-        for (let x = x0; x <= x1; x++) {
-          grid[y * size + x] = 1;
-        }
+    // —— 边网格：每条边只登记在中点所在格，查询零去重 ——
+    const cells = this.cols * this.rows;
+    this.grid = new Array(cells).fill(null);
+    let usedCells = 0;
+    for (let k = 0; k < ei; k++) {
+      const mx = (this.ex1[k] + this.ex2[k]) * 0.5;
+      const my = (this.ey1[k] + this.ey2[k]) * 0.5;
+      const gx = Math.max(0, Math.min(this.cols - 1, Math.floor(mx / this.cell)));
+      const gy = Math.max(0, Math.min(this.rows - 1, Math.floor(my / this.cell)));
+      const idx = gy * this.cols + gx;
+      let bucket = this.grid[idx];
+      if (!bucket) {
+        bucket = [];
+        this.grid[idx] = bucket;
+        usedCells++;
       }
-    }
-    return grid;
-  }
-
-  // 2. 轮廓提取：栅格 → 有向边 → 闭合多边形
-  private extractContours(grid: Uint8Array, size: number): { x: number; y: number }[][] {
-    const W = (x: number, y: number) =>
-      x >= 0 && y >= 0 && x < size && y < size && grid[y * size + x] === 1;
-
-    const edgeMap = new Map<number, { x: number; y: number }>();
-    const keyOf = (x: number, y: number) => x * (size + 1) + y;
-
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        if (!W(x, y)) continue;
-        if (!W(x, y - 1)) edgeMap.set(keyOf(x, y), { x: x + 1, y });
-        if (!W(x + 1, y)) edgeMap.set(keyOf(x + 1, y), { x: x + 1, y: y + 1 });
-        if (!W(x, y + 1)) edgeMap.set(keyOf(x + 1, y + 1), { x, y: y + 1 });
-        if (!W(x - 1, y)) edgeMap.set(keyOf(x, y + 1), { x, y });
-      }
+      bucket.push(k);
     }
 
-    const rawLoops: { x: number; y: number }[][] = [];
-    const visited = new Set<number>();
-
-    for (const startKey of edgeMap.keys()) {
-      if (visited.has(startKey)) continue;
-      const loop: { x: number; y: number }[] = [];
-      let curKey = startKey;
-      let guard = 0;
-      while (!visited.has(curKey) && guard++ < size * size * 4) {
-        visited.add(curKey);
-        loop.push({ x: Math.floor(curKey / (size + 1)), y: curKey % (size + 1) });
-        const next = edgeMap.get(curKey);
-        if (!next) break;
-        curKey = keyOf(next.x, next.y);
-      }
-      if (loop.length >= 3) rawLoops.push(loop);
-    }
-    return rawLoops;
-  }
-
-  // 3. 简化：剔除共线中间点
-  private simplifyLoop(loop: { x: number; y: number }[]): { x: number; y: number }[] {
-    const n = loop.length;
-    const out: { x: number; y: number }[] = [];
-    for (let i = 0; i < n; i++) {
-      const p0 = loop[(i - 1 + n) % n];
-      const p1 = loop[i];
-      const p2 = loop[(i + 1) % n];
-      const collinear =
-        (p1.x - p0.x) * (p2.y - p1.y) === (p1.y - p0.y) * (p2.x - p1.x);
-      if (!collinear) out.push(p1);
-    }
-    return out.length >= 3 ? out : loop;
-  }
-
-    private addNoise(
-    loop: { x: number; y: number }[],
-    loopIdx: number, // 保留参数以兼容调用，但内部不再使用
-    cellW: number,
-    cellH: number
-  ): { x: number; y: number }[] {
-    // 1. 优化后的噪声函数：去掉了 seed 参数，直接基于坐标计算
-    // 这保证了全地图的噪声风格统一
-    const noise = (x: number, y: number) => {
-      // 使用大质数防止产生规律性
-      let h = x * 374761393 + y * 668265263;
-      h = (h ^ (h >> 13)) * 1274126177;
-      h = h ^ (h >> 16);
-      return (h & 0x7fffffff) / 0x7fffffff;
-    };
-
-    // 2. 参数配置
-    const PTS_PER_CELL = 1;  // 原值是 7。改为 0.5 意味着“每2个单位才产生一个点”。
-                                // 8000 的长度将只生成 4000 个点（原来是 56000+ 个），压力骤减。
-
-    const BIG_AMP = 0.4;       // 保持或稍微增大。点变少了，每个点的波动要稍微明显一点才看得出效果。
-    const FINE_AMP = 0.2;      // 保持或稍微增大。同上，细节波动要明显一点。
-
-    const BIG_FREQ = 0.08;     // 降低频率。原来的 0.1 在长距离上会产生很多波动，降低它可以减少计算次数。
-    const FINE_FREQ = 1.8;
-
-    const pts: { x: number; y: number }[] = [];
-    const n = loop.length;
-
-    for (let i = 0; i < n; i++) {
-      const p1 = loop[i];
-      const p2 = loop[(i + 1) % n];
-      const horizontal = p1.y === p2.y;
-      const len = horizontal ? Math.abs(p2.x - p1.x) : Math.abs(p2.y - p1.y);
-
-      // 限制最大步数，防止超长墙壁产生过多顶点
-      const steps = Math.max(1, Math.min(Math.round(len * PTS_PER_CELL), 200));
-
-      for (let s = 0; s < steps; s++) {
-        const t = s / steps;
-        const wx = p1.x + (p2.x - p1.x) * t;
-        const wy = p1.y + (p2.y - p1.y) * t;
-
-        let j = 0;
-        if (s !== 0) { // 跳过顶点，保持角落锐利
-          // 【核心修改】传入坐标作为噪声种子，不再传 loopIdx
-            const big = (noise(Math.floor(wx * BIG_FREQ * 1000), Math.floor(wy * BIG_FREQ * 1000)) - 0.5) * 2 * BIG_AMP;
-            const fine = (noise(Math.floor(wx * FINE_FREQ * 1000), Math.floor(wy * FINE_FREQ * 1000)) - 0.5) * 2 * FINE_AMP;
-          j = big + fine;
-        }
-
-        pts.push({
-          x: (wx + (horizontal ? 0 : j)) * cellW,
-          y: (wy + (horizontal ? j : 0)) * cellH,
-        });
-      }
-    }
-
-    // 更新最大抖动值
-    this.wallMaxJitterPx = Math.max(
-      this.wallMaxJitterPx,
-      (BIG_AMP + FINE_AMP) * Math.min(cellW, cellH)
-    );
-    return pts;
-  }
-
-  // 5. BVH 构建（SAH 中位分割）
-  private buildBVH(edges: WallEdge[]): BVHNode | null {
-    if (edges.length === 0) return null;
-    return this.buildBVHRecursive(edges, 0);
-  }
-
-  private buildBVHRecursive(edges: WallEdge[], depth: number): BVHNode {
-    this.bvhNodeCount++;
-    this.bvhMaxDepth = Math.max(this.bvhMaxDepth, depth);
-
-    const aabb = this.computeEdgesAABB(edges);
-
-    if (edges.length <= this.maxEdgesPerLeaf) {
-      this.bvhLeafCount++;
-      return { aabb, left: null, right: null, edges };
-    }
-
-    const extentX = aabb.maxX - aabb.minX;
-    const extentY = aabb.maxY - aabb.minY;
-    const axis = extentX >= extentY ? 0 : 1;
-
-    const sorted = edges.slice().sort((a, b) => {
-      const ca = axis === 0 ? (a.x1 + a.x2) * 0.5 : (a.y1 + a.y2) * 0.5;
-      const cb = axis === 0 ? (b.x1 + b.x2) * 0.5 : (b.y1 + b.y2) * 0.5;
-      return ca - cb;
-    });
-
-    const mid = Math.floor(sorted.length / 2);
-    const left = this.buildBVHRecursive(sorted.slice(0, mid), depth + 1);
-    const right = this.buildBVHRecursive(sorted.slice(mid), depth + 1);
-
-    return { aabb, left, right, edges: null };
-  }
-
-  private computeEdgesAABB(edges: WallEdge[]): AABB {
-    let minX = Infinity, minY = Infinity;
-    let maxX = -Infinity, maxY = -Infinity;
-    for (const e of edges) {
-      minX = Math.min(minX, e.x1, e.x2);
-      minY = Math.min(minY, e.y1, e.y2);
-      maxX = Math.max(maxX, e.x1, e.x2);
-      maxY = Math.max(maxY, e.y1, e.y2);
-    }
-    return { minX, minY, maxX, maxY };
-  }
-
-  // 6. 空间网格（broad-phase / 兼容层）
-  private buildSpatialGrid() {
-    for (const e of this.edges) {
-      const x0 = Math.floor(Math.min(e.x1, e.x2) / this.gridCellSize);
-      const y0 = Math.floor(Math.min(e.y1, e.y2) / this.gridCellSize);
-      const x1 = Math.floor(Math.max(e.x1, e.x2) / this.gridCellSize);
-      const y1 = Math.floor(Math.max(e.y1, e.y2) / this.gridCellSize);
-
+    // —— 实心网格：圆心内外判定用（墙 rect 登记到覆盖的所有格） ——
+    this.solidGrid = new Array(cells).fill(null);
+    for (let wi = 0; wi < walls.length; wi++) {
+      const w = walls[wi];
+      if (w.w <= 0 || w.h <= 0) continue;
+      const x0 = Math.max(0, Math.floor(w.x / this.cell));
+      const y0 = Math.max(0, Math.floor(w.y / this.cell));
+      const x1 = Math.min(this.cols - 1, Math.floor((w.x + w.w) / this.cell));
+      const y1 = Math.min(this.rows - 1, Math.floor((w.y + w.h) / this.cell));
       for (let gy = y0; gy <= y1; gy++) {
         for (let gx = x0; gx <= x1; gx++) {
-          const key = `${gx},${gy}`;
-          let cell = this.spatialGrid.get(key);
-          if (!cell) {
-            cell = { edges: [] };
-            this.spatialGrid.set(key, cell);
+          const idx = gy * this.cols + gx;
+          let bucket = this.solidGrid[idx];
+          if (!bucket) {
+            bucket = [];
+            this.solidGrid[idx] = bucket;
           }
-          cell.edges.push(e);
+          bucket.push(wi);
         }
       }
     }
+
+    console.log(
+      `[PolygonWallCollider] ${walls.length} walls => ${ei} detail edges, ` +
+      `${usedCells} grid cells, pad ${pad.toFixed(1)}px. Took ${(performance.now() - t0).toFixed(2)}ms`,
+    );
   }
 
-  // =========================
-  // 7. 碰撞查询 API
-  // =========================
+  /** 圆心是否落在某面墙的 AABB 内（单格桶扫描，无分配）。 */
+  private isInsideSolid(x: number, y: number): boolean {
+    const gx = Math.floor(x / this.cell);
+    if (gx < 0 || gx >= this.cols) return false;
+    const gy = Math.floor(y / this.cell);
+    if (gy < 0 || gy >= this.rows) return false;
+    const bucket = this.solidGrid[gy * this.cols + gx];
+    if (!bucket) return false;
+    for (let i = 0; i < bucket.length; i++) {
+      const w = this.walls[bucket[i]];
+      if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return true;
+    }
+    return false;
+  }
 
-  /** 圆与多边形墙壁碰撞检测（主 API）。使用 BVH 快速排除，平均 O(log n)。 */
-  collideCircle(x: number, y: number, r: number, counter?: CollisionCounter): [number, number] {
-    if (!this.bvh) return [x, y];
-    // Broadphase via spatial grid before BVH
-    if (!this.circleNeedsPreciseCheck(x, y, r)) return [x, y];
-    if (counter) counter.n++;
+  /**
+   * 把压在实心墙里的圆心弹到开阔处（安全网：只服务出生兜底/异常位置，
+   * 正常游玩中圆心永远在墙外，走不到这里，所以允许用稍贵的搜索换取必达）。
+   * 三级策略：
+   *  1. 直接 AABB 弹出（快路径：孤立矩形一次到位）；
+   *  2. 若仍在墙里（贴合/叠加重叠的墙并集，逐矩形推会来回震荡），
+   *     试所在矩形的 4 个面落点（由近到远，验证必须完全脱离并集且不压噪声边）；
+   *  3. 仍失败则以当前位置为圆心做环形开放空间搜索（最远 ~768px）。
+   * 全部失败时返回原位置（调用方/上层兜底：出生重试、安全点回退）。
+   */
+  private ejectFromSolid(x: number, y: number, r: number): [number, number] {
+    const rr = r + this.cell;
+    let gx0 = Math.floor((x - rr) / this.cell);
+    let gy0 = Math.floor((y - rr) / this.cell);
+    let gx1 = Math.floor((x + rr) / this.cell);
+    let gy1 = Math.floor((y + rr) / this.cell);
+    if (gx0 < 0) gx0 = 0;
+    if (gy0 < 0) gy0 = 0;
+    if (gx1 >= this.cols) gx1 = this.cols - 1;
+    if (gy1 >= this.rows) gy1 = this.rows - 1;
     for (let pass = 0; pass < 2; pass++) {
       let moved = false;
-      const candidates = this.queryBVH(this.bvh, x, y, r);
-      for (const e of candidates) {
-        const result = this.circleSegmentCollide(x, y, r, e);
-        if (result) {
-          moved = true;
-          x = result.x;
-          y = result.y;
+      for (let gy = gy0; gy <= gy1; gy++) {
+        const row = gy * this.cols;
+        for (let gx = gx0; gx <= gx1; gx++) {
+          const bucket = this.solidGrid[row + gx];
+          if (!bucket) continue;
+          for (let i = 0; i < bucket.length; i++) {
+            const w = this.walls[bucket[i]];
+            const closestX = x < w.x ? w.x : x > w.x + w.w ? w.x + w.w : x;
+            const closestY = y < w.y ? w.y : y > w.y + w.h ? w.y + w.h : y;
+            const dx = x - closestX;
+            const dy = y - closestY;
+            const dist2 = dx * dx + dy * dy;
+            if (dist2 >= r * r) continue;
+            if (dist2 < 0.0001) {
+              // 圆心在矩形内：沿最近面推出。
+              const left = x - w.x;
+              const right = w.x + w.w - x;
+              const top = y - w.y;
+              const bottom = w.y + w.h - y;
+              const m = Math.min(left, right, top, bottom);
+              if (m === left) x = w.x - r;
+              else if (m === right) x = w.x + w.w + r;
+              else if (m === top) y = w.y - r;
+              else y = w.y + w.h + r;
+            } else {
+              const d = Math.sqrt(dist2);
+              const push = (r - d) / d;
+              x += dx * push;
+              y += dy * push;
+            }
+            moved = true;
+          }
         }
       }
       if (!moved) break;
     }
+    if (!this.isInsideSolid(x, y)) return [x, y];
+    // 第 2 级：所在矩形的 4 个面落点，由近到远验证（必须脱离整个并集）。
+    // 落点离面 r + 最大噪声 + 1px：噪声凸起可伸出平面近 19px，
+    // 只留 r 会落在噪声带里被 isFree 否决。
+    const wi = this.findContainingWall(x, y);
+    if (wi >= 0) {
+      const w = this.walls[wi];
+      const clr = r + this.wallMaxJitterPx + 1;
+      const dists = [x - w.x, w.x + w.w - x, y - w.y, w.y + w.h - y];
+      let tried = 0;
+      for (let k = 0; k < 4; k++) {
+        let best = -1;
+        for (let f = 0; f < 4; f++) {
+          if ((tried & (1 << f)) === 0 && (best < 0 || dists[f] < dists[best])) best = f;
+        }
+        tried |= 1 << best;
+        const lx = best === 0 ? w.x - clr : best === 1 ? w.x + w.w + clr : x;
+        const ly = best === 2 ? w.y - clr : best === 3 ? w.y + w.h + clr : y;
+        if (this.isFree(lx, ly, r)) return [lx, ly];
+      }
+    }
+    // 第 3 级：环形开放空间搜索（旋转偏移避免与轴对齐死角共振，最远 ~768px）。
+    const ox = x;
+    const oy = y;
+    const step = Math.max(24, r);
+    for (let ring = 1; ring <= 32; ring++) {
+      const rad = ring * step;
+      const n = 8 + ring * 2;
+      const off = ring * 0.7;
+      for (let i = 0; i < n; i++) {
+        const a = off + (i / n) * Math.PI * 2;
+        const cx = ox + Math.cos(a) * rad;
+        const cy = oy + Math.sin(a) * rad;
+        if (this.isFree(cx, cy, r)) return [cx, cy];
+      }
+    }
+    return [ox, oy];
+  }
+
+  /** 返回包含点的第一面墙的下标（冷路径用），不在墙内返回 -1。 */
+  private findContainingWall(x: number, y: number): number {
+    const gx = Math.floor(x / this.cell);
+    if (gx < 0 || gx >= this.cols) return -1;
+    const gy = Math.floor(y / this.cell);
+    if (gy < 0 || gy >= this.rows) return -1;
+    const bucket = this.solidGrid[gy * this.cols + gx];
+    if (!bucket) return -1;
+    for (let i = 0; i < bucket.length; i++) {
+      const w = this.walls[bucket[i]];
+      if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return bucket[i];
+    }
+    return -1;
+  }
+
+  /**
+   * 圆 vs 细节墙碰撞（主 API，零分配）。
+   *  - 圆心在墙 AABB 内 → AABB 弹出（安全网），再走一遍边解算贴合凹凸；
+   *  - 否则走轮廓边解算：每趟只解“最近穿透边”，最多 3 趟（直边 1 趟、角落 2-3 趟）。
+   *
+   * 边解算是内外侧感知的：以外法线点积判圆心在边的外侧还是内侧
+   * （噪声凸起可伸出 AABB，圆心可能“在 AABB 外却在真墙内”，此时必须沿外法线
+   * 向外推，否则会越推越深）。最近边优先保证角落处约束最紧的边先生效。
+   */
+  collideCircle(x: number, y: number, r: number, counter?: CollisionCounter): [number, number] {
+    if (this.edgeCount === 0) return [x, y];
+    // 安全网：圆心在实心内（出生兜底/异常位置）—— AABB 弹出后再贴边。
+    // 弹出落点可能仍压着外凸的噪声边，所以必须链式走一遍边解算。
+    if (this.isInsideSolid(x, y)) {
+      if (counter) counter.n++;
+      [x, y] = this.ejectFromSolid(x, y, r);
+      if (this.isInsideSolid(x, y)) return [x, y];
+      return this.resolveEdges(x, y, r, undefined);
+    }
+    return this.resolveEdges(x, y, r, counter);
+  }
+
+  /**
+   * 轮廓边推挤：调用者保证圆心不在任何墙 AABB 内。
+   * 每趟扫描覆盖格找最近穿透边并解算，最多 3 趟；无穿透则提前返回。
+   */
+  private resolveEdges(
+    x: number, y: number, r: number, counter?: CollisionCounter,
+  ): [number, number] {
+    const cell = this.cell;
+    const cols = this.cols;
+    const rows = this.rows;
+    const grid = this.grid;
+    const r2 = r * r;
+    let counted = false;
+    for (let pass = 0; pass < 3; pass++) {
+      // 每趟按最新圆心重算覆盖格（上一趟的推挤可能跨格）。
+      const rr = r + this.queryPad;
+      let gx0 = Math.floor((x - rr) / cell);
+      let gy0 = Math.floor((y - rr) / cell);
+      let gx1 = Math.floor((x + rr) / cell);
+      let gy1 = Math.floor((y + rr) / cell);
+      if (gx0 < 0) gx0 = 0;
+      if (gy0 < 0) gy0 = 0;
+      if (gx1 >= cols) gx1 = cols - 1;
+      if (gy1 >= rows) gy1 = rows - 1;
+      if (gx0 > gx1 || gy0 > gy1) return [x, y];
+      // 找最近穿透边（距离平方比较，全程无 sqrt）。
+      let best = -1;
+      let bestDist2 = r2;
+      let bestPx = 0;
+      let bestPy = 0;
+      for (let gy = gy0; gy <= gy1; gy++) {
+        const row = gy * cols;
+        for (let gx = gx0; gx <= gx1; gx++) {
+          const bucket = grid[row + gx];
+          if (!bucket) continue;
+          if (!counted) {
+            counted = true;
+            if (counter) counter.n++;
+          }
+          for (let bi = 0; bi < bucket.length; bi++) {
+            const e = bucket[bi];
+            // AABB 快拒（边包围盒外扩 r）。
+            if (x < this.eminX[e] - r || x > this.emaxX[e] + r ||
+              y < this.eminY[e] - r || y > this.emaxY[e] + r) continue;
+            const x1 = this.ex1[e];
+            const y1 = this.ey1[e];
+            const dx = this.ex2[e] - x1;
+            const dy = this.ey2[e] - y1;
+            const len2 = dx * dx + dy * dy;
+            let t = len2 === 0 ? 0 : ((x - x1) * dx + (y - y1) * dy) / len2;
+            if (t < 0) t = 0;
+            else if (t > 1) t = 1;
+            const px = x1 + t * dx;
+            const py = y1 + t * dy;
+            const ddx = x - px;
+            const ddy = y - py;
+            const dist2 = ddx * ddx + ddy * ddy;
+            if (dist2 < bestDist2) {
+              bestDist2 = dist2;
+              best = e;
+              bestPx = px;
+              bestPy = py;
+            }
+          }
+        }
+      }
+      if (best < 0) return [x, y];
+      // 解算最近边：内外侧感知推出。
+      if (bestDist2 < 0.0001) {
+        // 圆心正好压在边上：沿外法线推出一个身位。
+        x += this.enx[best] * r;
+        y += this.eny[best] * r;
+      } else {
+        const ddx = x - bestPx;
+        const ddy = y - bestPy;
+        const d = Math.sqrt(bestDist2);
+        // s >= 0 外侧：沿 (圆心-最近点) 推到相切；s < 0 内侧（陷在外凸噪声里）：
+        // 沿外法线推到符号距离 +r，一次到位（小步会 Zeno 收敛失败）。
+        const s = (ddx * this.enx[best] + ddy * this.eny[best]) / d;
+        if (s >= 0) {
+          const push = (r - d) / d;
+          x += ddx * push;
+          y += ddy * push;
+        } else {
+          const push = r - s * d;
+          x += this.enx[best] * push;
+          y += this.eny[best] * push;
+        }
+      }
+    }
     return [x, y];
   }
 
-  /** 圆是否完全不在任何墙壁内（碰撞修正无位移即视为安全点，用于从墙内弹开）。 */
+  /**
+   * 圆是否与墙无交叠（出生点/复活点校验用；首个穿透即返回，无需解算）。
+   * 穿透 < 0.01px 视为无交叠：collideCircle 的解算位置在浮点精度下与边界相切，
+   * 必须容忍这点误差，否则“刚解算完的位置”会被判为卡墙（与旧 AABB 版语义一致）。
+   */
   isFree(x: number, y: number, r: number): boolean {
-    const [cx, cy] = this.collideCircle(x, y, r);
-    return Math.abs(cx - x) < 0.01 && Math.abs(cy - y) < 0.01;
+    if (this.edgeCount === 0) return true;
+    if (this.isInsideSolid(x, y)) return false;
+    const rr = r + this.queryPad;
+    let gx0 = Math.floor((x - rr) / this.cell);
+    let gy0 = Math.floor((y - rr) / this.cell);
+    let gx1 = Math.floor((x + rr) / this.cell);
+    let gy1 = Math.floor((y + rr) / this.cell);
+    if (gx0 < 0) gx0 = 0;
+    if (gy0 < 0) gy0 = 0;
+    if (gx1 >= this.cols) gx1 = this.cols - 1;
+    if (gy1 >= this.rows) gy1 = this.rows - 1;
+    for (let gy = gy0; gy <= gy1; gy++) {
+      const row = gy * this.cols;
+      for (let gx = gx0; gx <= gx1; gx++) {
+        const bucket = this.grid[row + gx];
+        if (!bucket) continue;
+        for (let bi = 0; bi < bucket.length; bi++) {
+          const e = bucket[bi];
+          if (x < this.eminX[e] - r || x > this.emaxX[e] + r ||
+            y < this.eminY[e] - r || y > this.emaxY[e] + r) continue;
+          const x1 = this.ex1[e];
+          const y1 = this.ey1[e];
+          const dx = this.ex2[e] - x1;
+          const dy = this.ey2[e] - y1;
+          const len2 = dx * dx + dy * dy;
+          let t = len2 === 0 ? 0 : ((x - x1) * dx + (y - y1) * dy) / len2;
+          if (t < 0) t = 0;
+          else if (t > 1) t = 1;
+          const px = x1 + t * dx;
+          const py = y1 + t * dy;
+          const ddx = x - px;
+          const ddy = y - py;
+          const dist2 = ddx * ddx + ddy * ddy;
+          if (dist2 < r * r) {
+            // 只有穿透深度 ≥ 0.01px 才算卡墙（sqrt 只在穿透时执行一次）。
+            if (r - Math.sqrt(dist2) >= 0.01) return false;
+          }
+        }
+      }
+    }
+    return true;
   }
 
-  /** 带移动步进的圆碰撞（防止高速穿透）。 */
+  /**
+   * 带步进的圆移动。步长放宽到一个身位：墙厚 ≥200px 而玩家每 tick 只走 ~10px，
+   * 单步 + 两趟推挤即可正确滑墙，不可能穿墙。
+   */
   moveCircle(
-    x: number, y: number, dx: number, dy: number, r: number, counter?: CollisionCounter
+    x: number, y: number, dx: number, dy: number, r: number, counter?: CollisionCounter,
   ): [number, number] {
     const dist = Math.hypot(dx, dy);
-    const maxStep = Math.max(4, r * 0.45);
+    if (dist < 0.0001) return this.collideCircle(x, y, r, counter);
+    const maxStep = Math.max(8, r);
     const steps = Math.max(1, Math.ceil(dist / maxStep));
+    if (steps === 1) return this.collideCircle(x + dx, y + dy, r, counter);
     const sx = dx / steps;
     const sy = dy / steps;
     for (let i = 0; i < steps; i++) {
@@ -1525,113 +1649,65 @@ export class PolygonWallCollider {
     return [x, y];
   }
 
-  /** 兼容旧接口：获取某位置附近的墙壁边（空间网格查询）。 */
-  getWallsNear(x: number, y: number, radius: number): WallEdge[] {
-    const results = new Set<WallEdge>();
-    const minGX = Math.floor((x - radius) / this.gridCellSize);
-    const maxGX = Math.floor((x + radius) / this.gridCellSize);
-    const minGY = Math.floor((y - radius) / this.gridCellSize);
-    const maxGY = Math.floor((y + radius) / this.gridCellSize);
-
-    for (let gy = minGY; gy <= maxGY; gy++) {
-      for (let gx = minGX; gx <= maxGX; gx++) {
-        const cell = this.spatialGrid.get(`${gx},${gy}`);
-        if (cell) {
-          for (const e of cell.edges) results.add(e);
-        }
-      }
-    }
-    return Array.from(results);
-  }
-
   /**
-   * 粗筛：判断圆 (x,y,r) 是否可能与任何墙壁相交。
-   * 用于 wallCollisionBatch 决定是否需要 BVH 高精度碰撞。
-   * 用空间网格（spatialGrid）按 (x,y) 所在的格子取出该格子内的墙边列表，
-   * 然后把圆扩张到 (r + 网格内墙的最大延伸) 做一次 AABB 测试。
-   * 复杂度 O(1)（只查 9 个格子），O(n^2) 永远不会发生。
-   * 返回 true 表示可能相交（需要精确碰撞）；false 表示远离所有墙（可跳过）。
+   * 粗筛：圆附近是否存在墙（边格非空，或圆心在实心内）。纯格占用检查，
+   * 不遍历边；保守（偶尔误报）但绝不漏报。
    */
   circleNeedsPreciseCheck(x: number, y: number, r: number): boolean {
-    if (this.spatialGrid.size === 0) return false;
-    // 取以 (x,y) 为中心的 3x3 格子集合
-    const cx = Math.floor(x / this.gridCellSize);
-    const cy = Math.floor(y / this.gridCellSize);
-    for (let dy = -1; dy <= 1; dy++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        const cell = this.spatialGrid.get(`${cx + dx},${cy + dy}`);
-        if (!cell) continue;
-        for (const e of cell.edges) {
-          // 圆心到线段最短距离的平方 与 (r+线段端点距圆心最远距离)^2 比较：
-          // 这里用 AABB 快速近似判断线段所在线段包围盒与圆是否相交。
-          const minX = Math.min(e.x1, e.x2);
-          const maxX = Math.max(e.x1, e.x2);
-          const minY = Math.min(e.y1, e.y2);
-          const maxY = Math.max(e.y1, e.y2);
-          const closestX = Math.max(minX, Math.min(x, maxX));
-          const closestY = Math.max(minY, Math.min(y, maxY));
-          const ddx = x - closestX;
-          const ddy = y - closestY;
-          if (ddx * ddx + ddy * ddy <= r * r) return true;
-        }
+    if (this.edgeCount === 0) return false;
+    if (this.isInsideSolid(x, y)) return true;
+    const rr = r + this.queryPad;
+    let gx0 = Math.floor((x - rr) / this.cell);
+    let gy0 = Math.floor((y - rr) / this.cell);
+    let gx1 = Math.floor((x + rr) / this.cell);
+    let gy1 = Math.floor((y + rr) / this.cell);
+    if (gx0 < 0) gx0 = 0;
+    if (gy0 < 0) gy0 = 0;
+    if (gx1 >= this.cols) gx1 = this.cols - 1;
+    if (gy1 >= this.rows) gy1 = this.rows - 1;
+    for (let gy = gy0; gy <= gy1; gy++) {
+      const row = gy * this.cols;
+      for (let gx = gx0; gx <= gx1; gx++) {
+        if (this.grid[row + gx]) return true;
       }
     }
     return false;
   }
 
-  // 8. BVH 查询（核心 O(log n) 路径）- no counter per node, wall counted once per collideCircle
-  private queryBVH(node: BVHNode, x: number, y: number, r: number): WallEdge[] {
-    const results: WallEdge[] = [];
-    const stack: BVHNode[] = [node];
-
-    while (stack.length > 0) {
-      const cur = stack.pop()!;
-      if (!this.circleAABBOverlap(x, y, r, cur.aabb)) continue;
-      if (cur.edges) {
-        results.push(...cur.edges);
-      } else {
-        if (cur.left) stack.push(cur.left);
-        if (cur.right) stack.push(cur.right);
+  /** 兼容接口：返回附近墙边（调试/巡检用；游戏热路径不调用）。 */
+  getWallsNear(x: number, y: number, radius: number): WallEdge[] {
+    const out: WallEdge[] = [];
+    if (this.edgeCount === 0) return out;
+    const rr = radius + this.queryPad;
+    let gx0 = Math.floor((x - rr) / this.cell);
+    let gy0 = Math.floor((y - rr) / this.cell);
+    let gx1 = Math.floor((x + rr) / this.cell);
+    let gy1 = Math.floor((y + rr) / this.cell);
+    if (gx0 < 0) gx0 = 0;
+    if (gy0 < 0) gy0 = 0;
+    if (gx1 >= this.cols) gx1 = this.cols - 1;
+    if (gy1 >= this.rows) gy1 = this.rows - 1;
+    for (let gy = gy0; gy <= gy1; gy++) {
+      const row = gy * this.cols;
+      for (let gx = gx0; gx <= gx1; gx++) {
+        const bucket = this.grid[row + gx];
+        if (!bucket) continue;
+        for (let bi = 0; bi < bucket.length; bi++) {
+          const e = bucket[bi];
+          // 每条边只登记在一个格内，无需去重。
+          out.push({
+            x1: this.ex1[e],
+            y1: this.ey1[e],
+            x2: this.ex2[e],
+            y2: this.ey2[e],
+            nx: this.enx[e],
+            ny: this.eny[e],
+            len: Math.hypot(this.ex2[e] - this.ex1[e], this.ey2[e] - this.ey1[e]),
+          });
+        }
       }
     }
-    return results;
-  }
-
-  private circleAABBOverlap(cx: number, cy: number, r: number, aabb: AABB): boolean {
-    const closestX = Math.max(aabb.minX, Math.min(cx, aabb.maxX));
-    const closestY = Math.max(aabb.minY, Math.min(cy, aabb.maxY));
-    const dx = cx - closestX;
-    const dy = cy - closestY;
-    return dx * dx + dy * dy <= r * r;
-  }
-
-  // 9. 精确碰撞：圆 vs 线段
-  private circleSegmentCollide(
-    cx: number, cy: number, r: number, e: WallEdge
-  ): { x: number; y: number } | null {
-    const { x1, y1, x2, y2 } = e;
-    const dx = x2 - x1;
-    const dy = y2 - y1;
-    const len2 = dx * dx + dy * dy;
-    let t = len2 === 0 ? 0 : ((cx - x1) * dx + (cy - y1) * dy) / len2;
-    t = Math.max(0, Math.min(1, t));
-
-    const closestX = x1 + t * dx;
-    const closestY = y1 + t * dy;
-
-    const dcx = cx - closestX;
-    const dcy = cy - closestY;
-    const dist2 = dcx * dcx + dcy * dcy;
-
-    if (dist2 >= r * r) return null;
-
-    if (dist2 < 0.0001) {
-      return { x: cx + e.nx * r, y: cy + e.ny * r };
-    }
-
-    const dist = Math.sqrt(dist2);
-    const push = r - dist;
-    return { x: cx + (dcx / dist) * push, y: cy + (dcy / dist) * push };
+    return out;
   }
 }
 
@@ -1829,8 +1905,8 @@ export class GameServer {
 
   // 生物墙壁碰撞：数组 AABB（直接使用墙壁数组，无噪声多边形；碰撞时墙向外 +10px）
   private wallColliders: ArrayWallCollider[] = [];
-  // 玩家墙壁碰撞：数组 AABB 碰撞器（与 mob 共用逻辑，直 AABB 圆-矩碰撞，无栅格无噪声）
-  private playerWallColliders: ArrayWallCollider[] = [];
+  // 玩家墙壁碰撞：细节多边形碰撞器（噪声凹凸轮廓，与客户端渲染一致；扁平网格 + 类型数组，热路径零分配）
+  private playerWallColliders: PolygonWallCollider[] = [];
 
   private tickCount = 0;
   private mobCapScale: number;
@@ -1889,9 +1965,9 @@ export class GameServer {
 
     this.persistCallback = options.persistCallback ?? (() => {});
 
-    // 玩家：数组 AABB 碰撞器（与 mob 同一套，无栅格无噪声）
+    // 玩家：细节多边形碰撞器（噪声凹凸轮廓，与客户端渲染一致）
     for (const map of MAPS) {
-      this.playerWallColliders.push(new ArrayWallCollider(map.walls, map.width, map.height, 256));
+      this.playerWallColliders.push(new PolygonWallCollider(map.walls, map.width, map.height, 256));
     }
     // 生物：数组 AABB 碰撞器（直接使用墙壁数组，无噪声多边形；碰撞时墙向外 +10px）
     for (const map of MAPS) {
@@ -3289,11 +3365,11 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
    * 绝不会停留在墙内（传送/出生点/玩家互推/边界 bug 等异常情形下生效）。
    *
    * 性能策略（"几乎不消耗性能"的关键）：
-   *  1. 先用 circleNeedsPreciseCheck（O(1) 粗筛，只查 9 个空间格子）跳过
+   *  1. 先用 circleNeedsPreciseCheck（O(1) 粗筛，只查几个扁平网格格子）跳过
    *     远离任何墙的玩家——这是 99% 的常见情形，零碰撞开销，仅记录安全位置；
    *  2. 仅当玩家靠近墙时才调用一次 collideCircle 做圆-边推挤修正；
    *     修正量 < PUSH_OUT_THRESHOLD 视为正常贴墙移动，应用并记录安全位置；
-   *  3. 修正量 ≥ 阈值视为"深度卡墙"（圆心远离所有墙边，边碰撞失效），
+   *  3. 修正量 ≥ 阈值视为"深度卡墙"（圆心在实心内，collideCircle 内部已做 AABB 弹出），
    *     回退到上次记录的安全位置；若无安全记录则传送到出生瓦片兜底。
    *
    * 与 mob 版 pushOutOfWall 的区别：不做 8 方向搜索 / 区块随机刷新
@@ -3534,18 +3610,16 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
       let targetY = clamp(p.y + stepDy, playerRadius, map.height - playerRadius);
       const collider = this.playerWallColliders[p.mapId];
       if (collider && (stepDx !== 0 || stepDy !== 0)) {
-        const needsPrecise = collider.circleNeedsPreciseCheck(p.x, p.y, playerRadius)
-          || collider.circleNeedsPreciseCheck(targetX, targetY, playerRadius);
-        if (needsPrecise) {
-          [targetX, targetY] = collider.moveCircle(
-            p.x,
-            p.y,
-            targetX - p.x,
-            targetY - p.y,
-            playerRadius,
-            this.collisionCounter,
-          );
-        }
+        // moveCircle/collideCircle 内部已有格占用早退（远离墙时只有几次空桶检查），
+        // 这里不再做重复的双点预检——旧的两次 circleNeedsPreciseCheck 反而多花两次查询。
+        [targetX, targetY] = collider.moveCircle(
+          p.x,
+          p.y,
+          targetX - p.x,
+          targetY - p.y,
+          playerRadius,
+          this.collisionCounter,
+        );
       }
 
       p.x = clamp(targetX, playerRadius, map.width - playerRadius);
