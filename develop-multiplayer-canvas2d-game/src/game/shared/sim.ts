@@ -69,6 +69,7 @@ import {
 } from "./defs";
 import { C2S, ENT, EVT, LOADOUT_OP, Reader, S2C, SWAP_ROW_ALL, TALENT_KEYS, TALENT_MAX_LEVELS, TEAM, Writer } from "./protocol";
 import { buildWallPolygons, wallMaxJitterPx as computeWallMaxJitter } from "./wallGeometry";
+import { DEV_ANTI_AFK_SECONDS, verifyDevCode } from "./devAuth";
 
 // =====================================================================
 // Squad system
@@ -1005,10 +1006,51 @@ interface ClientState {
   lastInDx: number;
   lastInDy: number;
   lastFlags: number;
+  /**
+   * Elevated (maintainer) session. Only ever set by the server after it has
+   * verified a phrase digest; it is per connection and is dropped the moment
+   * the socket closes.
+   */
+  dev: boolean;
+  /** Epoch ms until which this session is exempt from the AFK sweep (0 = off). */
+  devAntiAfkUntil: number;
 }
 
 function clamp(v: number, a: number, b: number) {
   return v < a ? a : v > b ? b : v;
+}
+
+/**
+ * Resolve a mob written as an id ("3") or a name ("soldier ant", "soldier_ant",
+ * "SoldierAnt"). Returns -1 when nothing matches.
+ */
+function resolveMobType(token: string): number {
+  const raw = token.trim();
+  if (!raw) return -1;
+  if (/^\d+$/.test(raw)) {
+    const id = Number(raw);
+    return id >= 0 && id < MOBS.length ? id : -1;
+  }
+  const key = raw.toLowerCase().replace(/[^a-z0-9]/g, "");
+  for (const mob of MOBS) {
+    if (mob.name.toLowerCase().replace(/[^a-z0-9]/g, "") === key) return mob.id;
+  }
+  return -1;
+}
+
+/** Resolve a rarity written as an index ("6") or a name ("ultra"). -1 = invalid. */
+function resolveRarityIndex(token: string): number {
+  const raw = token.trim();
+  if (!raw) return -1;
+  if (/^\d+$/.test(raw)) {
+    const idx = Number(raw);
+    return idx >= 0 && idx <= MAX_RARITY ? idx : -1;
+  }
+  const key = raw.toLowerCase();
+  for (let i = 0; i < RARITIES.length; i++) {
+    if (RARITIES[i].name.toLowerCase() === key) return i;
+  }
+  return -1;
 }
 
 // ===== 区块生物生成上限 =====
@@ -2087,6 +2129,8 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
       lastInDx: 0,
       lastInDy: 0,
       lastFlags: 0,
+      dev: false,
+      devAntiAfkUntil: 0,
     });
   }
 
@@ -2115,8 +2159,19 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
   }
 
   private updateAfk(dt: number) {
+    const now = Date.now();
     for (const c of this.clients.values()) {
       if (!c.player || c.kick) continue;
+      // Maintenance sessions can hold an idle exemption for a limited window.
+      if (c.devAntiAfkUntil > now) {
+        c.idleSeconds = 0;
+        if (c.afkPending) {
+          c.afkPending = false;
+          c.afkSecondsLeft = 0;
+          this.sendAfkState(c);
+        }
+        continue;
+      }
       if (c.afkPending) {
         c.afkSecondsLeft -= dt;
         if (c.afkSecondsLeft <= 0) {
@@ -2704,8 +2759,94 @@ private getZoneFromPosition(col: number, row: number, cols: number, rows: number
         break;
       }
       default:
+        if (this.handleMaintenanceCommand(c, p, command, parts)) return;
         this.sendChatToClient(c, `Unknown command: ${command}`, "System", true, false);
     }
+  }
+
+  // ------------------------------------------------------- maintenance tools
+  /**
+   * Hidden maintenance commands. They are deliberately absent from `/help`,
+   * and every one of them answers exactly like an unknown command unless the
+   * session has been unlocked on this server first — so a player poking at
+   * chat cannot even tell that they exist.
+   *
+   * Returns true when the input was consumed (so the caller must not print the
+   * "Unknown command" line itself).
+   */
+  private handleMaintenanceCommand(c: ClientState, p: Player, command: string, parts: string[]): boolean {
+    switch (command) {
+      case "/dev_check": {
+        const phrase = parts.slice(1).join(" ");
+        // The phrase is never stored client-side or in this file: the server
+        // hashes what was typed and compares digests (see shared/devAuth).
+        if (!phrase || !verifyDevCode(phrase)) return false;
+        c.dev = true;
+        this.sendChatToClient(c, "Developer access granted for this session.", "System", true, false);
+        return true;
+      }
+      case "/dev_anti_afk": {
+        if (!c.dev) return false;
+        c.devAntiAfkUntil = Date.now() + DEV_ANTI_AFK_SECONDS * 1000;
+        c.idleSeconds = 0;
+        if (c.afkPending) {
+          c.afkPending = false;
+          c.afkSecondsLeft = 0;
+          this.sendAfkState(c);
+        }
+        this.sendChatToClient(c, `Anti-AFK on: no AFK check for ${Math.round(DEV_ANTI_AFK_SECONDS / 60)} minutes.`, "System", true, false);
+        return true;
+      }
+      case "/dev_spawn_mob": {
+        if (!c.dev) return false;
+        const type = resolveMobType(parts[1] ?? "");
+        const rarity = resolveRarityIndex(parts[2] ?? "");
+        if (type < 0 || rarity < 0) {
+          this.sendChatToClient(c, "Usage: /dev_spawn_mob <mob type> <rarity>", "System", true, false);
+          return true;
+        }
+        const spot = this.devSpawnMob(p, type, rarity);
+        this.sendChatToClient(
+          c,
+          spot
+            ? `Spawned ${RARITIES[rarity].name} ${MOBS[type].name}.`
+            : "No free space nearby to spawn that.",
+          "System",
+          true,
+          false,
+        );
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  /**
+   * Drop one mob of an exact type/rarity next to a player. Positions are
+   * probed in a ring around the player and validated against the wall
+   * collider, so a spawned mob never lands inside geometry.
+   */
+  private devSpawnMob(p: Player, type: number, rarity: number): boolean {
+    const mapId = p.mapId;
+    const map = MAPS[mapId];
+    if (!map) return false;
+    const collider = this.wallColliders[mapId];
+    const radius = MOBS[type].radius * mobSizeMult(rarity);
+    for (let ring = 0; ring < 6; ring++) {
+      const dist = 90 + ring * 60;
+      for (let step = 0; step < 12; step++) {
+        const a = (step / 12) * Math.PI * 2 + ring * 0.4;
+        const x = clamp(p.x + Math.cos(a) * dist, radius + 10, map.width - radius - 10);
+        const y = clamp(p.y + Math.sin(a) * dist, radius + 10, map.height - radius - 10);
+        const [cx, cy] = collider.collideCircle(x, y, radius + 6, undefined, MOB_WALL_INFLATE);
+        if (Math.abs(cx - x) >= 0.01 || Math.abs(cy - y) >= 0.01) continue;
+        this.worlds[mapId].mobs.push(new Mob(this.nextId++, type, mapId, x, y, rarity));
+        this.incZoneCount(mapId, this.zoneAt(mapId, x, y));
+        return true;
+      }
+    }
+    return false;
   }
 
   private getClientIdForPlayer(p: Player): number {

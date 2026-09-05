@@ -9,6 +9,7 @@
 import {
   AFK_CHECK_SECONDS,
   AFK_CLOSE_CODE,
+  TICK_MS,
   SNAPSHOT_STALL_SECONDS,
   SNAPSHOT_STALL_NOTICE_SECONDS,
   BAG_COUNT,
@@ -114,10 +115,10 @@ interface Ent {
   serverTx?: number;
   serverTy?: number;
   /**
-   * Previous snapshot sample + client arrival times. Kept per entity so the
-   * spring can interpolate between the server's 20 Hz snapshots at render
-   * rate instead of chasing every 50 ms position step (which made petals
-   * visibly jitter while the flower moved smoothly).
+   * Previous snapshot sample + the *server* timestamps of the two samples
+   * (derived from the snapshot tick counter, not from packet arrival times).
+   * Server timestamps are perfectly evenly spaced, so interpolating between
+   * them produces constant-speed motion even when packets arrive unevenly.
    */
   prevTx?: number;
   prevTy?: number;
@@ -214,13 +215,23 @@ const AUTH_KEY = "petalia.auth";
 const LOADOUT_SAVE_KEY = "petalia.loadouts";
 
 /**
- * Render-rate snapshot interpolation delay (one server tick, 50 ms).
- * Entities are drawn at server state delayed by exactly one tick so the two
- * latest snapshot samples always bracket the render time. Chasing the
- * freshest 20 Hz sample directly — or lerping without a delay — made petals
- * visibly jump/shake while the local flower moved smoothly.
+ * Snapshot interpolation margin (seconds) added on top of one measured
+ * snapshot interval when deciding how far behind the newest server sample the
+ * world is rendered.
+ *
+ * The hosted server only streams snapshots every other tick (10 Hz), so the
+ * old fixed 50 ms delay sat *inside* the freshest segment: the render time
+ * regularly overran the newest sample, the interpolation clamped to it for a
+ * few frames and then jumped when the next packet landed. Because the camera
+ * is hard-locked to the local flower, that hitch moved the whole world — it
+ * read as the screen shaking while walking. Rendering one full interval (plus
+ * a small jitter margin) behind the newest sample keeps two samples bracketing
+ * the render time at all times, so motion is continuous.
  */
-const ENTITY_INTERP_DELAY = 0.05;
+const INTERP_MIN_MARGIN = 0.015;
+const INTERP_MAX_MARGIN = 0.08;
+/** Distance (px) beyond which an entity is teleported instead of eased (respawn / map change). */
+const ENTITY_TELEPORT_DISTANCE = 400;
 
 /** Seconds for the craft-fail particle burst to progress 0 → 1. */
 const CRAFT_FAIL_BURST_DURATION = 0.6;
@@ -3050,6 +3061,8 @@ class ChangelogPanel {
       {
       date: "5th September 2026",
       entries: [
+        "- Fixed the screen shaking while you move: your flower now stays locked in the middle",
+        "- The ground, walls and everything around you now scroll smoothly instead of jittering",
         "- Your flower now only uses the position sent by the server, still moving smoothly",
         "- Removed the client-side wall push, so the server fully owns where you stand",
       ]
@@ -6489,6 +6502,31 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   /** Fades the "waiting for server" notice in after a longer stall. */
   private stallNoticeAnim = 0;
 
+  // ---- Snapshot playback clock -------------------------------------------
+  // Entities are drawn from a clock that trails the server's snapshot stream
+  // by roughly one snapshot interval. The clock runs on the client at ~1x and
+  // is nudged (never jumped) toward the stream, so the world scrolls at a
+  // constant speed even though snapshots arrive unevenly.
+  /** Server time (seconds, from the snapshot tick counter) of the newest sample. */
+  private snapServerTime = 0;
+  /** Client time at which that newest snapshot arrived (for jitter measurement). */
+  private lastSnapArrival = 0;
+  /** Measured spacing between snapshots in server time (0.1 s on the live servers). */
+  private snapInterval = 2 * (TICK_MS / 1000);
+  /** Measured arrival jitter, i.e. how unevenly snapshots reach us. */
+  private snapJitter = 0.03;
+  /** The playback clock itself (server time domain). */
+  private renderClock = 0;
+  /**
+   * Smoothed offset between where the clock is and where the stream says it
+   * should be. Measured once per snapshot and low-pass filtered: correcting
+   * against the raw per-packet value would speed the world up and slow it down
+   * with every packet (which is exactly the shake we are removing).
+   */
+  private clockError = 0;
+  /** False until the first snapshot has seeded the clock. */
+  private renderClockReady = false;
+
   // AFK check
   /** True while the server wants the [AFK CHECK] button clicked. */
   private afkPending = false;
@@ -6539,6 +6577,11 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   private _groundWallCacheKey: string = "";
   private _groundWallCacheBiome: string = "";
   private _groundWallCacheMap: number = -1;
+  /** Camera position the cached wall bitmap was rasterised at (world px). */
+  private _groundWallCacheCamX = 0;
+  private _groundWallCacheCamY = 0;
+  /** False until a bitmap has been rasterised (or after a world swap). */
+  private _groundWallCacheValid = false;
   // player state
   private hp = 100;
   private maxHp = 100;
@@ -7290,6 +7333,10 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.sinceSnapshot = 0;
     this.snapshotStalled = false;
     this.stallNoticeAnim = 0;
+    // A new connection means a new server clock: reseat the playback clock on
+    // the first snapshot instead of interpolating against the old timeline.
+    this.renderClockReady = false;
+    this.snapServerTime = 0;
     this.debugPingMs = 0;
     this.debugPingTimer = 0;
     net.onOpen = () => {
@@ -7402,6 +7449,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     this.wallPolygonsCache.clear();
     this._wallDataCache.clear();
     this._groundWallCacheMap = -1;
+    this._groundWallCacheValid = false;
     this.ents.clear();
     this.petalOwners.clear();
   }
@@ -7547,7 +7595,11 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       break;
     }
     case S2C.SNAPSHOT: {
-      r.u32();
+      // The tick counter is the server's own clock: using it (instead of the
+      // packet arrival time) to timestamp samples makes every interpolation
+      // segment exactly one snapshot interval long, so network jitter can no
+      // longer speed the world up and slow it down between frames.
+      const snapshotTime = this.onSnapshotTiming(r.u32());
       this.sinceSnapshot = 0;
       this.snapshotStalled = false;
       const snapshotSequence = ++this.snapshotSequence;
@@ -7617,12 +7669,13 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
         e.kind = kind;
         e.type = etype;
         e.team = team;
-        // Keep the previous server sample + arrival time for every entity
-        // (including the self player, whose server echo is also stepped).
-        // The spring / self-petal prediction then interpolates between the
-        // two latest snapshots at render rate, so a new snapshot lands as a
-        // continuous motion instead of a 50 ms step + fast catch-up.
-        if (e.serverTx !== undefined) {
+        // Keep the previous server sample together with the *server* time of
+        // both samples (including for the self player, whose position is also
+        // just a server echo). The render pass interpolates between the two,
+        // so a new snapshot continues the motion instead of stepping it.
+        // An entity that was out of view for a while gets both samples reset
+        // to the new one, otherwise it would glide slowly across the stale gap.
+        if (e.serverTx !== undefined && e.curAt !== undefined && snapshotTime - e.curAt < 0.5) {
           e.prevTx = e.serverTx;
           e.prevTy = e.serverTy;
           e.prevAngle = e.serverAngle;
@@ -7631,12 +7684,12 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
           e.prevTx = x;
           e.prevTy = y;
           e.prevAngle = angle;
-          e.prevAt = this.time;
+          e.prevAt = snapshotTime - this.snapInterval;
         }
         e.serverTx = x;
         e.serverTy = y;
         e.serverAngle = angle;
-        e.curAt = this.time;
+        e.curAt = snapshotTime;
         if (kind === ENT.PETAL) {
           this.petalOwners.set(id, currentPlayerId);
         }
@@ -8222,6 +8275,9 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       ? Math.min(1, this.stallNoticeAnim + dt * 3)
       : Math.max(0, this.stallNoticeAnim - dt * 5);
 
+    // Advance the snapshot playback clock before sampling anything from it.
+    this.advanceRenderClock(dt);
+
     // Entity spring: raise the stiffness so remote flowers, petals and other
     // serverside entities catch up to their snapshot targets almost
     // immediately. 16 was visibly soft at 10 Hz snapshots (~100 ms lag looks
@@ -8229,18 +8285,17 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     // still smoothing a little instead of teleporting.
     const ENTITY_SPRING_STIFFNESS = 48;
     for (const e of this.ents.values()) {
-      // Replace the stepped 20 Hz snapshot target with a render-rate
-      // interpolation between the two latest server samples. Without this the
-      // spring has to absorb each 50 ms step as a fast catch-up, which reads
-      // as a quick shake on fast-moving entities (most visibly the petals
-      // orbiting the flower). The self player lerps exactly like every other
-      // entity — its only position source is the server snapshot stream, and
-      // sampling it with the same fixed delay as the petal samples keeps the
-      // orbit locked onto the rendered body instead of spinning around it or
-      // trailing behind.
+      // Replace the stepped snapshot target with an interpolation between the
+      // two latest server samples, evaluated on the playback clock. Without
+      // this the spring has to absorb each snapshot step as a fast catch-up,
+      // which reads as a shake on fast-moving entities — and, because the
+      // camera is glued to the local flower, as the whole screen shaking while
+      // walking. The self player is sampled exactly like every other entity,
+      // so the petal orbit (computed on the server around this same position)
+      // stays locked onto the rendered body.
       {
         const isMob = e.kind === ENT.MOB;
-        const sampled = this.sampleServerPos(e, this.time, isMob);
+        const sampled = this.sampleServerPos(e, this.renderClock, isMob);
         if (sampled) {
           e.tx = sampled.x;
           e.ty = sampled.y;
@@ -8260,18 +8315,27 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       }
       // Petals ease toward their orbit target with a softer, frame-rate
       // independent lerp so the revolving motion reads smoothly instead of
-      // snapping between 20 Hz samples. Mobs get the same exponential form at
-      // their own rate so snapshot arrival jitter is absorbed instead of
-      // rendered as a stall-then-jump. Every other entity keeps the stiff
-      // catch-up spring so remote flowers/projectiles still track tightly.
+      // snapping between samples. The local/remote flowers use the *same*
+      // rate: the camera is locked to the local flower, so any stiffer spring
+      // there turns the ±1 px rounding of the snapshot stream into a visible
+      // twitch of the whole scene, and matching the petal rate also keeps the
+      // orbit centred on the body. Mobs get the same exponential form at their
+      // own rate; everything else keeps the stiff catch-up spring.
       const k =
-        e.kind === ENT.PETAL
+        e.kind === ENT.PETAL || e.kind === ENT.PLAYER
           ? 1 - Math.exp(-PETAL_SMOOTH_RATE * dt)
           : e.kind === ENT.MOB
             ? 1 - Math.exp(-MOB_SMOOTH_RATE * dt)
             : Math.min(1, dt * ENTITY_SPRING_STIFFNESS);
-      e.x += (e.tx - e.x) * k;
-      e.y += (e.ty - e.y) * k;
+      // A respawn or a map change moves an entity across the world in one
+      // snapshot: teleport instead of sliding the camera over the whole map.
+      if (Math.abs(e.tx - e.x) > ENTITY_TELEPORT_DISTANCE || Math.abs(e.ty - e.y) > ENTITY_TELEPORT_DISTANCE) {
+        e.x = e.tx;
+        e.y = e.ty;
+      } else {
+        e.x += (e.tx - e.x) * k;
+        e.y += (e.ty - e.y) * k;
+      }
       e.hurt = Math.max(0, e.hurt - dt);
       // Lagging health buffer: eases toward the real health so damage shows
       // as a brief red trail draining off the bar instead of an instant cut.
@@ -8485,11 +8549,11 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
   /**
    * Render-rate interpolation of an entity's server samples.
    *
-   * The server stream is 20 Hz; the local flower is rendered at display rate.
-   * By sampling one tick in the past the two latest snapshot samples always
-   * bracket the render time, so the returned position moves continuously
-   * instead of stepping 50 ms. Falls back to the newest sample when only one
-   * is known yet (entity just spawned).
+   * `renderTime` is the playback clock (server time domain), which trails the
+   * newest sample by about one snapshot interval, so the two latest samples
+   * always bracket it and the returned position moves continuously instead of
+   * stepping once per packet. Falls back to the newest sample when only one is
+   * known yet (entity just spawned).
    *
    * The facing is interpolated the same way, along the shortest arc, so
    * consumers (mob rendering) can rotate continuously between samples.
@@ -8502,7 +8566,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
    */
   private sampleServerPos(
     e: Ent,
-    at: number,
+    renderTime: number,
     extrapolate = false,
   ): { x: number; y: number; angle: number } | null {
     if (e.serverTx === undefined || e.serverTy === undefined || e.curAt === undefined) return null;
@@ -8511,7 +8575,7 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       return { x: e.serverTx, y: e.serverTy, angle: curAngle };
     }
     const prevAngle = e.prevAngle ?? curAngle;
-    const rt = at - ENTITY_INTERP_DELAY;
+    const rt = renderTime;
     if (rt >= e.prevAt && rt <= e.curAt) {
       const t = (rt - e.prevAt) / Math.max(1e-3, e.curAt - e.prevAt);
       return {
@@ -8533,6 +8597,69 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
       }
     }
     return { x: e.serverTx, y: e.serverTy, angle: curAngle };
+  }
+
+  /**
+   * How far behind the newest server sample the world is rendered: one full
+   * measured snapshot interval plus a small margin for arrival jitter. This is
+   * what guarantees the interpolation always has a sample on either side of
+   * the playback clock, which is what removes the walking shake.
+   */
+  private interpDelay(): number {
+    const margin = Math.max(INTERP_MIN_MARGIN, Math.min(INTERP_MAX_MARGIN, this.snapJitter));
+    return this.snapInterval + margin;
+  }
+
+  /**
+   * Called once per snapshot with the server tick counter. Updates the
+   * measured snapshot interval/jitter and returns the sample's server time.
+   */
+  private onSnapshotTiming(tick: number): number {
+    const sampleTime = tick * (TICK_MS / 1000);
+    const fresh =
+      !this.renderClockReady ||
+      sampleTime <= this.snapServerTime ||          // server restarted / out-of-order
+      sampleTime - this.snapServerTime > 2;         // long gap: reseat the clock
+    if (fresh) {
+      this.renderClockReady = true;
+      this.snapInterval = 2 * (TICK_MS / 1000);
+      this.snapJitter = 0.03;
+      this.snapServerTime = sampleTime;
+      this.lastSnapArrival = this.time;
+      this.renderClock = sampleTime - this.interpDelay();
+      this.clockError = 0;
+      return sampleTime;
+    }
+    const serverStep = sampleTime - this.snapServerTime;
+    const arrivalStep = Math.max(0, this.time - this.lastSnapArrival);
+    this.snapInterval += (Math.min(0.5, serverStep) - this.snapInterval) * 0.12;
+    this.snapJitter += (Math.min(0.25, Math.abs(arrivalStep - serverStep)) - this.snapJitter) * 0.08;
+    this.snapServerTime = sampleTime;
+    this.lastSnapArrival = this.time;
+    // Where the clock *should* be right now. In steady state this value
+    // saw-tooths around the clock (it only steps when a packet lands), so it
+    // is filtered rather than followed directly.
+    const instantError = sampleTime - this.interpDelay() - this.renderClock;
+    if (Math.abs(instantError) > 0.5) {
+      this.renderClock = sampleTime - this.interpDelay();
+      this.clockError = 0;
+    } else {
+      this.clockError += (instantError - this.clockError) * 0.1;
+    }
+    return sampleTime;
+  }
+
+  /**
+   * Advance the playback clock. It runs at real speed, corrected only by the
+   * smoothed error, so a drifting connection is caught up gradually instead of
+   * being jumped — the scene never lurches.
+   */
+  private advanceRenderClock(dt: number) {
+    if (!this.renderClockReady) {
+      this.renderClock += dt;
+      return;
+    }
+    this.renderClock += dt * Math.max(0.85, Math.min(1.15, 1 + this.clockError * 2));
   }
 
   private sendInput() {
@@ -13886,43 +14013,53 @@ drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
 
   /**
    * 墙壁缓存：cache canvas 只缓存墙壁（不缓存地面）。
-   * 相机跨瓦片 / 缩放 / 换图 / 墙壁数量变化时重建；重建前先 clearRect
-   * 清理上一帧，避免残留旧墙壁像素。地面每帧直接绘制，墙壁每帧 blit
-   * 一张 drawImage。
+   *
+   * The bitmap is rasterised at the camera position of the moment it was
+   * built, and blitted back with the offset the camera has travelled since —
+   * so the walls stay locked to the world instead of being glued to the
+   * screen. (Blitting at 0,0 made the walls sit still while the ground
+   * scrolled, then snap back whenever the cache was rebuilt: a very visible
+   * jitter of the whole scene while moving.) The canvas carries a margin of
+   * WALL_CACHE_DRIFT world px on every side, and is rebuilt as soon as the
+   * camera drifts further than that, so the shifted blit always covers the
+   * screen.
    */
   private drawWallsCached(
     context: CanvasRenderingContext2D,
     cameraOffset: { x: number; y: number },
   ) {
     const w = this.w, h = this.h, zoom = this.viewZoom || 1;
-    // Cache tile = a chunk in world space. We rebuild the bitmap when the
-    // camera crosses a tile boundary so the cached content stays accurate
-    // even though it is only re-rasterised occasionally.
-    const tile = 256;
-    const tileX = Math.floor(cameraOffset.x / tile);
-    const tileY = Math.floor(cameraOffset.y / tile);
-    const key = `${this.mapId}|${this.currentBiome}|${zoom.toFixed(3)}|${tileX}|${tileY}|${this.walls.length}`;
+    /** Max camera drift (world px) allowed before the bitmap is re-rasterised. */
+    const WALL_CACHE_DRIFT = 128;
+    const pad = Math.ceil(WALL_CACHE_DRIFT * zoom) + 8;
+    const cw = w + pad * 2, ch = h + pad * 2;
+    const key = `${this.mapId}|${this.currentBiome}|${zoom.toFixed(3)}|${this.walls.length}`;
+    const drifted =
+      !this._groundWallCacheValid ||
+      Math.abs(cameraOffset.x - this._groundWallCacheCamX) > WALL_CACHE_DRIFT ||
+      Math.abs(cameraOffset.y - this._groundWallCacheCamY) > WALL_CACHE_DRIFT;
     if (
       !this._groundWallCache ||
-      this._groundWallCache.width !== w ||
-      this._groundWallCache.height !== h ||
+      this._groundWallCache.width !== cw ||
+      this._groundWallCache.height !== ch ||
       this._groundWallCacheKey !== key ||
       this._groundWallCacheBiome !== this.currentBiome ||
-      this._groundWallCacheMap !== this.mapId
+      this._groundWallCacheMap !== this.mapId ||
+      drifted
     ) {
-      if (!this._groundWallCache || this._groundWallCache.width !== w || this._groundWallCache.height !== h) {
+      if (!this._groundWallCache || this._groundWallCache.width !== cw || this._groundWallCache.height !== ch) {
         this._groundWallCache = document.createElement("canvas");
-        this._groundWallCache.width = w;
-        this._groundWallCache.height = h;
+        this._groundWallCache.width = cw;
+        this._groundWallCache.height = ch;
         this._groundWallCtx = this._groundWallCache.getContext("2d");
       }
       const off = this._groundWallCtx;
       if (!off || !this._groundWallCache) return;
       // 清理上一帧（旧墙壁像素），避免残留
       off.setTransform(1, 0, 0, 1, 0, 0);
-      off.clearRect(0, 0, w, h);
+      off.clearRect(0, 0, cw, ch);
       off.save();
-      off.translate(w / 2, h / 2);
+      off.translate(cw / 2, ch / 2);
       off.scale(zoom, zoom);
       off.translate(-cameraOffset.x, -cameraOffset.y);
       // 只缓存墙壁：复用实时绘制函数（drawWallsFromData），
@@ -13932,8 +14069,15 @@ drawWallsFromData(ctx: CanvasRenderingContext2D, c: { x: number; y: number }) {
       this._groundWallCacheKey = key;
       this._groundWallCacheBiome = this.currentBiome;
       this._groundWallCacheMap = this.mapId;
+      this._groundWallCacheCamX = cameraOffset.x;
+      this._groundWallCacheCamY = cameraOffset.y;
+      this._groundWallCacheValid = true;
     }
-    if (this._groundWallCache) context.drawImage(this._groundWallCache, 0, 0);
+    if (this._groundWallCache) {
+      const dx = (this._groundWallCacheCamX - cameraOffset.x) * zoom;
+      const dy = (this._groundWallCacheCamY - cameraOffset.y) * zoom;
+      context.drawImage(this._groundWallCache, -pad + dx, -pad + dy);
+    }
   }
 
   drawWavesDirect(context: CanvasRenderingContext2D, cameraOffset: { x: number; y: number }, groundColor: [number, number, number]) {

@@ -114,6 +114,94 @@ constexpr float AFK_IDLE_SECONDS = 180.f;
 constexpr float AFK_CHECK_SECONDS = 45.f;
 constexpr int AFK_CLOSE_CODE = 4001;
 constexpr int MAGIC_CORE_ITEM = -1;
+/** Seconds of AFK immunity granted by the maintenance anti-AFK toggle (1 hour). */
+constexpr long long DEV_ANTI_AFK_SECONDS = 3600;
+
+// =====================================================================
+// Maintenance access check
+// ---------------------------------------------------------------------
+// The access phrase is not stored here (or anywhere a player can read):
+// only a salted SHA-256 digest is. The comparison happens on this server,
+// so a modified client cannot unlock anything. Operators may rotate the
+// phrase at runtime with the MOLORR_DEV_HASH environment variable.
+// =====================================================================
+static const char* DEV_SALT = "molorr::dev-access::v1::";
+static const char* DEV_HASH = "845f37efce7a59542fff3cbc825c2e7f7bee45dbeafae82809d85cc252799cce";
+
+static std::string sha256Hex(const std::string& input) {
+  static const uint32_t K[64] = {
+    0x428a2f98u,0x71374491u,0xb5c0fbcfu,0xe9b5dba5u,0x3956c25bu,0x59f111f1u,0x923f82a4u,0xab1c5ed5u,
+    0xd807aa98u,0x12835b01u,0x243185beu,0x550c7dc3u,0x72be5d74u,0x80deb1feu,0x9bdc06a7u,0xc19bf174u,
+    0xe49b69c1u,0xefbe4786u,0x0fc19dc6u,0x240ca1ccu,0x2de92c6fu,0x4a7484aau,0x5cb0a9dcu,0x76f988dau,
+    0x983e5152u,0xa831c66du,0xb00327c8u,0xbf597fc7u,0xc6e00bf3u,0xd5a79147u,0x06ca6351u,0x14292967u,
+    0x27b70a85u,0x2e1b2138u,0x4d2c6dfcu,0x53380d13u,0x650a7354u,0x766a0abbu,0x81c2c92eu,0x92722c85u,
+    0xa2bfe8a1u,0xa81a664bu,0xc24b8b70u,0xc76c51a3u,0xd192e819u,0xd6990624u,0xf40e3585u,0x106aa070u,
+    0x19a4c116u,0x1e376c08u,0x2748774cu,0x34b0bcb5u,0x391c0cb3u,0x4ed8aa4au,0x5b9cca4fu,0x682e6ff3u,
+    0x748f82eeu,0x78a5636fu,0x84c87814u,0x8cc70208u,0x90befffau,0xa4506cebu,0xbef9a3f7u,0xc67178f2u,
+  };
+  auto rotr = [](uint32_t x, int n) { return (x >> n) | (x << (32 - n)); };
+  uint32_t h[8] = {
+    0x6a09e667u,0xbb67ae85u,0x3c6ef372u,0xa54ff53au,0x510e527fu,0x9b05688cu,0x1f83d9abu,0x5be0cd19u,
+  };
+  std::vector<uint8_t> msg(input.begin(), input.end());
+  uint64_t bitLen = static_cast<uint64_t>(msg.size()) * 8ull;
+  msg.push_back(0x80);
+  while (msg.size() % 64 != 56) msg.push_back(0);
+  for (int i = 7; i >= 0; i--) msg.push_back(static_cast<uint8_t>((bitLen >> (i * 8)) & 0xff));
+
+  uint32_t w[64];
+  for (size_t off = 0; off < msg.size(); off += 64) {
+    for (int i = 0; i < 16; i++) {
+      w[i] = (static_cast<uint32_t>(msg[off + i * 4]) << 24) |
+             (static_cast<uint32_t>(msg[off + i * 4 + 1]) << 16) |
+             (static_cast<uint32_t>(msg[off + i * 4 + 2]) << 8) |
+             static_cast<uint32_t>(msg[off + i * 4 + 3]);
+    }
+    for (int i = 16; i < 64; i++) {
+      uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+      uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+      w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+    for (int i = 0; i < 64; i++) {
+      uint32_t S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+      uint32_t ch = (e & f) ^ (~e & g);
+      uint32_t t1 = hh + S1 + ch + K[i] + w[i];
+      uint32_t S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+      uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+      uint32_t t2 = S0 + maj;
+      hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+    }
+    h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+  }
+  static const char* HEX = "0123456789abcdef";
+  std::string out;
+  out.reserve(64);
+  for (int i = 0; i < 8; i++) {
+    for (int shift = 28; shift >= 0; shift -= 4) out += HEX[(h[i] >> shift) & 0xf];
+  }
+  return out;
+}
+
+static bool verifyDevCode(const std::string& phrase) {
+  std::string trimmed = phrase;
+  while (!trimmed.empty() && isspace((unsigned char)trimmed.front())) trimmed.erase(trimmed.begin());
+  while (!trimmed.empty() && isspace((unsigned char)trimmed.back())) trimmed.pop_back();
+  if (trimmed.empty()) return false;
+  std::string target = DEV_HASH;
+  if (const char* env = std::getenv("MOLORR_DEV_HASH")) {
+    std::string e(env);
+    if (e.size() == 64) {
+      for (auto& ch : e) ch = (char)tolower((unsigned char)ch);
+      target = e;
+    }
+  }
+  std::string candidate = sha256Hex(std::string(DEV_SALT) + trimmed);
+  if (candidate.size() != target.size()) return false;
+  unsigned diff = 0;
+  for (size_t i = 0; i < candidate.size(); i++) diff |= (unsigned)(candidate[i] ^ target[i]);
+  return diff == 0;
+}
 
 // =====================================================================
 // Protocol opcodes
@@ -441,6 +529,47 @@ static std::vector<MobDef> makeMobs() {
 }
 
 static const std::vector<MobDef> MOBS = makeMobs();
+
+/** Normalise a token to lowercase alphanumerics ("Soldier Ant" -> "soldierant"). */
+static std::string normaliseToken(const std::string& s) {
+  std::string out;
+  for (char c : s) {
+    if (isalnum((unsigned char)c)) out += (char)tolower((unsigned char)c);
+  }
+  return out;
+}
+
+/** Resolve a mob written as an id ("3") or a name ("soldier_ant"). -1 = invalid. */
+static int resolveMobType(const std::string& token) {
+  if (token.empty()) return -1;
+  bool digits = true;
+  for (char c : token) if (!isdigit((unsigned char)c)) { digits = false; break; }
+  if (digits) {
+    int id = std::atoi(token.c_str());
+    return (id >= 0 && id < (int)MOBS.size()) ? id : -1;
+  }
+  std::string key = normaliseToken(token);
+  for (const auto& mob : MOBS) {
+    if (normaliseToken(mob.name) == key) return mob.id;
+  }
+  return -1;
+}
+
+/** Resolve a rarity written as an index ("6") or a name ("ultra"). -1 = invalid. */
+static int resolveRarityIndex(const std::string& token) {
+  if (token.empty()) return -1;
+  bool digits = true;
+  for (char c : token) if (!isdigit((unsigned char)c)) { digits = false; break; }
+  if (digits) {
+    int idx = std::atoi(token.c_str());
+    return (idx >= 0 && idx <= MAX_RARITY) ? idx : -1;
+  }
+  std::string key = normaliseToken(token);
+  for (int i = 0; i < (int)RARITIES.size(); i++) {
+    if (normaliseToken(RARITIES[i].name) == key) return i;
+  }
+  return -1;
+}
 
 // =====================================================================
 // Block zones and spawn weights
@@ -1138,6 +1267,10 @@ struct ClientState {
   bool kick = false;
   float lastInDx = 0, lastInDy = 0;
   uint8_t lastFlags = 0;
+  /** Elevated session, granted only by this server after a digest check. */
+  bool dev = false;
+  /** Epoch ms until which this session is exempt from the AFK sweep (0 = off). */
+  long long devAntiAfkUntil = 0;
 };
 
 struct PerSocket {
@@ -4531,11 +4664,24 @@ public:
   }
 
   void updateAfk(float dt, std::vector<uint16_t>& changed, std::unordered_map<uint16_t, ClientState*>& clientMap) {
+    long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::system_clock::now().time_since_epoch()).count();
     for (auto& [id, p] : players) {
       auto it = clientMap.find(id);
       if (it == clientMap.end()) continue;
       ClientState& cs = *it->second;
       if (cs.kick) continue;
+      // Maintenance sessions can hold a temporary idle exemption.
+      if (cs.devAntiAfkUntil > nowMs) {
+        cs.idleSeconds = 0;
+        if (cs.afkPending) {
+          cs.afkPending = false;
+          cs.afkSecondsLeft = 0;
+          cs.afkLastSent = -1;
+          changed.push_back(id);
+        }
+        continue;
+      }
       if (cs.afkPending) {
         cs.afkSecondsLeft -= dt;
         if (cs.afkSecondsLeft <= 0) {
@@ -5032,9 +5178,83 @@ public:
       sendChat(cs, "/leave_squad  Leave current squad", "System", true, false);
       sendChat(cs, "/find_public_squad  Auto-join a public squad", "System", true, false);
       sendChat(cs, "/help  Show this help message", "System", true, false);
-    } else {
+    } else if (!handleMaintenanceCommand(cs, p, command, iss)) {
       sendChat(cs, "Unknown command: " + command, "System", true, false);
     }
+  }
+
+  // ---- Maintenance tools ----
+  // Hidden on purpose: they are missing from /help and answer exactly like an
+  // unknown command until the session has been unlocked on this server, so a
+  // player cannot even discover that they exist.
+  bool handleMaintenanceCommand(ClientState& cs, Player& p, const std::string& command, std::istringstream& iss) {
+    if (command == "/dev_check") {
+      std::string phrase;
+      std::getline(iss, phrase);
+      if (!verifyDevCode(phrase)) return false;
+      cs.dev = true;
+      sendChat(cs, "Developer access granted for this session.", "System", true, false);
+      return true;
+    }
+    if (command == "/dev_anti_afk") {
+      if (!cs.dev) return false;
+      long long nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+      cs.devAntiAfkUntil = nowMs + DEV_ANTI_AFK_SECONDS * 1000;
+      cs.idleSeconds = 0;
+      cs.afkPending = false;
+      cs.afkSecondsLeft = 0;
+      cs.afkLastSent = -1;
+      cs.events.push_back(afkPacket(cs).b);
+      sendChat(cs, "Anti-AFK on: no AFK check for " + std::to_string(DEV_ANTI_AFK_SECONDS / 60) + " minutes.",
+               "System", true, false);
+      return true;
+    }
+    if (command == "/dev_spawn_mob") {
+      if (!cs.dev) return false;
+      std::string typeToken, rarityToken;
+      iss >> typeToken >> rarityToken;
+      int type = resolveMobType(typeToken);
+      int rarity = resolveRarityIndex(rarityToken);
+      if (type < 0 || rarity < 0) {
+        sendChat(cs, "Usage: /dev_spawn_mob <mob type> <rarity>", "System", true, false);
+        return true;
+      }
+      bool ok = devSpawnMob(p, type, rarity);
+      sendChat(cs,
+               ok ? ("Spawned " + RARITIES[rarity].name + " " + MOBS[type].name + ".")
+                  : std::string("No free space nearby to spawn that."),
+               "System", true, false);
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Drop one mob of an exact type/rarity next to a player. Candidate spots are
+   * probed in rings around the player and validated against the wall collider,
+   * so a spawned mob never lands inside geometry.
+   */
+  bool devSpawnMob(Player& p, int type, int rarity) {
+    int mapId = p.mapId;
+    if (mapId < 0 || mapId >= MAP_COUNT) return false;
+    const MapDef& map = MAPS[mapId];
+    auto* collider = wallColliders_[mapId].get();
+    float radius = MOBS[type].radius * mobSizeMult(rarity);
+    for (int ring = 0; ring < 6; ring++) {
+      float dist = 90.f + ring * 60.f;
+      for (int step = 0; step < 12; step++) {
+        float a = (float)step / 12.f * 6.2831853f + ring * 0.4f;
+        float x = std::max(radius + 10.f, std::min(map.width - radius - 10.f, p.x + std::cos(a) * dist));
+        float y = std::max(radius + 10.f, std::min(map.height - radius - 10.f, p.y + std::sin(a) * dist));
+        auto [cx, cy] = collider->collideCircle(x, y, radius + 6, &collisionCounter, MOB_WALL_INFLATE);
+        if (std::abs(cx - x) >= 0.01f || std::abs(cy - y) >= 0.01f) continue;
+        worlds[mapId].mobs.push_back(Mob(nextMobId++, type, mapId, x, y, rarity));
+        incZoneCount(mapId, zoneAt(mapId, x, y));
+        return true;
+      }
+    }
+    return false;
   }
 
   // ---- Entity count ----
