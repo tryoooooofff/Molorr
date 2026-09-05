@@ -8358,8 +8358,12 @@ private wallPolygonsCache: Map<string, { x: number; y: number }[][]> = new Map()
     if (this.scene === "game") {
       const me = this.ents.get(this.selfId);
       if (me) {
-        this.camX += (me.x - this.camX) * Math.min(1, dt * 7);
-        this.camY += (me.y - this.camY) * Math.min(1, dt * 7);
+        // Hard-lock the camera to the rendered player position every frame.
+        // The old exponential follow (`dt * 7`) lagged behind at high speed,
+        // so the flower sat ahead of the screen center and stepped forward
+        // with each 20 Hz snapshot. Snapping keeps the player exactly centered.
+        this.camX = me.x;
+        this.camY = me.y;
       }
       this.inputTimer -= dt;
       if (this.inputTimer <= 0) {
@@ -12976,6 +12980,15 @@ private bagLayout() {
     // The bonus is subtracted from zoom, clamped to a minimum of 0.35.
     const antBonus = antennaeViewBonus(this.slots);
     this.viewZoom = Math.max(0.35, zoom - antBonus);
+
+    // Center-lock: the local flower must render at exactly the screen center
+    // every frame, regardless of speed. Re-snapping here (in addition to the
+    // update() snap) guarantees the invariant at draw time.
+    const selfEnt = this.ents.get(this.selfId);
+    if (selfEnt) {
+      this.camX = selfEnt.x;
+      this.camY = selfEnt.y;
+    }
 
     const isArena = this.arenaPanel.state === 'in-game';
 
