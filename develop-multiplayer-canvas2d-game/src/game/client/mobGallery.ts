@@ -455,58 +455,143 @@ export class MobGallery {
     if (!mob || !rarity) return;
 
     const drops = mob.drops.map((drop) => ITEMS[drop.item]).filter((item): item is NonNullable<typeof item> => !!item);
-    const width = Math.min(272, viewW - 16);
-    const height = 134 + drops.length * 30;
-    let x = this.mouseX - width - 16;
-    let y = this.mouseY + 16;
-    if (x < 8) x = Math.min(viewW - width - 8, this.mouseX + 16);
+
+    // --- 1. layout params (compact) — ported reference style ---
+    const itemSize = 40;
+    const padding = 12;
+    const itemGap = 8;
+    const columnGap = 18; // gap between drop-type columns
+    const rowsPerColumn = 3; // cap: each column shows at most 3 drop types
+
+    const headerHeight = 70;
+    const statsHeight = 65;
+    const dropRowHeight = 78;
+
+    const columnCount = Math.max(1, Math.ceil(drops.length / rowsPerColumn));
+    const columnContentWidth = itemSize * 3 + itemGap * 2; // 3 rarity squares per drop type
+
+    let width = padding * 2 + columnCount * columnContentWidth + (columnCount - 1) * columnGap + 8;
+    width = Math.min(width, viewW - 16);
+
+    const rowsInTallestColumn = Math.min(drops.length, rowsPerColumn);
+    const height = headerHeight + statsHeight + rowsInTallestColumn * dropRowHeight + 12;
+
+    // --- 2. position to the lower-left of the cursor, clamped to screen ---
+    const cursorGap = 16;
+    let x = this.mouseX - width - cursorGap;
+    let y = this.mouseY + cursorGap;
+    if (x < 8) x = Math.min(viewW - width - 8, this.mouseX + cursorGap);
     if (y + height > viewH - 8) y = viewH - height - 8;
-    y = Math.max(8, y);
+    if (y < 8) y = 8;
+
+    // Top-3 card rarities a defeat of this tier can roll (same roll for every
+    // drop of the mob — the per-item `chance` only biases the roll).
+    const chances = dropRarityChancesForMob(cell.rarity).slice(0, 3);
 
     ctx.save();
-    roundRect(ctx, x, y, width, height, 10);
-    ctx.fillStyle = "rgba(15,15,25,0.93)";
+
+    // --- 3. background & glow border ---
+    roundRect(ctx, x, y, width, height, 12);
+    ctx.fillStyle = "rgba(15,15,25,0.8)";
     ctx.fill();
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = rarity.border;
+
+    const mobColor = this.rgbComponents(rarity.color);
+    ctx.strokeStyle = `rgba(${mobColor[0]}, ${mobColor[1]}, ${mobColor[2]}, 0.5)`;
+    ctx.lineWidth = 8;
     ctx.stroke();
 
-    this.strokedText(ctx, `${rarity.name} ${mob.name}`, x + 12, y + 17, 15, rarity.color, "#000", 3, "left");
-    const kills = this.killCount(cell.mobId, cell.rarity);
-    this.strokedText(ctx, `Defeated: ${this.formatCount(kills)}`, x + width - 12, y + 17, 11, "#fff", "#000", 2, "right");
+    // --- 4. name & stats ---
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.font = `bold 13px ${FONT_FAMILY}`;
+    ctx.fillStyle = rarity.color;
+    ctx.fillText(`${rarity.name} ${mob.name}`, x + padding, y + padding);
 
+    const kills = this.killCount(cell.mobId, cell.rarity);
+    ctx.font = `bold 11px ${FONT_FAMILY}`;
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "right";
+    ctx.fillText(`Defeated: ${this.formatCount(kills)}`, x + width - padding, y + padding);
+    ctx.textAlign = "left";
+
+    const sy = y + headerHeight;
     const health = Math.floor(mob.health * enemyRarityMult(cell.rarity));
     const damage = Math.floor(mob.damage * enemyDamageMult(cell.rarity));
-    this.tooltipStat(ctx, "Health", this.formatValue(health), "#ff7777", x + 12, y + 42, width - 24);
-    this.tooltipStat(ctx, "Damage", this.formatValue(damage), "#6baeff", x + 12, y + 61, width - 24);
-    this.tooltipStat(ctx, "Speed", this.formatValue(mob.speed), "#ffd16b", x + 12, y + 80, width - 24);
+    this.tooltipStat(ctx, "Health", this.formatValue(health), "#ff5e5e", x + padding, sy + 2, width - padding * 2);
+    this.tooltipStat(ctx, "Damage", this.formatValue(damage), "#54a0ff", x + padding, sy + 22, width - padding * 2);
+    this.tooltipStat(ctx, "Speed", this.formatValue(mob.speed), "#ff9f43", x + padding, sy + 42, width - padding * 2);
 
-    const chanceText = dropRarityChancesForMob(cell.rarity)
-      .slice(0, 3)
-      .map(({ rarity: dropRarity, chance }) => `${dropRarity} ${(chance * 100).toFixed(chance * 100 < 1 ? 2 : 0)}%`)
-      .join("  ·  ");
-    this.strokedText(ctx, "Drops on every defeat", x + 12, y + 104, 11, "#d6d6d6", "#000", 2, "left");
-    this.strokedText(ctx, chanceText, x + 12, y + 119, 9, "#c6d8ff", "#000", 2, "left");
+    // --- 5. drops, wrapped into columns of 3 drop-types each ---
+    const dropsBaseY = sy + statsHeight;
+    const columnStride = columnContentWidth + columnGap;
 
-    drops.forEach((item, index) => {
-      const rowY = y + 137 + index * 30;
-      ctx.save();
-      roundRect(ctx, x + 12, rowY - 11, 22, 22, 4);
-      ctx.fillStyle = "#526b50";
-      ctx.fill();
-      ctx.lineWidth = 1;
-      ctx.strokeStyle = "#8db48c";
-      ctx.stroke();
-      drawItemIcon(ctx, item.id, x + 23, rowY, 10, 0, 0);
-      ctx.restore();
-      this.strokedText(ctx, item.name, x + 42, rowY, 11, "#fff", "#000", 2, "left");
+    drops.forEach((item, dropIndex) => {
+      const col = Math.floor(dropIndex / rowsPerColumn);
+      const row = dropIndex % rowsPerColumn;
+      const columnX = x + padding + col * columnStride;
+      const dy = dropsBaseY + row * dropRowHeight;
+      let currentX = columnX;
+
+      for (const { rarity: dropRarityName, chance } of chances) {
+        const dropRarity = RARITIES.find((r) => r.name === dropRarityName);
+        if (!dropRarity) continue;
+        const rarityColor = this.rgbComponents(dropRarity.color);
+        const darkBg = rarityColor.map((c) => Math.max(0, c - 80));
+
+        // rarity-tinted square: dark fill + rarity-colored border
+        ctx.fillStyle = `rgb(${darkBg[0]}, ${darkBg[1]}, ${darkBg[2]})`;
+        ctx.fillRect(currentX, dy, itemSize, itemSize);
+        ctx.strokeStyle = `rgb(${rarityColor[0]}, ${rarityColor[1]}, ${rarityColor[2]})`;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(currentX, dy, itemSize, itemSize);
+
+        // item artwork, nudged up so the name fits underneath it
+        const dropRarityIndex = RARITIES.indexOf(dropRarity);
+        drawItemIcon(ctx, item.id, currentX + itemSize / 2, dy + itemSize / 2 - 4, 14, 0, dropRarityIndex);
+
+        // item name inside the bottom of the square
+        ctx.save();
+        const fontSize = item.name.length > 8 ? 7 : 8;
+        ctx.font = `${fontSize}px ${FONT_FAMILY}`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "bottom";
+        ctx.strokeStyle = "black";
+        ctx.lineWidth = 2;
+        ctx.strokeText(this.truncate(ctx, item.name, itemSize - 4), currentX + itemSize / 2, dy + itemSize - 2);
+        ctx.fillStyle = "white";
+        ctx.fillText(this.truncate(ctx, item.name, itemSize - 4), currentX + itemSize / 2, dy + itemSize - 2);
+        ctx.restore();
+
+        // drop chance under the square, in the rarity's color
+        ctx.save();
+        ctx.font = `bold 10px ${FONT_FAMILY}`;
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        const chanceText = `${(chance * 100).toFixed(chance * 100 < 1 ? 2 : 0)}%`;
+        ctx.strokeStyle = "black";
+        ctx.lineWidth = 2;
+        ctx.strokeText(chanceText, currentX + itemSize / 2, dy + itemSize + 4);
+        ctx.fillStyle = `rgb(${rarityColor[0]}, ${rarityColor[1]}, ${rarityColor[2]})`;
+        ctx.fillText(chanceText, currentX + itemSize / 2, dy + itemSize + 4);
+        ctx.restore();
+
+        currentX += itemSize + itemGap;
+      }
     });
+
     ctx.restore();
   }
 
+  /** Parses an "rgb(r, g, b)" color string into its components. */
+  private rgbComponents(color: string): [number, number, number] {
+    const match = color.match(/(\d+)\D+(\d+)\D+(\d+)/);
+    if (!match) return [255, 255, 255];
+    return [Number(match[1]), Number(match[2]), Number(match[3])];
+  }
+
   private tooltipStat(ctx: CanvasRenderingContext2D, label: string, value: string, color: string, x: number, y: number, width: number) {
-    this.strokedText(ctx, label, x, y, 12, color, "#000", 2, "left");
-    this.strokedText(ctx, value, x + width, y, 12, "#fff", "#000", 2, "right");
+    this.strokedText(ctx, label, x, y, 13, color, "#000", 2, "left");
+    this.strokedText(ctx, value, x + width, y, 13, "#fff", "#000", 2, "right");
   }
 
   private strokedText(

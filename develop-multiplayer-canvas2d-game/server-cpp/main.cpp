@@ -70,6 +70,9 @@ constexpr int YGGDRASIL_ITEM = 53;
 constexpr int SHINY_LADYBUG_TYPE = 18;
 // The Moon petal is drawn — and collides — at 4x its nominal item radius.
 constexpr float MOON_RADIUS_MULT = 4.f;
+// Extra clearance (px) added to the orbit of petals circling the Moon, so
+// their ring reaches further out and they touch mobs more easily.
+constexpr float MOON_ORBIT_GAP = 20.f;
 constexpr float YGGDRASIL_REVIVE_RANGE = 80.f;
 constexpr float ROSE_HEAL_DELAY = 1.0f;
 constexpr float ROSE_ABSORB_TIME = 0.4f;
@@ -78,7 +81,7 @@ constexpr float MOB_WALL_INFLATE = 10.f;
 constexpr float PUSH_OUT_THRESHOLD = 6.f;
 constexpr float MOB_COLLISION_SLOW_INTERVAL = 0.1f;
 constexpr float MOB_COLLISION_FAST_INTERVAL = 1.f / 60.f;
-constexpr float MOB_COLLISION_SLOW_SPEED = 30.f;
+constexpr float MOB_COLLISION_SLOW_SPEED = 60.f; // was 30; raised with the 2x MOBS speed increase
 constexpr int MOB_COLLISION_OVERLOAD_THRESHOLD = 10000;
 constexpr int MOB_COLLISION_OVERLOAD_SKIP = 4;
 constexpr float MOB_THINK_INTERVAL = 0.2f;
@@ -502,29 +505,31 @@ struct MobDef {
   std::vector<int> spawnMobIds;
 };
 
+// NOTE: all speeds below are 2x the original design values (global mob speed
+// increase) — do not apply an extra multiplier on top.
 static std::vector<MobDef> makeMobs() {
   std::vector<MobDef> mobs;
-  mobs.push_back({0, "Ladybug", 22, 100, 10, 42, 10, {{30,0.7f},{31,0.7f},{8,0.07f}}, false, {}, {}});
-  mobs.push_back({1, "Bee", 18, 50, 50, 62, 14, {{2,0.7f},{18,0.7f},{19,0.7f},{20,0.06f}}, false, {}, {}});
+  mobs.push_back({0, "Ladybug", 22, 100, 10, 84, 10, {{30,0.7f},{31,0.7f},{8,0.07f}}, false, {}, {}});
+  mobs.push_back({1, "Bee", 18, 50, 50, 124, 14, {{2,0.7f},{18,0.7f},{19,0.7f},{20,0.06f}}, false, {}, {}});
   mobs.push_back({2, "Rock", 26, 300, 30, 0, 12, {{15,0.32f},{3,0.7f},{16,0.7f},{17,0.005f}}, false, {}, {}});
-  mobs.push_back({3, "Soldier Ant", 17, 100, 15, 60, 9, {{7,0.7f},{11,0.7f},{12,0.07f}}, false, {}, {}});
+  mobs.push_back({3, "Soldier Ant", 17, 100, 15, 120, 9, {{7,0.7f},{11,0.7f},{12,0.07f}}, false, {}, {}});
   mobs.push_back({4, "Cactus", 25, 120, 70, 0, 18, {{41,0.7f},{42,0.07f}}, false, {}, {}});
-  mobs.push_back({5, "Scorpion", 21, 100, 15, 70, 24, {{36,0.7f},{37,0.28f},{35,0.7f}}, false, {}, {}});
-  mobs.push_back({6, "Beetle", 23, 100, 24, 48, 20, {{33,0.7f},{35,0.7f},{36,0.7f}}, false, {}, {}});
-  mobs.push_back({7, "Jellyfish", 22, 78, 28, 38, 20, {{24,0.7f},{25,0.7f},{26,0.07f}}, false, {}, {}});
-  mobs.push_back({8, "Crab", 24, 120, 32, 44, 26, {{27,0.7f},{28,0.7f},{29,0.07f},{4,0.7f}}, false, {}, {}});
-  mobs.push_back({9, "Starfish", 20, 95, 18, 36, 18, {{21,0.7f},{22,0.7f},{4,0.7f},{23,0.07f}}, false, {}, {}});
-  mobs.push_back({10, "Worker Ant", 14, 50, 10, 68, 6, {{1,0.7f},{13,0.7f},{14,0.07f}}, false, {}, {}});
-  mobs.push_back({11, "Sandstorm", 28, 150, 22, 24, 22, {{9,0.18f},{4,0.7f},{32,0.7f}}, false, {}, {}});
-  mobs.push_back({12, "Shell", 22, 100, 14, 18, 16, {{38,0.7f},{39,0.7f},{6,0.7f},{40,0.07f}}, false, {}, {}});
+  mobs.push_back({5, "Scorpion", 21, 100, 15, 140, 24, {{36,0.7f},{37,0.28f},{35,0.7f}}, false, {}, {}});
+  mobs.push_back({6, "Beetle", 23, 100, 24, 96, 20, {{33,0.7f},{35,0.7f},{36,0.7f}}, false, {}, {}});
+  mobs.push_back({7, "Jellyfish", 22, 78, 28, 76, 20, {{24,0.7f},{25,0.7f},{26,0.07f}}, false, {}, {}});
+  mobs.push_back({8, "Crab", 24, 120, 32, 88, 26, {{27,0.7f},{28,0.7f},{29,0.07f},{4,0.7f}}, false, {}, {}});
+  mobs.push_back({9, "Starfish", 20, 95, 18, 72, 18, {{21,0.7f},{22,0.7f},{4,0.7f},{23,0.07f}}, false, {}, {}});
+  mobs.push_back({10, "Worker Ant", 14, 50, 10, 136, 6, {{1,0.7f},{13,0.7f},{14,0.07f}}, false, {}, {}});
+  mobs.push_back({11, "Sandstorm", 28, 150, 22, 48, 22, {{9,0.18f},{4,0.7f},{32,0.7f}}, false, {}, {}});
+  mobs.push_back({12, "Shell", 22, 100, 14, 36, 16, {{38,0.7f},{39,0.7f},{6,0.7f},{40,0.07f}}, false, {}, {}});
   mobs.push_back({13, "Ant Hole", 30, 650, 8, 0, 60, {{44,0.55f},{47,0.55f},{31,0.05f},{39,0.04f}}, true, {0.85f,0.60f,0.35f,0.10f}, {10,3}});
   mobs.push_back({14, "Crab Cave", 30, 350, 20, 0, 35, {{27,0.55f},{28,0.55f},{29,0.05f},{4,0.55f},{5,0.25f}}, true, {0.85f,0.60f,0.35f,0.10f}, {8,8}});
   mobs.push_back({15, "Hive", 28, 600, 60, 0, 28, {{2,0.55f},{18,0.55f},{19,0.55f},{20,0.05f}}, true, {0.85f,0.60f,0.35f,0.10f}, {1,1}});
-  mobs.push_back({16, "Hornet", 16, 80, 22, 50, 18, {{43,0.7f},{46,0.7f},{49,0.7f},{52,0.5f}}, false, {}, {}});
-  mobs.push_back({17, "Spider", 18, 80, 22, 50, 18, {{51,0.7f},{45,0.7f},{50,0.7f},{48,0.01f}}, false, {}, {}});
+  mobs.push_back({16, "Hornet", 16, 80, 22, 100, 18, {{43,0.7f},{46,0.7f},{49,0.7f},{52,0.5f}}, false, {}, {}});
+  mobs.push_back({17, "Spider", 18, 80, 22, 100, 18, {{51,0.7f},{45,0.7f},{50,0.7f},{48,0.01f}}, false, {}, {}});
   // Shiny Ladybug — very rare desert Ladybug variant, a bit tougher and
   // harder-hitting. Drops Rose + Yggdrasil + Shiny Ladybug Egg.
-  mobs.push_back({SHINY_LADYBUG_TYPE, "Shiny Ladybug", 22, 130, 14, 42, 40, {{30,0.7f},{53,0.5f},{54,0.2f}}, false, {}, {}});
+  mobs.push_back({SHINY_LADYBUG_TYPE, "Shiny Ladybug", 22, 130, 14, 84, 40, {{30,0.7f},{53,0.5f},{54,0.2f}}, false, {}, {}});
   return mobs;
 }
 
@@ -3745,7 +3750,9 @@ public:
       if (orbitsAsPetal(ITEMS[cell.item].kind)) liveCount++;
     }
 
-    // Moon orbit center
+    // Moon orbit center. Petals circling the Moon also get MOON_ORBIT_GAP
+    // of extra clearance from it, so the ring reaches further out and the
+    // petals touch mobs more easily.
     PetalState* moonSt = nullptr;
     for (int i = 0; i < SLOT_COUNT; i++) {
       Cell& cell = p.slots[i];
@@ -3776,8 +3783,10 @@ public:
       // Pre-calculate orbit parameters (needed for both revival and movement)
       bool absorbs = isAbsorbItem(cell.item) && (def.heal > 0 || def.shield > 0);
       bool staysTight = isSummon || def.name == "Magnet" || def.name == "Bubble";
-      float orbitRadius = (absorbs || staysTight) ? std::min(p.orbit, 62.f) : p.orbit;
+      float baseOrbit = (absorbs || staysTight) ? std::min(p.orbit, 62.f) : p.orbit;
       bool isMoon = (def.name == "Moon");
+      // Widen the ring around the Moon so orbiting petals reach mobs easier.
+      float orbitRadius = baseOrbit + (moonAlive && !isMoon ? MOON_ORBIT_GAP : 0.f);
       float cx = isMoon ? p.x : orbitCenterX;
       float cy = isMoon ? p.y : orbitCenterY;
       float tx = cx + std::cos(slotAngle) * orbitRadius;
@@ -3923,14 +3932,17 @@ public:
       }
 
       // Petal-to-mob collision damage - optimized but visually identical
-      // Pre-filter by player->mob distance <= orbit + mob.radius + pr + 50
+      // Pre-filter by orbit-center->mob distance <= orbitRadius + mob.radius + pr + 50.
+      // The orbit center is the Moon's position when the Moon is alive (petals
+      // orbit the Moon, not the player), so filtering against the player would
+      // skip mobs near far-side petals.
       if (st.hitCd <= 0 && !isSummon) {
         float pr = def.radius * (1 + cell.rarity * 0.06f) * (isMoon ? MOON_RADIUS_MULT : 1.f);
         for (auto& mob : world.mobs) {
           if (mob.friendly && mob.ownerId == p.id) continue;
           if (mob.hp <= 0) continue;
-          float mdx = mob.x - p.x, mdy = mob.y - p.y;
-          float preFilterDist = p.orbit + mob.radius + pr + 50.f;
+          float mdx = mob.x - cx, mdy = mob.y - cy;
+          float preFilterDist = orbitRadius + mob.radius + pr + 50.f;
           if (mdx * mdx + mdy * mdy > preFilterDist * preFilterDist) continue;
           collisionCounter.n++;
           float dx = mob.x - st.x, dy = mob.y - st.y;
