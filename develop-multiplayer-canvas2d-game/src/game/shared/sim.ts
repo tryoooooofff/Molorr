@@ -66,6 +66,7 @@ import {
   pickWeightedMob,
   isMoonItem,
   petalHitRadius,
+  MOON_ORBIT_GAP,
 } from "./defs";
 import { C2S, ENT, EVT, LOADOUT_OP, Reader, S2C, SWAP_ROW_ALL, TALENT_KEYS, TALENT_MAX_LEVELS, TEAM, Writer } from "./protocol";
 import { buildWallPolygons, wallMaxJitterPx as computeWallMaxJitter } from "./wallGeometry";
@@ -1116,8 +1117,9 @@ const SCORPION_MISSILE_SPEED = 260;
  */
 const MOB_COLLISION_SLOW_INTERVAL = 0.1;   // 慢速生物：10Hz
 const MOB_COLLISION_FAST_INTERVAL = 1 / 60; // 快速生物：约 60Hz（每帧）
-/** 速度阈值（像素/秒），低于此值视为"慢速"或"无速度"生物。 */
-const MOB_COLLISION_SLOW_SPEED = 30;
+/** 速度阈值（像素/秒），低于此值视为"慢速"或"无速度"生物。
+ *  原为 30；MOBS 表速度整体翻倍后同步提高到 60，保持慢/快分类不变。 */
+const MOB_COLLISION_SLOW_SPEED = 60;
 
 /**
  * 全局碰撞压力阈值：当某一帧的累计碰撞检测次数超过该值时，
@@ -3895,6 +3897,9 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
     // The Moon itself still orbits the player. We snapshot the Moon's
     // current position here (1-frame lag, imperceptible) so the order
     // in which petals are processed does not matter.
+    // Petals circling the Moon also get MOON_ORBIT_GAP of extra
+    // clearance from it, so the ring reaches further out and the
+    // petals touch mobs more easily.
     // -----------------------------------------------------------------
     let moonSt: PetalState | null = null;
     for (let i = 0; i < SLOT_COUNT; i++) {
@@ -3926,8 +3931,10 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
       // Pre-calculate orbit parameters (needed for both revival and movement)
       const absorbs = isAbsorbItem(cell.item) && (!!def.heal || !!def.shield);
       const staysTight = isSummon || (def.name ?? "").toLowerCase().includes("magnet") || (def.name ?? "").toLowerCase().includes("bubble");
-      const orbitRadius = (absorbs || staysTight) ? Math.min(p.orbit, 62) : p.orbit;
+      const baseOrbit = (absorbs || staysTight) ? Math.min(p.orbit, 62) : p.orbit;
       const isMoon = isMoonItem(cell.item);
+      // Widen the ring around the Moon so orbiting petals reach mobs easier.
+      const orbitRadius = baseOrbit + (moonAlive && !isMoon ? MOON_ORBIT_GAP : 0);
       const cx = isMoon ? p.x : orbitCenterX;
       const cy = isMoon ? p.y : orbitCenterY;
       const tx = cx + Math.cos(slotAngle) * orbitRadius;
@@ -4033,15 +4040,18 @@ private spawnMob(mapId: number, zoneHint = "", x?: number, y?: number) {
 
       // ---- 花瓣-生物碰撞伤害 ----
       // Optimized but visually identical: only mobs within petal reach can collide.
-      // Max possible distance player->mob for collision = p.orbit + mob.radius + pr + buffer.
+      // Max possible distance orbit-center->mob for collision = orbitRadius +
+      // mob.radius + pr + buffer. The orbit center is the Moon's position when
+      // the Moon is alive (petals orbit the Moon, not the player), so filtering
+      // against the player would skip mobs near far-side petals.
       // This filters 90% of mobs when they are far, but never skips a colliding pair.
       if (st.hitCd <= 0 && !isSummon) {
         const pr = petalHitRadius(cell.item, cell.rarity);
         for (const mob of world.mobs) {
           if (mob.friendly && mob.ownerId === p.id) continue;
           if (mob.hp <= 0) continue;
-          const mdx = mob.x - p.x, mdy = mob.y - p.y;
-          const preFilterDist = p.orbit + mob.radius + pr + 50;
+          const mdx = mob.x - cx, mdy = mob.y - cy;
+          const preFilterDist = orbitRadius + mob.radius + pr + 50;
           if (mdx * mdx + mdy * mdy > preFilterDist * preFilterDist) continue;
           this.collisionCounter.n++;
           const dx = mob.x - st.x, dy = mob.y - st.y;

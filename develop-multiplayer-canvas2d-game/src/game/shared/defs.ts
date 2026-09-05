@@ -451,25 +451,27 @@ export interface MobDef {
   spawner?: SpawnerDef;
 }
 
+// NOTE: all speeds below are 2x the original design values (global mob speed
+// increase) — do not apply an extra multiplier on top.
 export const MOBS: MobDef[] = [
-  { id: 0, name: "Ladybug", color: "#eb4034", outline: "#a82a20", shape: "bug", radius: 22, health: 100, damage: 10, speed: 42, xp: 10, drops: [{ item: 30, chance: 0.7 }, { item: 31, chance: 0.7 }, { item: 8, chance: 0.07 }] },
-  { id: 1, name: "Bee", color: "#f5d442", outline: "#c2a41e", shape: "wasp", radius: 18, health: 50, damage: 50, speed: 62, xp: 14, drops: [{ item: 2, chance: 0.7 }, { item: 18, chance: 0.7 }, { item: 19, chance: 0.7 }, { item: 20, chance: 0.06 }] },
+  { id: 0, name: "Ladybug", color: "#eb4034", outline: "#a82a20", shape: "bug", radius: 22, health: 100, damage: 10, speed: 84, xp: 10, drops: [{ item: 30, chance: 0.7 }, { item: 31, chance: 0.7 }, { item: 8, chance: 0.07 }] },
+  { id: 1, name: "Bee", color: "#f5d442", outline: "#c2a41e", shape: "wasp", radius: 18, health: 50, damage: 50, speed: 124, xp: 14, drops: [{ item: 2, chance: 0.7 }, { item: 18, chance: 0.7 }, { item: 19, chance: 0.7 }, { item: 20, chance: 0.06 }] },
   { id: 2, name: "Rock", color: "#8d8d8d", outline: "#5f5f5f", shape: "rock", radius: 26, health: 300, damage: 30, speed: 0, xp: 12, drops: [{ item: 15, chance: 0.32 }, { item: 3, chance: 0.7 }, { item: 16, chance: 0.7 }, { item: 17, chance: 0.005 }] },
   // The old generic "Ant" was replaced with Soldier Ant; Worker Ant is a
   // brand new mob added to the Garden biome (id 10 below).
-  { id: 3, name: "Soldier Ant", color: "#5b452c", outline: "#3a2b19", shape: "ant", radius: 17, health: 100, damage: 15, speed: 60, xp: 9, drops: [{ item: 7, chance: 0.7 }, { item: 11, chance: 0.7 }, { item: 12, chance: 0.07 }] },
+  { id: 3, name: "Soldier Ant", color: "#5b452c", outline: "#3a2b19", shape: "ant", radius: 17, health: 100, damage: 15, speed: 120, xp: 9, drops: [{ item: 7, chance: 0.7 }, { item: 11, chance: 0.7 }, { item: 12, chance: 0.07 }] },
   { id: 4, name: "Cactus", color: "#4caf50", outline: "#357a38", shape: "cactus", radius: 25, health: 120, damage: 70, speed: 0, xp: 18, drops: [{ item: 41, chance: 0.7 }, { item: 42, chance: 0.07 }] },
-  { id: 5, name: "Scorpion", color: "#c76b2a", outline: "#8c4718", shape: "crab", radius: 21, health: 100, damage: 15, speed: 70, xp: 24, drops: [{ item: 36, chance: 0.7 }, { item: 37, chance: 0.28 }, { item: 35, chance: 0.7 }] },
-  { id: 6, name: "Beetle", color: "#d1a054", outline: "#9c7532", shape: "bug", radius: 23, health: 100, damage: 24, speed: 48, xp: 20, drops: [{ item: 33, chance: 0.7 }, { item: 35, chance: 0.7 }, { item: 36, chance: 0.7 }] },
-  { id: 7, name: "Jellyfish", color: "#b06be0", outline: "#7d40a8", shape: "jelly", radius: 22, health: 78, damage: 28, speed: 38, xp: 20, drops: [{ item: 24, chance: 0.7 }, { item: 25, chance: 0.7 }, { item: 26, chance: 0.07 }] },
-  { id: 8, name: "Crab", color: "#ef7d3b", outline: "#b2541f", shape: "crab", radius: 24, health: 120, damage: 32, speed: 44, xp: 26, drops: [{ item: 27, chance: 0.7 }, { item: 28, chance: 0.7 }, { item: 29, chance: 0.07 }, { item: 4, chance: 0.7 }] },
-  { id: 9, name: "Starfish", color: "#f2799e", outline: "#bc4c72", shape: "star", radius: 20, health: 95, damage: 18, speed: 36, xp: 18, drops: [{ item: 21, chance: 0.7 }, { item: 22, chance: 0.7 }, { item: 4, chance: 0.7 }, { item: 23, chance: 0.07 }] },
-  { id: 10, name: "Worker Ant", color: "#8a6a3c", outline: "#5d4528", shape: "ant", radius: 14, health: 50, damage: 10, speed: 68, xp: 6, drops: [{ item: 1, chance: 0.7 }, { item: 13, chance: 0.7 }, { item: 14, chance: 0.07 }] },
+  { id: 5, name: "Scorpion", color: "#c76b2a", outline: "#8c4718", shape: "crab", radius: 21, health: 100, damage: 15, speed: 140, xp: 24, drops: [{ item: 36, chance: 0.7 }, { item: 37, chance: 0.28 }, { item: 35, chance: 0.7 }] },
+  { id: 6, name: "Beetle", color: "#d1a054", outline: "#9c7532", shape: "bug", radius: 23, health: 100, damage: 24, speed: 96, xp: 20, drops: [{ item: 33, chance: 0.7 }, { item: 35, chance: 0.7 }, { item: 36, chance: 0.7 }] },
+  { id: 7, name: "Jellyfish", color: "#b06be0", outline: "#7d40a8", shape: "jelly", radius: 22, health: 78, damage: 28, speed: 76, xp: 20, drops: [{ item: 24, chance: 0.7 }, { item: 25, chance: 0.7 }, { item: 26, chance: 0.07 }] },
+  { id: 8, name: "Crab", color: "#ef7d3b", outline: "#b2541f", shape: "crab", radius: 24, health: 120, damage: 32, speed: 88, xp: 26, drops: [{ item: 27, chance: 0.7 }, { item: 28, chance: 0.7 }, { item: 29, chance: 0.07 }, { item: 4, chance: 0.7 }] },
+  { id: 9, name: "Starfish", color: "#f2799e", outline: "#bc4c72", shape: "star", radius: 20, health: 95, damage: 18, speed: 72, xp: 18, drops: [{ item: 21, chance: 0.7 }, { item: 22, chance: 0.7 }, { item: 4, chance: 0.7 }, { item: 23, chance: 0.07 }] },
+  { id: 10, name: "Worker Ant", color: "#8a6a3c", outline: "#5d4528", shape: "ant", radius: 14, health: 50, damage: 10, speed: 136, xp: 6, drops: [{ item: 1, chance: 0.7 }, { item: 13, chance: 0.7 }, { item: 14, chance: 0.07 }] },
   // Sandstorm: a new desert hazard mob. It reuses the cactus "shape" placeholder
   // until the user finishes its detailed art.
-  { id: 11, name: "Sandstorm", color: "#d4b878", outline: "#8a6a3c", shape: "cactus", radius: 28, health: 150, damage: 22, speed: 24, xp: 22, drops: [{ item: 9, chance: 0.18 }, { item: 4, chance: 0.7 }, { item: 32, chance: 0.7 }] },
+  { id: 11, name: "Sandstorm", color: "#d4b878", outline: "#8a6a3c", shape: "cactus", radius: 28, health: 150, damage: 22, speed: 48, xp: 22, drops: [{ item: 9, chance: 0.18 }, { item: 4, chance: 0.7 }, { item: 32, chance: 0.7 }] },
   // Shell: a slow ocean mob that drops Shell, Magnet, Pearl, and Shell Egg.
-  { id: 12, name: "Shell", color: "#f2d96e", outline: "#c8a030", shape: "rock", radius: 22, health: 100, damage: 14, speed: 18, xp: 16, drops: [{ item: 38, chance: 0.7 }, { item: 39, chance: 0.7 }, { item: 6, chance: 0.7 }, { item: 40, chance: 0.07 }] },
+  { id: 12, name: "Shell", color: "#f2d96e", outline: "#c8a030", shape: "rock", radius: 22, health: 100, damage: 14, speed: 36, xp: 16, drops: [{ item: 38, chance: 0.7 }, { item: 39, chance: 0.7 }, { item: 6, chance: 0.7 }, { item: 40, chance: 0.07 }] },
   // Garden nest: spawns 1 Worker Ant + 1 Soldier Ant at each threshold.
   { id: 13, name: "Ant Hole", color: "#4a3520", outline: "#2e1f10", shape: "rock", radius: 30, health: 650, damage: 8, speed: 0, xp: 60,
     drops: [{ item: 44, chance: 0.55 },{ item: 47, chance: 0.55 }, { item: 31, chance: 0.05 }, { item: 39, chance: 0.04 }],
@@ -482,14 +484,14 @@ export const MOBS: MobDef[] = [
   { id: 15, name: "Hive", color: "#d4a017", outline: "#9a7010", shape: "cactus", radius: 28, health: 600, damage: 60, speed: 0, xp: 28,
     drops: [{ item: 2, chance: 0.55 }, { item: 18, chance: 0.55 }, { item: 19, chance: 0.55 }, { item: 20, chance: 0.05 }],
     spawner: spawner([0.85, 0.60, 0.35, 0.10], 1, 1) },
-  { id: 16, name: "Hornet", color: "#353535", outline: "#000000", shape: "hornet", radius: 16, health: 80, damage: 22, speed: 50, xp: 18,
+  { id: 16, name: "Hornet", color: "#353535", outline: "#000000", shape: "hornet", radius: 16, health: 80, damage: 22, speed: 100, xp: 18,
   drops: [{ item: 43, chance: 0.7 }, { item: 46, chance: 0.7 }, { item: 49, chance: 0.7 }, { item: 52, chance: 0.5 }] },
-    { id: 17, name: "Spider", color: "#353535", outline: "#000000", shape: "spider", radius: 18, health: 80, damage: 22, speed: 50, xp: 18,
+    { id: 17, name: "Spider", color: "#353535", outline: "#000000", shape: "spider", radius: 18, health: 80, damage: 22, speed: 100, xp: 18,
   drops: [{ item:51, chance: 0.7 }, { item: 45, chance: 0.7 }, { item: 50, chance: 0.7 },{ item: 48, chance: 0.01 }] },
   // Shiny Ladybug: a very rare desert variant of the Ladybug. It is a plain
   // mob spawned through the normal weighted spawn table (SPAWN_WEIGHTS[1][18]
   // = 0.07) — there is no dedicated roll for it.
-  { id: 18, name: "Shiny Ladybug", color: "#ffff00", outline: "#CCcc00", shape: "bug", radius: 22, health: 130, damage: 14, speed: 42, xp: 40,
+  { id: 18, name: "Shiny Ladybug", color: "#ffff00", outline: "#CCcc00", shape: "bug", radius: 22, health: 130, damage: 14, speed: 84, xp: 40,
   drops: [{ item: 30, chance: 0.7 }, { item: 53, chance: 0.5 }, { item: 54, chance: 0.2 }] },
 ];
 
@@ -1553,6 +1555,13 @@ export const MOON_ITEM = 17;
  * effective radius should go through {@link petalHitRadius}.
  */
 export const MOON_RADIUS_MULT = 4;
+
+/**
+ * Extra clearance (px) added to the orbit of petals that circle around the
+ * Moon. Widening the ring keeps the petals further from the Moon's disc so
+ * their reach extends outward and they touch mobs more easily.
+ */
+export const MOON_ORBIT_GAP = 20;
 
 /** True when this item id is the Moon petal. */
 export function isMoonItem(itemId: number): boolean {
